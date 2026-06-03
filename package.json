@@ -1,0 +1,38 @@
+{
+  "name": "pagecast",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Preview local HTML reports and publish durable public URLs to your own Cloudflare Pages account.",
+  "license": "MIT",
+  "keywords": [
+    "html",
+    "report",
+    "cloudflare",
+    "cloudflare-pages",
+    "publish",
+    "share",
+    "static-site",
+    "claude-code",
+    "agent-skill"
+  ],
+  "bin": {
+    "pagecast": "src/cli.js"
+  },
+  "exports": "./src/server.js",
+  "files": [
+    "src/",
+    "public/",
+    "plugin/"
+  ],
+  "scripts": {
+    "start": "node src/cli.js",
+    "build": "pnpm -C web install --frozen-lockfile --ignore-scripts && pnpm -C web run build",
+    "check": "node --check src/server.js && node --check src/cli.js && node --check src/markdown.js",
+    "test": "node --test",
+    "prepack": "npm run build && npm run check && npm test",
+    "prepublishOnly": "npm run check && npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

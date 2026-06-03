@@ -1,0 +1,25 @@
+# Runtime data + build deps
+.html-reporter/
+node_modules/
+web/node_modules/
+web/dist/
+npm-debug.log*
+coverage/
+.DS_Store
+
+# Internal agent tooling / workflow state (not part of the product)
+.agents/
+.amazonq/
+.claude/
+.codex/
+.cursor/
+.gemini/
+.opencode/
+.superplan/
+tasks/
+
+# Internal strategy + launch planning (private — must not ship to the public repo)
+docs/
+launch/
+AGENTS.md
+CLAUDE.md
