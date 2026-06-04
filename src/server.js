@@ -17,6 +17,9 @@ export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_ADMIN_PORT = 4173;
 export const DEFAULT_PUBLIC_PORT = 4174;
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+export const MAX_FOLDER_UPLOAD_BYTES = 100 * 1024 * 1024;
+export const MAX_FOLDER_UPLOAD_FILES = 1000;
+export const MAX_FOLDER_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
 export const DEFAULT_PAGES_PROJECT_NAME = "html-reporter";
 export const DEFAULT_PAGES_BRANCH = "main";
 export const DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
@@ -100,6 +103,11 @@ function isPublishableFileName(fileName) {
   return isHtmlFileName(fileName) || isMarkdownFileName(fileName);
 }
 
+function isIndexFileName(fileName) {
+  const base = path.basename(fileName).toLowerCase();
+  return base === "index.html" || base === "index.htm" || base === "index.md" || base === "index.markdown";
+}
+
 function slugifyReportName(fileName) {
   const baseName = path.basename(fileName, path.extname(fileName));
   const slug = baseName
@@ -158,6 +166,14 @@ function normalizeAccountId(value) {
   return accountId;
 }
 
+function normalizeAccountName(value) {
+  const accountName = stripAnsi(value).trim();
+  if (!accountName || isRedactedAccountName(accountName)) {
+    return "";
+  }
+  return accountName;
+}
+
 function pagesBaseUrl(projectName) {
   return `https://${projectName}.pages.dev`;
 }
@@ -177,11 +193,13 @@ function normalizeConfig(config = {}) {
     config.pages?.projectName || DEFAULT_PAGES_PROJECT_NAME
   );
   const accountId = normalizeAccountId(config.pages?.accountId || "");
+  const accountName = accountId ? normalizeAccountName(config.pages?.accountName || "") : "";
 
   return {
     pages: {
       projectName,
       accountId,
+      accountName,
       branch: DEFAULT_PAGES_BRANCH,
       baseUrl: pagesBaseUrl(projectName)
     }
@@ -246,6 +264,10 @@ function firstString(...values) {
     }
   }
   return "";
+}
+
+function isRedactedAccountName(value) {
+  return /^\(?redacted\)?$/i.test(String(value || "").trim());
 }
 
 function extractProjectCandidates(parsed) {
@@ -372,10 +394,13 @@ export function chooseWranglerPagesProject(projects, pagesConfig = {}) {
   }
 
   const preferredName = String(pagesConfig.projectName || "").toLowerCase();
+  // Only adopt a project that is actually Pagecast's (the configured name or the
+  // default). Never hijack an unrelated existing project — when there's no match,
+  // return null so the caller auto-creates a dedicated Pages project instead.
   return (
     projects.find((project) => project.name === preferredName) ||
     projects.find((project) => project.name === DEFAULT_PAGES_PROJECT_NAME) ||
-    projects[0]
+    null
   );
 }
 
@@ -668,6 +693,97 @@ export async function normalizeLocalHtmlPath(inputPath) {
   throw missingError || appError("HTML file was not found.", 404);
 }
 
+export async function normalizeLocalFolderPath(inputPath) {
+  if (typeof inputPath !== "string" || trimPastedLocalPathInput(inputPath) === "") {
+    throw appError("Provide an absolute path to a folder.", 400);
+  }
+
+  const candidates = localHtmlPathCandidates(inputPath);
+  let missingError = null;
+
+  for (const candidate of candidates) {
+    const resolvedPath = path.resolve(candidate);
+    if (!path.isAbsolute(candidate)) {
+      throw appError("Folder path must be absolute.", 400);
+    }
+    let stat;
+    try {
+      stat = await fs.stat(resolvedPath);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        missingError = appError("Folder was not found.", 404);
+        continue;
+      }
+      throw error;
+    }
+    if (!stat.isDirectory()) {
+      throw appError("Folder path must point to a directory.", 400);
+    }
+    if (path.basename(resolvedPath).startsWith(".")) {
+      throw appError("Hidden folders are not served.", 400);
+    }
+    return resolvedPath;
+  }
+
+  throw missingError || appError("Folder was not found.", 404);
+}
+
+async function findFolderEntry(rootDir, preferredEntry = "") {
+  const candidates = [
+    preferredEntry,
+    "index.html",
+    "index.htm",
+    "index.md",
+    "index.markdown"
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const normalized = normalizeAssetRequestPath(candidate);
+    if (!normalized || normalized !== candidate.split("/").join(path.sep)) {
+      continue;
+    }
+    const candidatePath = path.resolve(rootDir, normalized);
+    if (!isPathInside(rootDir, candidatePath) || !isIndexFileName(candidatePath)) {
+      continue;
+    }
+    try {
+      const stat = await fs.stat(candidatePath);
+      if (stat.isFile()) {
+        return normalized;
+      }
+    } catch {
+      // Try the next conventional entry candidate.
+    }
+  }
+
+  throw appError("Folder must contain index.html, index.htm, index.md, or index.markdown.", 400);
+}
+
+async function detectBuildOutputDir(sourceRoot, preferredOutput = "") {
+  const candidates = [preferredOutput, "dist", "build", "out", "site", "public"]
+    .filter(Boolean)
+    .map((candidate) => normalizeAssetRequestPath(candidate))
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    const outputRoot = path.resolve(sourceRoot, candidate);
+    if (!isPathInside(sourceRoot, outputRoot)) {
+      continue;
+    }
+    try {
+      const stat = await fs.stat(outputRoot);
+      if (stat.isDirectory()) {
+        const entryFile = await findFolderEntry(outputRoot);
+        return { outputRoot, outputDir: candidate, entryFile };
+      }
+    } catch {
+      // Try the next conventional output candidate.
+    }
+  }
+
+  throw appError("Build finished, but no deployable output folder was found. Set an output directory such as dist, build, out, site, or public.", 400);
+}
+
 async function normalizeLocalHtmlPathCandidate(candidatePath) {
   const expandedPath = candidatePath;
   if (!path.isAbsolute(expandedPath)) {
@@ -724,11 +840,17 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
     return structuredClone(config);
   }
 
-  async function updatePages({ projectName, accountId }) {
+  async function updatePages({ projectName, accountId, accountName } = {}) {
+    const nextAccountId = accountId === undefined ? config.pages.accountId : accountId;
+    const nextAccountName =
+      accountName === undefined && nextAccountId === config.pages.accountId
+        ? config.pages.accountName
+        : accountName;
     config = normalizeConfig({
       pages: {
-        projectName,
-        accountId
+        projectName: projectName === undefined ? config.pages.projectName : projectName,
+        accountId: nextAccountId,
+        accountName: nextAccountName
       }
     });
     await save();
@@ -779,7 +901,7 @@ export function createCloudflarePagesPublisher({
   // working copy when the report has been detached/edited in-app, otherwise the
   // original source directory.
   function publishSourceFor(report) {
-    return report.workingDir || report.rootDir;
+    return report.workingDir || report.buildOutputRoot || report.rootDir;
   }
 
   async function ensureSiteRoot() {
@@ -839,15 +961,16 @@ export function createCloudflarePagesPublisher({
       "--branch",
       DEFAULT_PAGES_BRANCH
     ];
-    if (accountId) {
-      args.push("--account-id", accountId);
-    }
 
+    // `wrangler pages deploy` does not accept an `--account-id` flag (it errors
+    // with "Unknown arguments: account-id" on e.g. 4.63.0). The account is
+    // selected via the CLOUDFLARE_ACCOUNT_ID environment variable instead.
     const result = await runSpawnCommand({
       spawnImpl,
       command: "npx",
       args,
-      timeoutMs
+      timeoutMs,
+      env: accountId ? { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountId } : process.env
     });
 
     if (result.code !== 0) {
@@ -1069,18 +1192,27 @@ export function createCloudflareAuthManager({
     sessionCache = null;
   }
 
+  async function logout() {
+    await runWrangler(["logout"], listTimeoutMs);
+    sessionCache = null;
+  }
+
   async function listProjects({ accountId = "" } = {}) {
     const env = accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {};
+    // Try the JSON form, but fall back to the plain-text listing on ANY failure:
+    // some Wrangler versions (e.g. 4.63.0) don't support `--json` and exit 1 with
+    // a help screen rather than a clean "Unknown argument: json" message.
     try {
       const output = await runWrangler(["pages", "project", "list", "--json"], listTimeoutMs, env);
-      return parseWranglerPagesProjects(output);
-    } catch (error) {
-      if (!/Unknown argument:?\s+json/i.test(stripAnsi(error.message))) {
-        throw error;
+      const projects = parseWranglerPagesProjects(output);
+      if (projects.length > 0) {
+        return projects;
       }
-      const output = await runWrangler(["pages", "project", "list"], listTimeoutMs, env);
-      return parseWranglerPagesProjects(output);
+    } catch {
+      // fall through to the text listing
     }
+    const output = await runWrangler(["pages", "project", "list"], listTimeoutMs, env);
+    return parseWranglerPagesProjects(output);
   }
 
   async function loginAndListProjects(options = {}) {
@@ -1092,15 +1224,24 @@ export function createCloudflareAuthManager({
   // An empty array means "not logged in". Used to auto-detect the account so
   // the user never has to paste an account ID for the single-account case.
   async function whoami() {
+    // Prefer the JSON form on newer Wrangler, but fall back to the stable text
+    // table whenever `--json` is unsupported or yields nothing. Wrangler 4.63.0
+    // exits 1 and prints a help screen for `whoami --json` — that must NOT be
+    // read as "logged out", or the app will trigger a needless re-login.
     try {
       const output = await runWrangler(["whoami", "--json"], listTimeoutMs);
+      const accounts = parseWranglerWhoamiAccounts(output);
+      if (accounts.length > 0) {
+        return accounts;
+      }
+    } catch {
+      // fall through to the text whoami
+    }
+    try {
+      const output = await runWrangler(["whoami"], listTimeoutMs);
       return parseWranglerWhoamiAccounts(output);
     } catch (error) {
-      const message = stripAnsi(error.message);
-      if (/Unknown argument:?\s+json/i.test(message)) {
-        const output = await runWrangler(["whoami"], listTimeoutMs);
-        return parseWranglerWhoamiAccounts(output);
-      }
+      const message = stripAnsi(error.message || "");
       if (/not authenticated|not logged in|wrangler login|run `?wrangler login/i.test(message)) {
         return [];
       }
@@ -1151,6 +1292,7 @@ export function createCloudflareAuthManager({
 
   return {
     login,
+    logout,
     listProjects,
     loginAndListProjects,
     whoami,
@@ -1161,7 +1303,11 @@ export function createCloudflareAuthManager({
   };
 }
 
-export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-reporter") } = {}) {
+export function createReportStore({
+  dataDir = path.join(PROJECT_ROOT, ".html-reporter"),
+  buildSpawnImpl = spawn,
+  buildTimeoutMs = 5 * 60 * 1000
+} = {}) {
   const statePath = path.join(dataDir, "reports.json");
   const uploadRoot = path.join(dataDir, "uploads");
   const workingRoot = path.join(dataDir, "working");
@@ -1169,7 +1315,7 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
   let redirects = [];
 
   function normalizePublication(publication) {
-    const kind = publication.kind || "live";
+    const kind = publication.kind || "snapshot";
     // Legacy (version-2) publications had no slug; the token doubled as the
     // staged-folder/URL-path key, so backfill slug from token.
     const slug = publication.slug || publication.token;
@@ -1191,11 +1337,21 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
       order: typeof report.order === "number" ? report.order : Number.MAX_SAFE_INTEGER,
       autoSync: report.autoSync === true,
       workingDir: typeof report.workingDir === "string" ? report.workingDir : null,
+      buildCommand: typeof report.buildCommand === "string" ? report.buildCommand : "",
+      buildOutputDir: typeof report.buildOutputDir === "string" ? report.buildOutputDir : "",
+      buildOutputRoot: typeof report.buildOutputRoot === "string" ? report.buildOutputRoot : null,
+      buildStatus: report.buildStatus || "idle",
+      buildError: report.buildError || "",
+      lastBuildAt: report.lastBuildAt || null,
       sourceMode: report.sourceMode || defaultSourceMode,
       publications: Array.isArray(report.publications)
         ? report.publications.map(normalizePublication)
         : []
     };
+  }
+
+  function reportSourceRoot(report) {
+    return path.resolve(report.workingDir || report.buildOutputRoot || report.rootDir);
   }
 
   async function save() {
@@ -1256,11 +1412,11 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
     redirects = redirects.filter((entry) => entry.from !== entry.to);
   }
 
-  function formatPublication(publication, { localPublicBaseUrl, publicTunnelUrl = null } = {}) {
+  function formatPublication(publication, { localPublicBaseUrl } = {}) {
     const slug = publication.slug || publication.token;
     const suffix = `/p/${encodeURIComponent(slug)}/`;
     const active = !publication.revokedAt;
-    const kind = publication.kind || "live";
+    const kind = publication.kind || "snapshot";
     return {
       token: publication.token,
       slug,
@@ -1271,30 +1427,30 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
       updatedAt: publication.updatedAt || publication.createdAt,
       revokedAt: publication.revokedAt || null,
       localUrl: active && localPublicBaseUrl ? joinUrl(localPublicBaseUrl, suffix) : null,
-      publicUrl:
-        active && kind === "snapshot"
-          ? publication.publicUrl
-          : active && publicTunnelUrl
-            ? joinUrl(publicTunnelUrl, suffix)
-            : null
+      publicUrl: active && kind === "snapshot" ? publication.publicUrl : null
     };
   }
 
-  function formatReport(report, { adminBaseUrl, localPublicBaseUrl, publicTunnelUrl = null } = {}) {
+  function formatReport(report, { adminBaseUrl, localPublicBaseUrl } = {}) {
     const previewSuffix = `/preview/${encodeURIComponent(report.id)}/`;
     const publications = (report.publications || [])
       .slice()
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .map((publication) => formatPublication(publication, { localPublicBaseUrl, publicTunnelUrl }));
+      .map((publication) => formatPublication(publication, { localPublicBaseUrl }));
     const latestActivePublication = publications.find((publication) => publication.active) || null;
     return {
       id: report.id,
       name: report.name,
       kind: report.kind,
-      sourcePath: report.kind === "path" ? report.sourcePath : null,
+      sourcePath: report.kind === "path" || report.kind === "folder" ? report.sourcePath : null,
       order: typeof report.order === "number" ? report.order : Number.MAX_SAFE_INTEGER,
       autoSync: report.autoSync === true,
       sourceMode: report.sourceMode || (report.kind === "upload" ? "edited-in-pagecast" : "source-tracked"),
+      buildCommand: report.buildCommand || "",
+      buildOutputDir: report.buildOutputDir || "",
+      buildStatus: report.buildStatus || "idle",
+      buildError: report.buildError || "",
+      lastBuildAt: report.lastBuildAt || null,
       createdAt: report.createdAt,
       updatedAt: report.updatedAt,
       localUrl: adminBaseUrl ? joinUrl(adminBaseUrl, previewSuffix) : null,
@@ -1330,6 +1486,51 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
       autoSync: false,
       workingDir: null,
       sourceMode: "source-tracked",
+      createdAt,
+      updatedAt: createdAt,
+      publications: []
+    };
+
+    reports.set(report.id, report);
+    await save();
+    return report;
+  }
+
+  async function addFolder({
+    folderPath,
+    entryFile = "",
+    buildCommand = "",
+    buildOutputDir = "",
+    name = ""
+  } = {}) {
+    const normalizedPath = await normalizeLocalFolderPath(folderPath);
+    const normalizedBuildOutput = buildOutputDir
+      ? normalizeAssetRequestPath(buildOutputDir)
+      : "";
+    if (buildOutputDir && !normalizedBuildOutput) {
+      throw appError("Build output directory is not allowed.", 400);
+    }
+    const normalizedEntry = buildCommand
+      ? ""
+      : await findFolderEntry(normalizedPath, entryFile);
+    const createdAt = nowIso();
+    const report = {
+      id: createReportId(name || normalizedPath),
+      kind: "folder",
+      name: name || path.basename(normalizedPath),
+      sourcePath: normalizedPath,
+      rootDir: normalizedPath,
+      entryFile: normalizedEntry || "index.html",
+      order: reports.size,
+      autoSync: false,
+      workingDir: null,
+      sourceMode: "source-tracked",
+      buildCommand: String(buildCommand || "").trim(),
+      buildOutputDir: normalizedBuildOutput || "",
+      buildOutputRoot: null,
+      buildStatus: buildCommand ? "idle" : "ready",
+      buildError: "",
+      lastBuildAt: null,
       createdAt,
       updatedAt: createdAt,
       publications: []
@@ -1380,6 +1581,138 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
     return report;
   }
 
+  async function addFolderUpload({ files, name = "" }) {
+    if (!Array.isArray(files) || files.length === 0) {
+      throw appError("Folder upload did not include any files.", 400);
+    }
+    if (files.length > MAX_FOLDER_UPLOAD_FILES) {
+      throw appError(`Folder upload can include at most ${MAX_FOLDER_UPLOAD_FILES} files.`, 413);
+    }
+
+    const createdAt = nowIso();
+    const id = createReportId(name || files[0].filename || "folder");
+    const reportDir = path.join(uploadRoot, id);
+    let totalBytes = 0;
+
+    await fs.mkdir(reportDir, { recursive: true });
+    for (const file of files) {
+      const relativePath = normalizeAssetRequestPath(file.filename || "");
+      if (!relativePath) {
+        throw appError("Folder upload includes an unsafe file path.", 400);
+      }
+      if (file.content.length > MAX_FOLDER_UPLOAD_FILE_BYTES) {
+        throw appError("Folder upload includes a file that is too large.", 413);
+      }
+      totalBytes += file.content.length;
+      if (totalBytes > MAX_FOLDER_UPLOAD_BYTES) {
+        throw appError("Folder upload is too large.", 413);
+      }
+      const destinationPath = path.resolve(reportDir, relativePath);
+      if (!isPathInside(reportDir, destinationPath)) {
+        throw appError("Folder upload includes an unsafe file path.", 400);
+      }
+      await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+      await fs.writeFile(destinationPath, file.content);
+    }
+
+    let publishRoot = reportDir;
+    let entryFile;
+    try {
+      entryFile = await findFolderEntry(publishRoot);
+    } catch (error) {
+      const roots = new Set(
+        files
+          .map((file) => normalizeAssetRequestPath(file.filename || ""))
+          .filter(Boolean)
+          .map((relativePath) => relativePath.split(path.sep)[0])
+      );
+      if (roots.size !== 1) {
+        throw error;
+      }
+      publishRoot = path.join(reportDir, Array.from(roots)[0]);
+      entryFile = await findFolderEntry(publishRoot);
+    }
+    const report = {
+      id,
+      kind: "folder",
+      name: name || path.basename(id),
+      sourcePath: null,
+      rootDir: publishRoot,
+      entryFile,
+      order: reports.size,
+      autoSync: false,
+      workingDir: null,
+      sourceMode: "edited-in-pagecast",
+      buildCommand: "",
+      buildOutputDir: "",
+      buildOutputRoot: null,
+      buildStatus: "ready",
+      buildError: "",
+      lastBuildAt: null,
+      createdAt,
+      updatedAt: createdAt,
+      publications: []
+    };
+
+    reports.set(report.id, report);
+    await save();
+    return report;
+  }
+
+  async function buildReport(id) {
+    const report = reports.get(id);
+    if (!report) {
+      throw appError("Report was not found.", 404);
+    }
+    if (report.kind !== "folder") {
+      throw appError("Only folder reports can be built.", 400);
+    }
+    if (!report.buildCommand) {
+      const entryFile = await findFolderEntry(path.resolve(report.rootDir), report.entryFile);
+      report.entryFile = entryFile;
+      report.buildOutputRoot = null;
+      report.buildStatus = "ready";
+      report.buildError = "";
+      report.lastBuildAt = nowIso();
+      report.updatedAt = report.lastBuildAt;
+      await save();
+      return report;
+    }
+
+    report.buildStatus = "building";
+    report.buildError = "";
+    report.updatedAt = nowIso();
+    await save();
+
+    const result = await runSpawnCommand({
+      spawnImpl: buildSpawnImpl,
+      command: "sh",
+      args: ["-lc", report.buildCommand],
+      cwd: report.rootDir,
+      timeoutMs: buildTimeoutMs
+    });
+
+    if (result.code !== 0) {
+      report.buildStatus = "failed";
+      report.buildError = cleanCommandOutput(result.output) || `Build failed (${result.signal || result.code}).`;
+      report.lastBuildAt = nowIso();
+      report.updatedAt = report.lastBuildAt;
+      await save();
+      throw appError(`Build failed.\n${report.buildError}`, 502);
+    }
+
+    const output = await detectBuildOutputDir(report.rootDir, report.buildOutputDir);
+    report.buildOutputDir = output.outputDir;
+    report.buildOutputRoot = output.outputRoot;
+    report.entryFile = output.entryFile;
+    report.buildStatus = "ready";
+    report.buildError = "";
+    report.lastBuildAt = nowIso();
+    report.updatedAt = report.lastBuildAt;
+    await save();
+    return report;
+  }
+
   async function remove(id) {
     const report = reports.get(id);
     if (!report) {
@@ -1387,7 +1720,7 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
     }
 
     reports.delete(id);
-    if (report.kind === "upload") {
+    if (report.kind === "upload" || (report.kind === "folder" && isPathInside(uploadRoot, report.rootDir))) {
       await fs.rm(report.rootDir, { recursive: true, force: true });
     }
     if (report.workingDir && isPathInside(workingRoot, report.workingDir)) {
@@ -1401,7 +1734,7 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
     return `v${(report.publications || []).length + 1}`;
   }
 
-  function draftPublication(id, { label, kind = "live", publicUrl = null } = {}) {
+  function draftPublication(id, { label, kind = "snapshot", publicUrl = null } = {}) {
     const report = reports.get(id);
     if (!report) {
       throw appError("Report was not found.", 404);
@@ -1437,7 +1770,7 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
   }
 
   async function publish(id, { label } = {}) {
-    const { publication } = draftPublication(id, { label, kind: "live" });
+    const { publication } = draftPublication(id, { label, kind: "snapshot" });
     return commitPublication(id, publication);
   }
 
@@ -1602,7 +1935,7 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
       return { statusCode: 403, message: "Asset path is not allowed." };
     }
 
-    const rootDir = path.resolve(report.workingDir || report.rootDir);
+    const rootDir = reportSourceRoot(report);
     const targetPath =
       relativeAssetPath === ""
         ? path.resolve(rootDir, report.entryFile)
@@ -1707,9 +2040,10 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
     // Markdown reports keep editing their raw .md working copy (republish
     // re-renders via staging); HTML reports normalize their entry to index.html.
     const workingEntry = isMarkdownFileName(report.entryFile) ? "index.md" : "index.html";
-    await copyPublicTree(report.rootDir, workingDir);
+    const sourceRoot = reportSourceRoot(report);
+    await copyPublicTree(sourceRoot, workingDir);
     await fs.copyFile(
-      path.join(report.rootDir, report.entryFile),
+      path.join(sourceRoot, report.entryFile),
       path.join(workingDir, workingEntry)
     );
     report.workingDir = workingDir;
@@ -1728,7 +2062,7 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
     if (!report) {
       throw appError("Report was not found.", 404);
     }
-    const rootDir = path.resolve(report.workingDir || report.rootDir);
+    const rootDir = reportSourceRoot(report);
     const targetPath = path.resolve(rootDir, report.entryFile);
     if (!isPathInside(rootDir, targetPath)) {
       throw appError("Report content path is not allowed.", 403);
@@ -1751,7 +2085,7 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
     // Write back to the report's entry file. For markdown reports this stays the
     // raw .md working copy (republish re-renders via staging); HTML reports keep
     // their index.html entry.
-    const editRoot = path.resolve(report.workingDir || report.rootDir);
+    const editRoot = reportSourceRoot(report);
     const targetPath = path.resolve(editRoot, report.entryFile);
     if (!isPathInside(editRoot, targetPath)) {
       throw appError("Report content path is not allowed.", 403);
@@ -1826,7 +2160,10 @@ export function createReportStore({ dataDir = path.join(PROJECT_ROOT, ".html-rep
     list,
     get,
     addPath,
+    addFolder,
     addUpload,
+    addFolderUpload,
+    buildReport,
     remove,
     draftPublication,
     commitPublication,
@@ -2192,6 +2529,53 @@ export function parseMultipartUpload(body, contentType) {
   throw appError("Upload request did not include an HTML file.", 400);
 }
 
+export function parseMultipartFiles(body, contentType) {
+  const boundaryMatch = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType || "");
+  const boundaryValue = boundaryMatch?.[1] || boundaryMatch?.[2];
+  if (!boundaryValue) {
+    throw appError("Upload request is missing a multipart boundary.", 400);
+  }
+
+  const boundary = `--${boundaryValue}`;
+  const rawBody = body.toString("latin1");
+  const parts = rawBody.split(boundary).slice(1, -1);
+  const files = [];
+
+  for (const rawPart of parts) {
+    const part = rawPart.startsWith("\r\n") ? rawPart.slice(2) : rawPart;
+    const headerEnd = part.indexOf("\r\n\r\n");
+    if (headerEnd === -1) {
+      continue;
+    }
+
+    const headerText = part.slice(0, headerEnd);
+    let contentText = part.slice(headerEnd + 4);
+    if (contentText.endsWith("\r\n")) {
+      contentText = contentText.slice(0, -2);
+    }
+
+    const disposition = headerText
+      .split("\r\n")
+      .find((line) => line.toLowerCase().startsWith("content-disposition:"));
+    if (!disposition) {
+      continue;
+    }
+
+    const filename = /filename="([^"]*)"/i.exec(disposition)?.[1] || "";
+    if (filename) {
+      files.push({
+        filename,
+        content: Buffer.from(contentText, "latin1")
+      });
+    }
+  }
+
+  if (files.length === 0) {
+    throw appError("Upload request did not include any files.", 400);
+  }
+  return files;
+}
+
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
@@ -2292,11 +2676,10 @@ async function serveStatic(req, res, staticDir, pathname) {
   }
 }
 
-function reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl, tunnelManager }) {
+function reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl }) {
   return {
     adminBaseUrl: getAdminBaseUrl(),
-    localPublicBaseUrl: getLocalPublicBaseUrl(),
-    publicTunnelUrl: tunnelManager.status().publicUrl
+    localPublicBaseUrl: getLocalPublicBaseUrl()
   };
 }
 
@@ -2315,7 +2698,8 @@ async function detectAndPersistCloudflareProjects({ cloudflareAuth, configStore 
   const config = selectedProject
     ? await configStore.updatePages({
         projectName: selectedProject.name,
-        accountId: selectedProject.accountId || currentConfig.pages.accountId
+        accountId: selectedProject.accountId || currentConfig.pages.accountId,
+        accountName: selectedProject.accountName || currentConfig.pages.accountName
       })
     : currentConfig;
 
@@ -2368,6 +2752,7 @@ async function ensureCloudflarePagesTarget({ cloudflareAuth, configStore, autoCr
 
   const needsAccountChoice = !account && accounts.length > 1;
   const accountId = account?.id || "";
+  const accountName = normalizeAccountName(account?.name || currentConfig.pages.accountName || "");
 
   if (needsAccountChoice) {
     return {
@@ -2402,7 +2787,7 @@ async function ensureCloudflarePagesTarget({ cloudflareAuth, configStore, autoCr
       chooseWranglerPagesProject(projects, { projectName }) || {
         name: normalizePagesProjectName(projectName),
         accountId,
-        accountName: account?.name || "",
+        accountName,
         productionBranch: DEFAULT_PAGES_BRANCH,
         baseUrl: pagesBaseUrl(projectName)
       };
@@ -2412,12 +2797,14 @@ async function ensureCloudflarePagesTarget({ cloudflareAuth, configStore, autoCr
   if (selectedProject) {
     config = await configStore.updatePages({
       projectName: selectedProject.name,
-      accountId: selectedProject.accountId || accountId
+      accountId: selectedProject.accountId || accountId,
+      accountName: accountName || selectedProject.accountName
     });
   } else if (accountId) {
     config = await configStore.updatePages({
       projectName: currentConfig.pages.projectName,
-      accountId
+      accountId,
+      accountName
     });
   }
 
@@ -2427,7 +2814,12 @@ async function ensureCloudflarePagesTarget({ cloudflareAuth, configStore, autoCr
       authenticated: true,
       needsAccountChoice: false,
       accounts,
-      account: account ? { id: accountId, name: account.name || selectedProject?.accountName || "" } : null,
+      account: account
+        ? {
+            id: accountId,
+            name: accountName || normalizeAccountName(selectedProject?.accountName || "")
+          }
+        : null,
       projects,
       selectedProject,
       projectCount: projects.length,
@@ -2577,7 +2969,7 @@ async function handleApi(
     watchManager
   }
 ) {
-  const options = reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl, tunnelManager });
+  const options = reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl });
 
   if (url.pathname === "/api/status" && req.method === "GET") {
     const credential = cloudflareCredentialStatus();
@@ -2589,15 +2981,17 @@ async function handleApi(
       session.accounts.find((account) => account.id === pages.accountId) ||
       session.accounts[0] ||
       null;
+    const accountName =
+      normalizeAccountName(activeAccount?.name || "") || normalizeAccountName(pages.accountName || "");
     sendJson(res, 200, {
       admin: { ok: true },
       public: { localBaseUrl: getLocalPublicBaseUrl() },
-      tunnel: tunnelManager.status(),
       cloudflare: {
         ...credential,
         loggedIn: session.loggedIn,
         accounts: session.accounts,
-        accountName: activeAccount?.name || "",
+        accountName,
+        accountId: pages.accountId || activeAccount?.id || "",
         projectName: pages.projectName,
         baseUrl: pages.baseUrl
       },
@@ -2615,7 +3009,8 @@ async function handleApi(
     const body = await readJsonBody(req);
     const config = await configStore.updatePages({
       projectName: body.projectName,
-      accountId: body.accountId
+      accountId: body.accountId,
+      accountName: body.accountName
     });
     sendJson(res, 200, { config });
     return;
@@ -2656,8 +3051,34 @@ async function handleApi(
     const body = await readJsonBody(req);
     const accountId = normalizeAccountId(body.accountId || "");
     const current = configStore.get();
-    await configStore.updatePages({ projectName: current.pages.projectName, accountId });
+    const session = cloudflareAuth.cachedSession();
+    const account = session.accounts.find((item) => item.id === accountId) || null;
+    await configStore.updatePages({
+      projectName: current.pages.projectName,
+      accountId,
+      accountName: normalizeAccountName(account?.name || "")
+    });
     sendJson(res, 200, await ensureCloudflarePagesTarget({ cloudflareAuth, configStore }));
+    return;
+  }
+
+  if (url.pathname === "/api/cloudflare/logout" && req.method === "POST") {
+    await readJsonBody(req);
+    const credential = cloudflareCredentialStatus();
+    if (credential.tokenConfigured) {
+      throw appError("Token-based Cloudflare auth is configured through environment variables.", 400);
+    }
+    await cloudflareAuth.logout();
+    const current = configStore.get();
+    await configStore.updatePages({
+      projectName: current.pages.projectName,
+      accountId: "",
+      accountName: ""
+    });
+    sendJson(res, 200, {
+      cloudflare: { loggedOut: true },
+      config: configStore.get()
+    });
     return;
   }
 
@@ -2673,6 +3094,19 @@ async function handleApi(
     return;
   }
 
+  if (url.pathname === "/api/reports/folder" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    const report = await store.addFolder({
+      folderPath: body.path,
+      entryFile: body.entryFile,
+      buildCommand: body.buildCommand,
+      buildOutputDir: body.buildOutputDir,
+      name: body.name
+    });
+    sendJson(res, 201, { report: store.formatReport(report, options) });
+    return;
+  }
+
   if (url.pathname === "/api/reports/upload" && req.method === "POST") {
     const body = await readRequestBody(req);
     const upload = parseMultipartUpload(body, req.headers["content-type"]);
@@ -2681,15 +3115,30 @@ async function handleApi(
     return;
   }
 
+  if (url.pathname === "/api/reports/folder-upload" && req.method === "POST") {
+    const body = await readRequestBody(req, MAX_FOLDER_UPLOAD_BYTES);
+    const files = parseMultipartFiles(body, req.headers["content-type"]);
+    const report = await store.addFolderUpload({ files });
+    sendJson(res, 201, { report: store.formatReport(report, options) });
+    return;
+  }
+
+  const buildMatch = /^\/api\/reports\/([^/]+)\/build$/.exec(url.pathname);
+  if (buildMatch && req.method === "POST") {
+    await readJsonBody(req);
+    const report = await store.buildReport(decodeURIComponent(buildMatch[1]));
+    sendJson(res, 200, { report: store.formatReport(report, options) });
+    return;
+  }
+
   const publishMatch = /^\/api\/reports\/([^/]+)\/publish$/.exec(url.pathname);
   if (publishMatch && req.method === "POST") {
-    const body = await readJsonBody(req);
-    const { report, publication } = await store.publish(decodeURIComponent(publishMatch[1]), {
-      label: body.label
-    });
-    sendJson(res, 201, {
-      report: store.formatReport(report, options),
-      publication: store.formatPublication(publication, options)
+    await readJsonBody(req);
+    sendJson(res, 410, {
+      error: {
+        message: "Local live publishing has been removed. Use Cloudflare Pages snapshots.",
+        statusCode: 410
+      }
     });
     return;
   }
@@ -2698,6 +3147,10 @@ async function handleApi(
   if (snapshotPublishMatch && req.method === "POST") {
     const body = await readJsonBody(req);
     const id = decodeURIComponent(snapshotPublishMatch[1]);
+    const sourceReport = store.get(id);
+    if (sourceReport?.kind === "folder" && sourceReport.buildCommand) {
+      await store.buildReport(id);
+    }
     const draft = store.draftPublication(id, {
       label: body.label,
       kind: "snapshot"
@@ -2746,6 +3199,9 @@ async function handleApi(
     }
     if (existing.publication.kind !== "snapshot") {
       throw appError("Only snapshot publications can be synced.", 400);
+    }
+    if (existing.report.kind === "folder" && existing.report.buildCommand) {
+      await store.buildReport(existing.report.id);
     }
     await deployQueue.enqueue(async () => {
       try {
@@ -2921,31 +3377,12 @@ async function handleApi(
     return;
   }
 
-  if (url.pathname === "/api/tunnel/start" && req.method === "POST") {
-    await readJsonBody(req);
-    const status = await tunnelManager.start();
-    sendJson(res, 200, {
-      tunnel: status,
-      reports: store.list(reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl, tunnelManager }))
-    });
-    return;
-  }
-
-  if (url.pathname === "/api/tunnel/stop" && req.method === "POST") {
-    const status = await tunnelManager.stop();
-    sendJson(res, 200, {
-      tunnel: status,
-      reports: store.list(reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl, tunnelManager }))
-    });
-    return;
-  }
-
-  if (url.pathname === "/api/tunnel/rotate" && req.method === "POST") {
-    await readJsonBody(req);
-    const status = await tunnelManager.rotate();
-    sendJson(res, 200, {
-      tunnel: status,
-      reports: store.list(reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl, tunnelManager }))
+  if (url.pathname.startsWith("/api/tunnel/")) {
+    sendJson(res, 410, {
+      error: {
+        message: "Live tunnel publishing has been removed. Use Cloudflare Pages publishing.",
+        statusCode: 410
+      }
     });
     return;
   }

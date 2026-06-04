@@ -70,6 +70,40 @@ export const api = {
   addPath: (path: string) =>
     request<ReportResponse>("/api/reports/path", { json: { path } }),
 
+  addFolder: (payload: {
+    path: string;
+    entryFile?: string;
+    buildCommand?: string;
+    buildOutputDir?: string;
+    name?: string;
+  }) => request<ReportResponse>("/api/reports/folder", { json: payload }),
+
+  uploadFile: (file: File) => {
+    const formData = new FormData();
+    formData.append("report", file, file.name);
+    return request<ReportResponse>("/api/reports/upload", {
+      method: "POST",
+      body: formData
+    });
+  },
+
+  uploadFolder: (files: File[]) => {
+    const formData = new FormData();
+    for (const file of files) {
+      const relativePath = file.webkitRelativePath || file.name;
+      formData.append("files", file, relativePath);
+    }
+    return request<ReportResponse>("/api/reports/folder-upload", {
+      method: "POST",
+      body: formData
+    });
+  },
+
+  buildReport: (id: string) =>
+    request<ReportResponse>(`/api/reports/${encodeURIComponent(id)}/build`, {
+      json: {}
+    }),
+
   reorder: (ids: string[]) =>
     request<ReportsResponse>("/api/reports/reorder", { json: { ids } }),
 
@@ -127,5 +161,8 @@ export const api = {
     request<unknown>("/api/cloudflare/connect", { json: {} }),
 
   cloudflareAccount: (accountId: string) =>
-    request<unknown>("/api/cloudflare/account", { json: { accountId } })
+    request<unknown>("/api/cloudflare/account", { json: { accountId } }),
+
+  cloudflareLogout: () =>
+    request<unknown>("/api/cloudflare/logout", { json: {} })
 };

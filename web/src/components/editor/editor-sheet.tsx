@@ -41,7 +41,7 @@ export function EditorSheet({ report, open, onOpenChange }: EditorSheetProps) {
         .catch((error: unknown) => {
           if (!cancelled) {
             setLoadError(
-              error instanceof Error ? error.message : "Could not load content."
+              error instanceof Error ? error.message : "We couldn’t load this page."
             );
           }
         })
@@ -72,7 +72,8 @@ export function EditorSheet({ report, open, onOpenChange }: EditorSheetProps) {
         <SheetHeader className="space-y-1 border-b px-6 py-4 text-left">
           <SheetTitle className="truncate">{report.name}</SheetTitle>
           <SheetDescription>
-            Edit HTML. Saving republishes every live snapshot at the same URL.
+            Make a quick edit. Saving updates every published link in place — same
+            URL, new content.
           </SheetDescription>
         </SheetHeader>
 

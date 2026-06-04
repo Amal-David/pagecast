@@ -6,6 +6,7 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
+import { activityMessage, emitActivity } from "@/lib/activity";
 import type {
   PublishResponse,
   Report,
@@ -50,9 +51,102 @@ export function useAddPath() {
     mutationFn: (path: string) => api.addPath(path),
     onSuccess: (data) => {
       toast.success(`Added "${data.report.name}".`);
+      emitActivity({
+        status: "success",
+        title: "Page added",
+        message: data.report.name
+      });
       invalidateReports(queryClient);
     },
-    onError: (error) => toast.error(errorMessage(error, "Could not add report."))
+    onError: (error) => {
+      const message = errorMessage(error, "Could not add report.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Add page failed", message });
+    }
+  });
+}
+
+export function useAddFolder() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: api.addFolder,
+    onSuccess: (data) => {
+      toast.success(`Added "${data.report.name}".`);
+      emitActivity({
+        status: "success",
+        title: "Folder added",
+        message: data.report.name
+      });
+      invalidateReports(queryClient);
+    },
+    onError: (error) => {
+      const message = errorMessage(error, "Could not add folder.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Add folder failed", message });
+    }
+  });
+}
+
+export function useUploadFile() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => api.uploadFile(file),
+    onSuccess: (data) => {
+      toast.success(`Uploaded "${data.report.name}".`);
+      emitActivity({
+        status: "success",
+        title: "File uploaded",
+        message: data.report.name
+      });
+      invalidateReports(queryClient);
+    },
+    onError: (error) => {
+      const message = errorMessage(error, "Could not upload file.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Upload failed", message });
+    }
+  });
+}
+
+export function useUploadFolder() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (files: File[]) => api.uploadFolder(files),
+    onSuccess: (data) => {
+      toast.success(`Uploaded "${data.report.name}".`);
+      emitActivity({
+        status: "success",
+        title: "Folder uploaded",
+        message: data.report.name
+      });
+      invalidateReports(queryClient);
+    },
+    onError: (error) => {
+      const message = errorMessage(error, "Could not upload folder.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Folder upload failed", message });
+    }
+  });
+}
+
+export function useBuildReport() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.buildReport(id),
+    onSuccess: (data) => {
+      toast.success(`Built "${data.report.name}".`);
+      emitActivity({
+        status: "success",
+        title: "Build complete",
+        message: data.report.buildOutputDir || data.report.name
+      });
+      invalidateReports(queryClient);
+    },
+    onError: (error) => {
+      const message = errorMessage(error, "Build failed.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Build failed", message });
+    }
   });
 }
 
@@ -62,9 +156,14 @@ export function useDeleteReport() {
     mutationFn: (id: string) => api.deleteReport(id),
     onSuccess: () => {
       toast.success("Report deleted.");
+      emitActivity({ status: "success", title: "Page deleted" });
       invalidateReports(queryClient);
     },
-    onError: (error) => toast.error(errorMessage(error, "Could not delete report."))
+    onError: (error) => {
+      const message = errorMessage(error, "Could not delete report.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Delete failed", message });
+    }
   });
 }
 
@@ -73,12 +172,21 @@ export function usePublishSnapshot() {
   return useMutation({
     mutationFn: (id: string) => api.publishSnapshot(id),
     onSuccess: (data: PublishResponse) => {
-      toast.success("Snapshot published.", {
+      toast.success("Page published.", {
         description: data.publication.publicUrl ?? undefined
+      });
+      emitActivity({
+        status: "success",
+        title: "Page published",
+        message: data.publication.publicUrl ?? data.publication.slug
       });
       invalidateReports(queryClient);
     },
-    onError: (error) => toast.error(errorMessage(error, "Publish failed."))
+    onError: (error) => {
+      const message = errorMessage(error, "Publish failed.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Publish failed", message });
+    }
   });
 }
 
@@ -92,9 +200,21 @@ export function useRevokeAll() {
           ? "Revoked 1 link."
           : `Revoked ${data.revokedCount} links.`
       );
+      emitActivity({
+        status: "success",
+        title: "Links revoked",
+        message:
+          data.revokedCount === 1
+            ? "1 link taken offline."
+            : `${data.revokedCount} links taken offline.`
+      });
       invalidateReports(queryClient);
     },
-    onError: (error) => toast.error(errorMessage(error, "Could not revoke links."))
+    onError: (error) => {
+      const message = errorMessage(error, "Could not revoke links.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Revoke failed", message });
+    }
   });
 }
 
@@ -107,9 +227,18 @@ export function useAutoSync() {
       toast.success(
         data.report.autoSync ? "Auto-sync on." : "Auto-sync off."
       );
+      emitActivity({
+        status: "success",
+        title: data.report.autoSync ? "Auto-sync on" : "Auto-sync off",
+        message: data.report.name
+      });
       invalidateReports(queryClient);
     },
-    onError: (error) => toast.error(errorMessage(error, "Could not toggle auto-sync."))
+    onError: (error) => {
+      const message = errorMessage(error, "Could not toggle auto-sync.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Auto-sync failed", message });
+    }
   });
 }
 
@@ -119,9 +248,14 @@ export function useSyncPublication() {
     mutationFn: (token: string) => api.syncPublication(token),
     onSuccess: () => {
       toast.success("Published link synced.");
+      emitActivity({ status: "success", title: "Published link synced" });
       invalidateReports(queryClient);
     },
-    onError: (error) => toast.error(errorMessage(error, "Sync failed."))
+    onError: (error) => {
+      const message = errorMessage(error, "Sync failed.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Sync failed", message });
+    }
   });
 }
 
@@ -131,9 +265,14 @@ export function useRevokePublication() {
     mutationFn: (token: string) => api.revokePublication(token),
     onSuccess: () => {
       toast.success("Link revoked.");
+      emitActivity({ status: "success", title: "Link taken offline" });
       invalidateReports(queryClient);
     },
-    onError: (error) => toast.error(errorMessage(error, "Could not revoke link."))
+    onError: (error) => {
+      const message = errorMessage(error, "Could not revoke link.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Revoke failed", message });
+    }
   });
 }
 
@@ -144,9 +283,14 @@ export function useSaveContent() {
       api.saveContent(id, html),
     onSuccess: () => {
       toast.success("Saved. Live snapshots updated.");
+      emitActivity({ status: "success", title: "Saved and republished" });
       invalidateReports(queryClient);
     },
-    onError: (error) => toast.error(errorMessage(error, "Could not save edits."))
+    onError: (error) => {
+      const message = errorMessage(error, "Could not save edits.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Save failed", message });
+    }
   });
 }
 
@@ -171,7 +315,9 @@ export function useReorder() {
       if (context?.previous) {
         queryClient.setQueryData(REPORTS_KEY, context.previous);
       }
-      toast.error(errorMessage(error, "Could not save order."));
+      const message = errorMessage(error, "Could not save order.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Reorder failed", message });
     },
     onSettled: () => invalidateReports(queryClient)
   });
@@ -200,13 +346,18 @@ export function useRenameSlug() {
       }
       return { previous };
     },
-    onSuccess: () => toast.success("Custom URL updated."),
+    onSuccess: () => {
+      toast.success("Custom URL updated.");
+      emitActivity({ status: "success", title: "Custom URL updated" });
+    },
     onError: (error, _vars, context) => {
       if (context?.previous) {
         queryClient.setQueryData(REPORTS_KEY, context.previous);
       }
       // 400 invalid, 409 taken — surface the precise server message.
-      toast.error(errorMessage(error, "Could not update custom URL."));
+      const message = activityMessage(error, "Could not update custom URL.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Custom URL failed", message });
     },
     onSettled: () => invalidateReports(queryClient)
   });

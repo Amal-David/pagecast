@@ -43,7 +43,7 @@ export function PublicationRow({ publication }: PublicationRowProps) {
     if (!url) return;
     const ok = await copyToClipboard(url);
     toast[ok ? "success" : "error"](
-      ok ? "URL copied." : "Could not copy URL."
+      ok ? "Link copied." : "Couldn’t copy the link."
     );
   };
 
@@ -120,11 +120,9 @@ export function PublicationRow({ publication }: PublicationRowProps) {
             <span className="truncate font-mono text-xs">
               {publication.slug}
             </span>
-            {isSnapshot ? (
-              <Badge variant="muted" className="shrink-0 px-1.5 py-0 text-[10px]">
-                snapshot
-              </Badge>
-            ) : null}
+            <Badge variant="muted" className="shrink-0 px-1.5 py-0 text-[10px]">
+              published
+            </Badge>
             {isSnapshot ? (
               <Button
                 size="icon"
@@ -152,7 +150,7 @@ export function PublicationRow({ publication }: PublicationRowProps) {
           className="h-7 w-7"
           onClick={handleCopy}
           disabled={!url}
-          aria-label="Copy URL"
+          aria-label="Copy link"
         >
           <Copy className="h-3.5 w-3.5" />
         </Button>
@@ -176,7 +174,7 @@ export function PublicationRow({ publication }: PublicationRowProps) {
           className="h-7 w-7 text-muted-foreground hover:text-destructive"
           onClick={() => revoke.mutate(publication.token)}
           disabled={revoke.isPending}
-          aria-label="Revoke link"
+          aria-label="Take link offline"
         >
           {revoke.isPending ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />

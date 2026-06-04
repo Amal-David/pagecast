@@ -151,14 +151,14 @@ export function ReportCard({ report, onPreview, onEdit }: ReportCardProps) {
                   disabled={publish.isPending}
                 >
                   <RefreshCw className="h-4 w-4" />
-                  Publish snapshot
+                  Publish now
                 </DropdownMenuItem>
                 {hasActive ? (
                   <DropdownMenuItem
                     onClick={() => revokeAll.mutate(report.id)}
                     disabled={revokeAll.isPending}
                   >
-                    Revoke all links
+                    Take all links offline
                   </DropdownMenuItem>
                 ) : null}
                 <DropdownMenuSeparator />
@@ -167,7 +167,7 @@ export function ReportCard({ report, onPreview, onEdit }: ReportCardProps) {
                   onClick={() => setConfirmDelete(true)}
                 >
                   <Trash2 className="h-4 w-4" />
-                  Delete report
+                  Delete
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -180,8 +180,8 @@ export function ReportCard({ report, onPreview, onEdit }: ReportCardProps) {
               <span className="text-xs font-medium">Auto-sync</span>
               <span className="text-[11px] text-muted-foreground">
                 {report.autoSync
-                  ? "Republishing on file change"
-                  : "Manual publish only"}
+                  ? "Every save republishes automatically"
+                  : "Publish on your command"}
               </span>
             </div>
             <Switch
@@ -210,10 +210,10 @@ export function ReportCard({ report, onPreview, onEdit }: ReportCardProps) {
       <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete this report?</AlertDialogTitle>
+            <AlertDialogTitle>Delete this page?</AlertDialogTitle>
             <AlertDialogDescription>
-              "{report.name}" and any active published links will be removed.
-              This cannot be undone.
+              “{report.name}” and any published links will be taken offline. This
+              can’t be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

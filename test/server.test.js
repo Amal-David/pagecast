@@ -16,7 +16,9 @@ import {
   extractPublicUrl,
   localHtmlPathCandidates,
   normalizeAssetRequestPath,
+  normalizeLocalFolderPath,
   normalizeLocalHtmlPath,
+  parseMultipartFiles,
   parseWranglerPagesProjects,
   parseWranglerWhoamiAccounts,
   parseMultipartUpload,
@@ -103,6 +105,95 @@ test("uploads are cached as report entries", async () => {
   const entry = await store.resolveAsset(report.id, "");
   assert.equal(entry.statusCode, 200);
   assert.equal(await fs.readFile(entry.filePath, "utf8"), "<h1>Uploaded</h1>");
+});
+
+test("folder reports resolve static mini-app assets", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const appDir = path.join(tempDir, "mini-app");
+  await fs.mkdir(path.join(appDir, "assets"), { recursive: true });
+  await fs.writeFile(path.join(appDir, "index.html"), '<script src="assets/app.js"></script><h1>Mini</h1>');
+  await fs.writeFile(path.join(appDir, "assets", "app.js"), "window.ready = true;");
+  await fs.writeFile(path.join(appDir, ".env"), "SECRET=1");
+
+  assert.equal(await normalizeLocalFolderPath(appDir), appDir);
+
+  const store = createReportStore({ dataDir });
+  await store.init();
+  const report = await store.addFolder({ folderPath: appDir });
+
+  const entry = await store.resolveAsset(report.id, "");
+  assert.equal(entry.statusCode, 200);
+  assert.equal(entry.filePath, path.join(appDir, "index.html"));
+
+  const asset = await store.resolveAsset(report.id, "assets/app.js");
+  assert.equal(asset.statusCode, 200);
+  assert.equal(asset.filePath, path.join(appDir, "assets", "app.js"));
+
+  const hidden = await store.resolveAsset(report.id, ".env");
+  assert.equal(hidden.statusCode, 403);
+});
+
+test("folder reports run build commands and publish detected output", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const appDir = path.join(tempDir, "source-app");
+  await fs.mkdir(appDir, { recursive: true });
+  await fs.writeFile(path.join(appDir, "build.sh"), "mkdir -p dist && printf '<h1>Built</h1>' > dist/index.html\n");
+
+  const store = createReportStore({ dataDir });
+  await store.init();
+  const report = await store.addFolder({
+    folderPath: appDir,
+    buildCommand: "sh build.sh",
+    buildOutputDir: "dist"
+  });
+
+  const built = await store.buildReport(report.id);
+  assert.equal(built.buildStatus, "ready");
+  assert.equal(built.buildOutputDir, "dist");
+
+  const entry = await store.resolveAsset(report.id, "");
+  assert.equal(entry.statusCode, 200);
+  assert.match(await fs.readFile(entry.filePath, "utf8"), /Built/);
+});
+
+test("folder multipart uploads preserve relative paths and reject unsafe files", async () => {
+  const boundary = "folder-boundary";
+  const body = Buffer.from(
+    [
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="files"; filename="mini/index.html"',
+      "Content-Type: text/html",
+      "",
+      "<h1>Folder</h1>",
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="files"; filename="mini/assets/app.js"',
+      "Content-Type: text/javascript",
+      "",
+      "window.ready = true;",
+      `--${boundary}--`,
+      ""
+    ].join("\r\n"),
+    "utf8"
+  );
+
+  const files = parseMultipartFiles(body, `multipart/form-data; boundary=${boundary}`);
+  const tempDir = await makeTempDir();
+  const store = createReportStore({ dataDir: path.join(tempDir, "data") });
+  await store.init();
+  const report = await store.addFolderUpload({ files, name: "mini" });
+
+  const asset = await store.resolveAsset(report.id, "assets/app.js");
+  assert.equal(asset.statusCode, 200);
+
+  await assert.rejects(
+    () =>
+      store.addFolderUpload({
+        files: [{ filename: "../secret.html", content: Buffer.from("nope") }]
+      }),
+    /unsafe/
+  );
 });
 
 test("local HTML path validation rejects unsafe inputs", async () => {
@@ -572,8 +663,8 @@ test("snapshot publications deploy to Cloudflare Pages and revoke from the stage
   await fs.writeFile(path.join(reportDir, ".env"), "SECRET=1");
 
   const deployCommands = [];
-  function fakePagesDeploy(command, args) {
-    deployCommands.push({ command, args });
+  function fakePagesDeploy(command, args, options) {
+    deployCommands.push({ command, args, accountId: options?.env?.CLOUDFLARE_ACCOUNT_ID || "" });
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -646,10 +737,11 @@ test("snapshot publications deploy to Cloudflare Pages and revoke from the stage
       "--project-name",
       "team-reports",
       "--branch",
-      "main",
-      "--account-id",
-      "0123456789abcdef0123456789abcdef"
+      "main"
     ]);
+    // The account is passed via CLOUDFLARE_ACCOUNT_ID env, not an --account-id
+    // flag (which `wrangler pages deploy` does not accept).
+    assert.equal(deployCommands[0].accountId, "0123456789abcdef0123456789abcdef");
 
     const stagedDir = path.join(dataDir, "pages-site", "p", publishData.publication.token);
     await assert.rejects(() => fs.stat(path.join(dataDir, "pages-site", "index.html")), /ENOENT/);
@@ -726,54 +818,8 @@ test("draft reports preview locally and only published versions are public", asy
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ label: "v1" })
     });
-    assert.equal(publishV1Response.status, 201);
-    const publishV1Data = await publishV1Response.json();
-    assert.equal(publishV1Data.publication.label, "v1");
-    assert.match(publishV1Data.publication.localUrl, /^http:\/\/127\.0\.0\.1:\d+\/p\/v1-[a-f0-9]+\/$/);
-
-    const publishV2Response = await fetch(`${runtime.adminUrl}/api/reports/${addData.report.id}/publish`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({})
-    });
-    assert.equal(publishV2Response.status, 201);
-    const publishV2Data = await publishV2Response.json();
-    assert.equal(publishV2Data.publication.label, "v2");
-    assert.notEqual(publishV1Data.publication.localUrl, publishV2Data.publication.localUrl);
-
-    const publicV1Response = await fetch(publishV1Data.publication.localUrl);
-    assert.equal(publicV1Response.status, 200);
-    assert.match(await publicV1Response.text(), /HTTP Report/);
-
-    const publicV1AssetResponse = await fetch(new URL("style.css", publishV1Data.publication.localUrl));
-    assert.equal(publicV1AssetResponse.status, 200);
-    assert.equal(await publicV1AssetResponse.text(), "body { color: green; }");
-
-    const revokeResponse = await fetch(
-      `${runtime.adminUrl}/api/publications/${publishV1Data.publication.token}/revoke`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}"
-      }
-    );
-    assert.equal(revokeResponse.status, 200);
-
-    const revokedV1Response = await fetch(publishV1Data.publication.localUrl);
-    assert.equal(revokedV1Response.status, 404);
-
-    const stillActiveV2Response = await fetch(publishV2Data.publication.localUrl);
-    assert.equal(stillActiveV2Response.status, 200);
-
-    const revokeAllResponse = await fetch(`${runtime.adminUrl}/api/reports/${addData.report.id}/revoke-all`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}"
-    });
-    assert.equal(revokeAllResponse.status, 200);
-
-    const revokedV2Response = await fetch(publishV2Data.publication.localUrl);
-    assert.equal(revokedV2Response.status, 404);
+    assert.equal(publishV1Response.status, 410);
+    assert.match(await publishV1Response.text(), /Local live publishing has been removed/);
   } finally {
     await runtime.close();
   }
@@ -868,8 +914,10 @@ test("Cloudflare connect auto-detects one account and auto-creates the Pages pro
     assert.equal(data.cloudflare.needsAccountChoice, false);
     assert.equal(data.cloudflare.autoCreated, true);
     assert.equal(data.cloudflare.account.id, "abcdef0123456789abcdef0123456789");
+    assert.equal(data.cloudflare.account.name, "Personal");
     assert.equal(data.cloudflare.selectedProject.name, "html-reporter");
     assert.equal(data.config.pages.accountId, "abcdef0123456789abcdef0123456789");
+    assert.equal(data.config.pages.accountName, "Personal");
 
     // The project create command actually ran with the resolved account.
     const createCall = captured.find((item) => item.args.includes("create"));
@@ -1016,6 +1064,137 @@ test("Cloudflare connect surfaces an account choice when multiple accounts exist
     assert.equal(data.cloudflare.needsAccountChoice, true);
     assert.equal(data.cloudflare.accounts.length, 2);
     assert.equal(data.cloudflare.selectedProject, null);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("Cloudflare connect detects an existing session when wrangler lacks --json (exits 1 with help)", async () => {
+  // Regression: wrangler 4.63.0 exits 1 and prints a help screen for
+  // `whoami --json` / `pages project list --json` (no clean "Unknown argument").
+  // The app must fall back to the text commands and NOT trigger a re-login.
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const HELP = "wrangler whoami\nList your stuff\nGLOBAL FLAGS\n  -h, --help  Show help  [boolean]\n";
+  const whoamiTable = [
+    "👋 You are logged in with an OAuth Token.",
+    "┌──────────────┬──────────────────────────────────┐",
+    "│ Account Name │ Account ID                       │",
+    "├──────────────┼──────────────────────────────────┤",
+    "│ Personal     │ abcdef0123456789abcdef0123456789 │",
+    "└──────────────┴──────────────────────────────────┘"
+  ].join("\n");
+  const projectTable = [
+    "┌───────────────┬───────────────────┐",
+    "│ Name          │ Production Branch │",
+    "├───────────────┼───────────────────┤",
+    "│ html-reporter │ main              │",
+    "└───────────────┴───────────────────┘"
+  ].join("\n");
+
+  const { fakeSpawn, captured } = makeWranglerFake((args) => {
+    if (args.includes("login")) {
+      return { code: 0, output: "Successfully logged in" };
+    }
+    if (args.includes("whoami")) {
+      return args.includes("--json")
+        ? { code: 1, output: HELP, stderr: true }
+        : { code: 0, output: whoamiTable };
+    }
+    if (args.includes("list")) {
+      return args.includes("--json")
+        ? { code: 1, output: HELP, stderr: true }
+        : { code: 0, output: projectTable };
+    }
+    return { code: 0, output: "" };
+  });
+
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    cloudflareAuthSpawnImpl: fakeSpawn,
+    cloudflareLoginTimeoutMs: 1000,
+    cloudflareListTimeoutMs: 1000
+  });
+
+  try {
+    const response = await fetch(`${runtime.adminUrl}/api/cloudflare/connect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.cloudflare.authenticated, true);
+    assert.equal(data.cloudflare.account.id, "abcdef0123456789abcdef0123456789");
+    assert.equal(data.cloudflare.selectedProject.name, "html-reporter");
+    // The critical regression assertion: no re-login was attempted.
+    assert.ok(
+      !captured.some((item) => item.args.includes("login")),
+      "expected NO wrangler login call when already signed in"
+    );
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("Cloudflare logout clears selected account and session cache", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const { fakeSpawn, captured } = makeWranglerFake((args) => {
+    if (args.includes("logout")) {
+      return { code: 0, output: "Logged out" };
+    }
+    if (args.includes("whoami")) {
+      return {
+        code: 0,
+        output: JSON.stringify({
+          accounts: [
+            {
+              id: "abcdef0123456789abcdef0123456789",
+              name: "Personal"
+            }
+          ]
+        })
+      };
+    }
+    return { code: 0, output: "" };
+  });
+
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    cloudflareAuthSpawnImpl: fakeSpawn,
+    cloudflareListTimeoutMs: 1000
+  });
+
+  try {
+    const configResponse = await fetch(`${runtime.adminUrl}/api/config/pages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectName: "html-reporter",
+        accountId: "abcdef0123456789abcdef0123456789"
+      })
+    });
+    assert.equal(configResponse.status, 200);
+
+    const logoutResponse = await fetch(`${runtime.adminUrl}/api/cloudflare/logout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    assert.equal(logoutResponse.status, 200);
+    assert.ok(captured.some((item) => item.args.includes("logout")));
+
+    const statusResponse = await fetch(`${runtime.adminUrl}/api/status`);
+    assert.equal(statusResponse.status, 200);
+    const status = await statusResponse.json();
+    assert.equal(status.config.pages.accountId, "");
   } finally {
     await runtime.close();
   }

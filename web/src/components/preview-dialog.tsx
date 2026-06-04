@@ -45,7 +45,7 @@ export function PreviewDialog({
             />
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-              Preview unavailable.
+              Nothing to preview yet.
             </div>
           )}
         </div>

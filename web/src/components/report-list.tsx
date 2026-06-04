@@ -59,9 +59,9 @@ export function ReportList({ reports, onPreview, onEdit }: ReportListProps) {
           <FileText className="h-5 w-5 text-muted-foreground" />
         </div>
         <div className="space-y-1">
-          <p className="text-sm font-medium">No reports yet</p>
+          <p className="text-sm font-medium">Nothing published yet</p>
           <p className="text-xs text-muted-foreground">
-            Add a local HTML path above to get started.
+            Add an HTML or Markdown file above, then publish it in one click.
           </p>
         </div>
       </div>

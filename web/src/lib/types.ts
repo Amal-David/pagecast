@@ -1,7 +1,7 @@
 // Types mirror the exact JSON shapes emitted by src/server.js. Do not invent
 // fields: formatReport / formatPublication / /api/status are the source of truth.
 
-export type PublicationKind = "live" | "snapshot";
+export type PublicationKind = "snapshot";
 
 export interface Publication {
   token: string;
@@ -16,8 +16,9 @@ export interface Publication {
   publicUrl: string | null;
 }
 
-export type ReportKind = "path" | "upload";
+export type ReportKind = "path" | "upload" | "folder";
 export type SourceMode = "source-tracked" | "edited-in-pagecast";
+export type BuildStatus = "idle" | "building" | "ready" | "failed";
 
 export interface Report {
   id: string;
@@ -27,6 +28,11 @@ export interface Report {
   order: number;
   autoSync: boolean;
   sourceMode: SourceMode;
+  buildCommand: string;
+  buildOutputDir: string;
+  buildStatus: BuildStatus;
+  buildError: string;
+  lastBuildAt: string | null;
   createdAt: string;
   updatedAt: string;
   // Admin preview URL (/preview/:id/) — iframe src.
@@ -55,18 +61,10 @@ export interface CloudflareStatus {
   baseUrl: string;
 }
 
-export interface TunnelStatus {
-  running: boolean;
-  provider: string | null;
-  publicUrl: string | null;
-  localUrl: string | null;
-  startedAt: string | null;
-  logs: string[];
-}
-
 export interface PagesConfig {
   projectName: string;
   accountId: string;
+  accountName: string;
   branch: string;
   baseUrl: string;
 }
@@ -78,7 +76,6 @@ export interface AppConfig {
 export interface StatusResponse {
   admin: { ok: boolean };
   public: { localBaseUrl: string | null };
-  tunnel: TunnelStatus;
   cloudflare: CloudflareStatus;
   config: AppConfig;
 }

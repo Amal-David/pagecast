@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, Cloud, Loader2 } from "lucide-react";
+import { Check, Cloud, LogOut, Loader2 } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -18,7 +18,8 @@ import {
 } from "@/components/ui/select";
 import {
   useCloudflareAccount,
-  useCloudflareConnect
+  useCloudflareConnect,
+  useCloudflareLogout
 } from "@/hooks/use-cloudflare";
 import type { CloudflareStatus } from "@/lib/types";
 
@@ -26,17 +27,35 @@ interface CloudflareConnectProps {
   cloudflare: CloudflareStatus | undefined;
 }
 
+function displayAccountName(cloudflare: CloudflareStatus | undefined) {
+  const name = cloudflare?.accountName || "";
+  if (name.trim() && !/^\(?redacted\)?$/i.test(name.trim())) {
+    return name;
+  }
+  return cloudflare?.loggedIn || cloudflare?.accountId ? "Cloudflare account" : "";
+}
+
+function accountOptionLabel(account: { name?: string; id: string }, index: number) {
+  const name = account.name || "";
+  if (name.trim() && !/^\(?redacted\)?$/i.test(name.trim())) {
+    return name;
+  }
+  return `Cloudflare account ${index + 1}`;
+}
+
 export function CloudflareConnect({ cloudflare }: CloudflareConnectProps) {
   const connect = useCloudflareConnect();
   const selectAccount = useCloudflareAccount();
+  const logout = useCloudflareLogout();
   const [chosenAccount, setChosenAccount] = useState<string>("");
 
   const loggedIn = Boolean(cloudflare?.loggedIn);
   const accounts = cloudflare?.accounts ?? [];
-  const accountName = cloudflare?.accountName ?? "";
+  const accountName = displayAccountName(cloudflare);
   const projectName = cloudflare?.projectName ?? "";
-  // Multiple accounts but none selected yet → ask the user to choose.
-  const needsAccountChoice = loggedIn && accounts.length > 1 && !accountName;
+  const tokenAuth = cloudflare?.authMode === "api-token";
+  const selectedAccountId = cloudflare?.accountId || "";
+  const canChooseAccount = loggedIn && accounts.length > 1;
   const connected = loggedIn && Boolean(accountName) && Boolean(projectName);
 
   return (
@@ -45,10 +64,10 @@ export function CloudflareConnect({ cloudflare }: CloudflareConnectProps) {
         <div className="space-y-1.5">
           <CardTitle className="flex items-center gap-2 text-base">
             <Cloud className="h-4 w-4" />
-            Cloudflare Pages
+            Publishing account
           </CardTitle>
           <CardDescription>
-            Publish durable snapshots to your own account.
+            Sign in once, then publish pages from this workspace.
           </CardDescription>
         </div>
         {connected ? (
@@ -64,53 +83,74 @@ export function CloudflareConnect({ cloudflare }: CloudflareConnectProps) {
       </CardHeader>
       <CardContent className="space-y-4">
         {connected ? (
-          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
-            <dt className="text-muted-foreground">Account</dt>
-            <dd className="truncate font-medium">{accountName}</dd>
-            <dt className="text-muted-foreground">Project</dt>
-            <dd className="truncate font-medium">{projectName}</dd>
-            {cloudflare?.baseUrl ? (
-              <>
-                <dt className="text-muted-foreground">URL</dt>
-                <dd className="truncate font-mono text-xs">
-                  {cloudflare.baseUrl}
-                </dd>
-              </>
-            ) : null}
-          </dl>
-        ) : needsAccountChoice ? (
           <div className="space-y-3">
-            <p className="text-sm text-muted-foreground">
-              Choose which Cloudflare account to publish to.
-            </p>
-            <Select value={chosenAccount} onValueChange={setChosenAccount}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select an account" />
-              </SelectTrigger>
-              <SelectContent>
-                {accounts.map((account) => (
-                  <SelectItem key={account.id} value={account.id}>
-                    {account.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Button
-              className="w-full"
-              disabled={!chosenAccount || selectAccount.isPending}
-              onClick={() => selectAccount.mutate(chosenAccount)}
-            >
-              {selectAccount.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
+              <dt className="text-muted-foreground">Account</dt>
+              <dd className="truncate font-medium">{accountName}</dd>
+              <dt className="text-muted-foreground">Project</dt>
+              <dd className="truncate font-medium">{projectName}</dd>
+              {cloudflare?.baseUrl ? (
+                <>
+                  <dt className="text-muted-foreground">URL</dt>
+                  <dd className="truncate font-mono text-xs">
+                    {cloudflare.baseUrl}
+                  </dd>
+                </>
               ) : null}
-              Use this account
+            </dl>
+
+            {canChooseAccount ? (
+              <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+                <Select
+                  value={chosenAccount || selectedAccountId}
+                  onValueChange={setChosenAccount}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select an account" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {accounts.map((account, index) => (
+                      <SelectItem key={account.id} value={account.id}>
+                        {accountOptionLabel(account, index)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  variant="outline"
+                  disabled={
+                    !chosenAccount ||
+                    chosenAccount === selectedAccountId ||
+                    selectAccount.isPending
+                  }
+                  onClick={() => selectAccount.mutate(chosenAccount)}
+                >
+                  {selectAccount.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : null}
+                  Switch
+                </Button>
+              </div>
+            ) : null}
+
+            <Button
+              variant="outline"
+              className="w-full justify-start"
+              disabled={logout.isPending || tokenAuth}
+              onClick={() => logout.mutate()}
+            >
+              {logout.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <LogOut className="h-4 w-4" />
+              )}
+              {tokenAuth ? "Token auth managed by environment" : "Log out"}
             </Button>
           </div>
         ) : (
           <div className="space-y-3">
             <p className="text-sm text-muted-foreground">
-              One click signs in (reusing an existing session when present),
-              detects your account, and provisions a Pages project.
+              Connect the account you want Pagecast to use for publishing.
             </p>
             <Button
               className="w-full"

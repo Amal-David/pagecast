@@ -1,10 +1,10 @@
 # Pagecast
 
-Preview local HTML reports and publish them to durable **public URLs on your own
-Cloudflare Pages account**. Two sharing modes:
+Preview local HTML reports and static mini apps, then publish them to shareable
+URLs.
 
-- Durable static snapshots through Cloudflare Pages (the hero path).
-- Live local links through Tailscale Funnel.
+**Live demo:** <https://html-reporter.pages.dev/p/pagecast/> — the Pagecast landing
+page, published with Pagecast itself.
 
 ## Run (one command)
 
@@ -40,11 +40,11 @@ that makes your agent offer to publish reports it generates. See
 
 The admin UI is a clean, light shadcn interface. Core actions:
 
-- Paste an absolute `.html` or `.htm` file path, or a `file:///...` URL, to serve the report from its current folder.
-- Drop or choose an HTML file to cache a local copy under `.html-reporter/`.
+- Paste an absolute `.html`, `.htm`, `.md`, or `.markdown` file path, or a `file:///...` URL, to serve the page from its current folder.
+- Add a deployable static folder, or a source folder with an explicit build command and output directory.
+- Drop or choose HTML/Markdown files and browser-supported folder uploads to cache local copies under `.html-reporter/`.
 - **Drag to reorder** reports in the list; the order is saved.
-- Use **Snapshot** on a report to publish a durable Cloudflare Pages copy that keeps working when the laptop is closed.
-- Use **Live** on a report to create a versioned Tailscale link such as `v1`, `v2`, etc.
+- Use **Publish URL** on a page to create a published copy you can share.
 - Use **Revoke** on a version to disable only that exact link, or **Revoke all** to disable every published version for one report.
 
 ### Edit the URL, sync, and edit the HTML
@@ -78,7 +78,12 @@ One-click setup:
 3. If you have more than one Cloudflare account, a small chooser appears so you can
    pick which one to publish from; otherwise it is skipped entirely.
 
-Then press **Snapshot** on any report to publish it.
+Then press **Publish URL** on any report to publish it.
+
+For mini apps, Pagecast publishes static build output. React/Vite-style apps
+should point at a deployable output folder such as `dist`, or provide a build
+command like `npm run build` plus output directory. Python projects must export
+static assets first; Pagecast does not run a Python web server on Cloudflare Pages.
 
 For headless or automation use, create a scoped Cloudflare API token with Account >
 Cloudflare Pages > Edit permission for the one account you want to use, then start
@@ -100,23 +105,9 @@ Changing the local HTML file does not change an existing snapshot. Press **Snaps
 
 The Pages root does not publish a report listing. The generated static site only contains the exact `/p/<token>/` snapshot folders, a `404.html`, and no-store response headers.
 
-## Tailscale Live Links
-
-The public URL uses Tailscale Funnel:
-
-```sh
-tailscale funnel --bg --yes --https=443 http://127.0.0.1:4174
-```
-
-Tailscale is currently installed on this laptop. Start or sign in to Tailscale before pressing **Start URL**. Funnel also has to be enabled for the tailnet; if Tailscale returns an enable link, open it and approve Funnel in the Tailscale admin flow.
-
-Tailscale Funnel gives a stable `https://...ts.net` base URL. Pagecast publishes independent live versions under that base path, such as `/p/v1-.../`, `/p/v2-.../`, and `/p/client-demo-.../`.
-
-Live links serve path-based reports from disk, so edits to the local HTML file refresh on reload. Live links stop working when the laptop is offline, asleep, or the Funnel is revoked.
-
 ## Security Model
 
-The admin UI binds to `127.0.0.1`. Only the report server is meant to be exposed through Tailscale.
+The admin UI binds to `127.0.0.1`. Public sharing happens only through Cloudflare Pages.
 
 Draft report previews use the admin-only `/preview/:id/` route. The public server does not serve draft `/r/:id/` URLs. Public access only works for exact active publication links under `/p/:token/`, and revoked publication tokens return 404.
 
