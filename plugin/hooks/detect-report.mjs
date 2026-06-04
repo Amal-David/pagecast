@@ -1,8 +1,27 @@
 #!/usr/bin/env node
 // Passive PostToolUse hook: when a Write/Edit/MultiEdit creates or updates an
-// .html/.htm file, inject a non-blocking hint so the agent can offer to publish
-// it with pagecast. This hook NEVER blocks and NEVER publishes anything —
-// it only adds context. Any error exits 0 silently so it can't disrupt the agent.
+// HTML or Markdown file (a report, plan, doc, or dashboard), inject a
+// non-blocking hint so the agent can offer to publish it with Pagecast. This
+// hook NEVER blocks and NEVER publishes anything — it only adds context, and the
+// skill decides whether the file is actually worth offering. Any error exits 0
+// silently so it can't disrupt the agent.
+
+// Obvious non-artifacts the agent should not be nudged to publish. The skill
+// applies the real judgment; this just keeps the common noise down.
+const SKIP_BASENAMES = new Set([
+  "readme.md",
+  "readme.markdown",
+  "changelog.md",
+  "contributing.md",
+  "license.md",
+  "code_of_conduct.md",
+  "security.md",
+  "agents.md",
+  "claude.md",
+  "todo.md",
+  "tasks.md",
+  "notes.md"
+]);
 
 function readStdin() {
   return new Promise((resolve) => {
@@ -29,11 +48,25 @@ function reportPathFrom(toolInput) {
     return null;
   }
   const lower = candidate.toLowerCase();
-  if (!lower.endsWith(".html") && !lower.endsWith(".htm")) {
+  const isPublishable =
+    lower.endsWith(".html") ||
+    lower.endsWith(".htm") ||
+    lower.endsWith(".md") ||
+    lower.endsWith(".markdown");
+  if (!isPublishable) {
     return null;
   }
-  // Skip obvious non-report html (node_modules, hidden files).
-  if (candidate.includes("/node_modules/") || candidate.split("/").pop().startsWith(".")) {
+
+  const base = candidate.split("/").pop() || "";
+  // Skip obvious non-artifacts: build/dependency dirs, hidden files, and common
+  // repo-meta files that nobody wants to publish.
+  if (
+    candidate.includes("/node_modules/") ||
+    candidate.includes("/dist/") ||
+    candidate.includes("/.git/") ||
+    base.startsWith(".") ||
+    SKIP_BASENAMES.has(base.toLowerCase())
+  ) {
     return null;
   }
   return candidate;
@@ -52,10 +85,11 @@ async function main() {
     }
 
     const additionalContext =
-      `An HTML report file was just written at "${filePath}". ` +
-      `If it is a report worth sharing, ask the user "Should I publish this with the reporter?" ` +
-      `and on yes run \`npx pagecast publish "${filePath}" --json\` to get a durable public URL ` +
-      `on their own Cloudflare account. Do not publish without explicit confirmation.`;
+      `An HTML or Markdown file was just written at "${filePath}". ` +
+      `If it is a substantial, finished artifact worth sharing (a report, plan, doc, or dashboard) — ` +
+      `not a scratch/internal file — offer once: ask the user "Want me to publish this with Pagecast?" ` +
+      `and only on an explicit yes run \`npx pagecast publish "${filePath}" --json\` to get a durable ` +
+      `public URL on their own free Cloudflare account. Never publish without confirmation, and don't re-ask for this file.`;
 
     process.stdout.write(
       JSON.stringify({

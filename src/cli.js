@@ -9,7 +9,7 @@ import { startServers, publishReportSnapshot } from "./server.js";
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // When invoked via npx, the package lives in the npm cache, so reports and config
 // must live in the user's working directory, not next to the installed code.
-const dataDir = path.join(process.cwd(), ".html-reporter");
+const dataDir = path.join(process.cwd(), ".pagecast");
 const staticDir = path.join(packageRoot, "public");
 
 function openBrowser(url) {
@@ -49,7 +49,7 @@ function parseFlags(args) {
 
 async function serve() {
   const runtime = await startServers({ dataDir, staticDir });
-  console.log(`HTML Reporter admin: ${runtime.adminUrl}`);
+  console.log(`Pagecast admin: ${runtime.adminUrl}`);
   console.log(`Local report server: ${runtime.publicUrl}`);
   console.log("Opening the admin UI in your browser. Press Ctrl-C to stop.");
   openBrowser(runtime.adminUrl);

@@ -59,7 +59,7 @@ function makeWranglerFake(handlers) {
 }
 
 async function makeTempDir() {
-  return fs.mkdtemp(path.join(os.tmpdir(), "html-reporter-test-"));
+  return fs.mkdtemp(path.join(os.tmpdir(), "pagecast-test-"));
 }
 
 test("path reports resolve entry and sibling assets with traversal guards", async () => {
@@ -250,9 +250,9 @@ test("multipart upload parser extracts the uploaded HTML file", () => {
 test("tunnel URL extraction handles Tailscale Funnel output", () => {
   assert.equal(
     extractPublicUrl(
-      "Available on the internet:\n|-- https://html-reporter.example.ts.net\n|--> http://127.0.0.1:4174"
+      "Available on the internet:\n|-- https://pagecast.example.ts.net\n|--> http://127.0.0.1:4174"
     ),
-    "https://html-reporter.example.ts.net"
+    "https://pagecast.example.ts.net"
   );
   assert.equal(
     extractPublicUrl("Visit https://example.trycloudflare.com or https://quiet-bird.loca.lt"),
@@ -385,7 +385,7 @@ test("Wrangler Pages project list parsing normalizes selectable projects", () =>
           account_name: "Team"
         },
         {
-          project_name: "html-reporter",
+          project_name: "pagecast",
           account: { id: "abcdef0123456789abcdef0123456789", name: "Personal" }
         },
         {
@@ -397,11 +397,11 @@ test("Wrangler Pages project list parsing normalizes selectable projects", () =>
 
   assert.deepEqual(projects, [
     {
-      name: "html-reporter",
+      name: "pagecast",
       accountId: "abcdef0123456789abcdef0123456789",
       accountName: "Personal",
       productionBranch: "",
-      baseUrl: "https://html-reporter.pages.dev"
+      baseUrl: "https://pagecast.pages.dev"
     },
     {
       name: "team-reports",
@@ -412,7 +412,7 @@ test("Wrangler Pages project list parsing normalizes selectable projects", () =>
     }
   ]);
   assert.equal(chooseWranglerPagesProject(projects, { projectName: "team-reports" }).name, "team-reports");
-  assert.equal(chooseWranglerPagesProject(projects, {}).name, "html-reporter");
+  assert.equal(chooseWranglerPagesProject(projects, {}).name, "pagecast");
 
   assert.deepEqual(
     parseWranglerPagesProjects(
@@ -421,17 +421,17 @@ test("Wrangler Pages project list parsing normalizes selectable projects", () =>
         "│ Name          │ Production Branch │",
         "├───────────────┼───────────────────┤",
         "│ team-reports  │ main              │",
-        "│ html-reporter │ production        │",
+        "│ pagecast │ production        │",
         "└───────────────┴───────────────────┘"
       ].join("\n")
     ),
     [
       {
-        name: "html-reporter",
+        name: "pagecast",
         accountId: "",
         accountName: "",
         productionBranch: "production",
-        baseUrl: "https://html-reporter.pages.dev"
+        baseUrl: "https://pagecast.pages.dev"
       },
       {
         name: "team-reports",
@@ -501,7 +501,7 @@ test("Cloudflare login runs Wrangler OAuth and saves the detected Pages project"
                 account_name: "Team"
               },
               {
-                name: "html-reporter",
+                name: "pagecast",
                 account_id: "abcdef0123456789abcdef0123456789",
                 account_name: "Personal"
               }
@@ -550,8 +550,8 @@ test("Cloudflare login runs Wrangler OAuth and saves the detected Pages project"
     ]);
     assert.equal(data.cloudflare.authenticated, true);
     assert.equal(data.cloudflare.projectCount, 2);
-    assert.equal(data.cloudflare.selectedProject.name, "html-reporter");
-    assert.equal(data.config.pages.projectName, "html-reporter");
+    assert.equal(data.cloudflare.selectedProject.name, "pagecast");
+    assert.equal(data.config.pages.projectName, "pagecast");
     assert.equal(data.config.pages.accountId, "abcdef0123456789abcdef0123456789");
   } finally {
     await runtime.close();
@@ -591,7 +591,7 @@ test("Cloudflare project refresh falls back when Wrangler does not support JSON 
             "│ Name          │ Production Branch │",
             "├───────────────┼───────────────────┤",
             "│ team-reports  │ main              │",
-            "│ html-reporter │ production        │",
+            "│ pagecast │ production        │",
             "└───────────────┴───────────────────┘"
           ].join("\n")
         )
@@ -617,7 +617,7 @@ test("Cloudflare project refresh falls back when Wrangler does not support JSON 
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        projectName: "html-reporter",
+        projectName: "pagecast",
         accountId: "0123456789abcdef0123456789abcdef"
       })
     });
@@ -643,8 +643,8 @@ test("Cloudflare project refresh falls back when Wrangler does not support JSON 
       }
     ]);
     assert.equal(data.cloudflare.projectCount, 2);
-    assert.equal(data.cloudflare.selectedProject.name, "html-reporter");
-    assert.equal(data.config.pages.projectName, "html-reporter");
+    assert.equal(data.cloudflare.selectedProject.name, "pagecast");
+    assert.equal(data.config.pages.projectName, "pagecast");
   } finally {
     await runtime.close();
   }
@@ -877,14 +877,14 @@ test("Cloudflare connect auto-detects one account and auto-creates the Pages pro
     }
     if (args.includes("create")) {
       created = true;
-      return { code: 0, output: "✨ Successfully created the 'html-reporter' project." };
+      return { code: 0, output: "✨ Successfully created the 'pagecast' project." };
     }
     if (args.includes("list")) {
       return {
         code: 0,
         output: created
           ? JSON.stringify([
-              { name: "html-reporter", account_id: "abcdef0123456789abcdef0123456789" }
+              { name: "pagecast", account_id: "abcdef0123456789abcdef0123456789" }
             ])
           : JSON.stringify([])
       };
@@ -915,7 +915,7 @@ test("Cloudflare connect auto-detects one account and auto-creates the Pages pro
     assert.equal(data.cloudflare.autoCreated, true);
     assert.equal(data.cloudflare.account.id, "abcdef0123456789abcdef0123456789");
     assert.equal(data.cloudflare.account.name, "Personal");
-    assert.equal(data.cloudflare.selectedProject.name, "html-reporter");
+    assert.equal(data.cloudflare.selectedProject.name, "pagecast");
     assert.equal(data.config.pages.accountId, "abcdef0123456789abcdef0123456789");
     assert.equal(data.config.pages.accountName, "Personal");
 
@@ -929,7 +929,7 @@ test("Cloudflare connect auto-detects one account and auto-creates the Pages pro
     const status = await statusResponse.json();
     assert.equal(status.cloudflare.loggedIn, true);
     assert.equal(status.cloudflare.accountName, "Personal");
-    assert.equal(status.cloudflare.projectName, "html-reporter");
+    assert.equal(status.cloudflare.projectName, "pagecast");
   } finally {
     await runtime.close();
   }
@@ -956,7 +956,7 @@ test("Headless publishReportSnapshot auto-provisions and returns a public URL", 
       return {
         code: 0,
         output: JSON.stringify([
-          { name: "html-reporter", account_id: "abcdef0123456789abcdef0123456789" }
+          { name: "pagecast", account_id: "abcdef0123456789abcdef0123456789" }
         ])
       };
     }
@@ -986,8 +986,8 @@ test("Headless publishReportSnapshot auto-provisions and returns a public URL", 
     pagesDeployTimeoutMs: 1000
   });
 
-  assert.match(result.url, /^https:\/\/html-reporter\.pages\.dev\/p\/.+\/$/);
-  assert.equal(result.projectName, "html-reporter");
+  assert.match(result.url, /^https:\/\/pagecast\.pages\.dev\/p\/.+\/$/);
+  assert.equal(result.projectName, "pagecast");
   assert.ok(deployCommands.length >= 1, "expected a Pages deploy");
 });
 
@@ -1088,7 +1088,7 @@ test("Cloudflare connect detects an existing session when wrangler lacks --json 
     "┌───────────────┬───────────────────┐",
     "│ Name          │ Production Branch │",
     "├───────────────┼───────────────────┤",
-    "│ html-reporter │ main              │",
+    "│ pagecast │ main              │",
     "└───────────────┴───────────────────┘"
   ].join("\n");
 
@@ -1129,7 +1129,7 @@ test("Cloudflare connect detects an existing session when wrangler lacks --json 
     const data = await response.json();
     assert.equal(data.cloudflare.authenticated, true);
     assert.equal(data.cloudflare.account.id, "abcdef0123456789abcdef0123456789");
-    assert.equal(data.cloudflare.selectedProject.name, "html-reporter");
+    assert.equal(data.cloudflare.selectedProject.name, "pagecast");
     // The critical regression assertion: no re-login was attempted.
     assert.ok(
       !captured.some((item) => item.args.includes("login")),
@@ -1177,7 +1177,7 @@ test("Cloudflare logout clears selected account and session cache", async () => 
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        projectName: "html-reporter",
+        projectName: "pagecast",
         accountId: "abcdef0123456789abcdef0123456789"
       })
     });

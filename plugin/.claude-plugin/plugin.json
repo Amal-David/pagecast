@@ -1,10 +1,10 @@
 {
   "name": "pagecast",
-  "displayName": "HTML Reporter",
-  "version": "0.1.0",
-  "description": "When your agent creates an HTML report, offer to publish it to a durable public URL on the user's own Cloudflare Pages account.",
+  "displayName": "Pagecast",
+  "version": "0.2.0",
+  "description": "When your agent finishes an HTML or Markdown report, plan, or doc, it offers to publish it to a durable public URL on your own free Cloudflare account.",
   "author": {
-    "name": "HTML Reporter"
+    "name": "Pagecast"
   },
   "license": "MIT"
 }

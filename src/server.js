@@ -20,7 +20,7 @@ export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 export const MAX_FOLDER_UPLOAD_BYTES = 100 * 1024 * 1024;
 export const MAX_FOLDER_UPLOAD_FILES = 1000;
 export const MAX_FOLDER_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
-export const DEFAULT_PAGES_PROJECT_NAME = "html-reporter";
+export const DEFAULT_PAGES_PROJECT_NAME = "pagecast";
 export const DEFAULT_PAGES_BRANCH = "main";
 export const DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 export const DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS = 60 * 1000;
@@ -816,7 +816,7 @@ async function normalizeLocalHtmlPathCandidate(candidatePath) {
   return resolvedPath;
 }
 
-export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".html-reporter") } = {}) {
+export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast") } = {}) {
   const configPath = path.join(dataDir, "config.json");
   let config = normalizeConfig();
 
@@ -886,7 +886,7 @@ export function createDeployQueue() {
 }
 
 export function createCloudflarePagesPublisher({
-  dataDir = path.join(PROJECT_ROOT, ".html-reporter"),
+  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   spawnImpl = spawn,
   timeoutMs = 180000,
   getRedirects = () => []
@@ -1304,7 +1304,7 @@ export function createCloudflareAuthManager({
 }
 
 export function createReportStore({
-  dataDir = path.join(PROJECT_ROOT, ".html-reporter"),
+  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   buildSpawnImpl = spawn,
   buildTimeoutMs = 5 * 60 * 1000
 } = {}) {
@@ -2209,7 +2209,7 @@ function tunnelCommandFor(provider, localUrl) {
     };
   }
 
-  throw appError("HTML Reporter is configured for Tailscale Funnel only.", 400);
+  throw appError("Pagecast is configured for Tailscale Funnel only.", 400);
 }
 
 function hasTailscaleFunnelCapability(capabilities) {
@@ -3421,7 +3421,7 @@ export async function startServers({
   host = DEFAULT_HOST,
   adminPort = Number(process.env.PORT || DEFAULT_ADMIN_PORT),
   publicPort = Number(process.env.PUBLIC_PORT || DEFAULT_PUBLIC_PORT),
-  dataDir = path.join(PROJECT_ROOT, ".html-reporter"),
+  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   staticDir = path.join(PROJECT_ROOT, "public"),
   spawnImpl = spawn,
   tunnelTimeoutMs = 30000,
@@ -3522,7 +3522,7 @@ export async function startServers({
 export async function publishReportSnapshot({
   path: reportPath,
   label,
-  dataDir = path.join(PROJECT_ROOT, ".html-reporter"),
+  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
   pagesDeploySpawnImpl = spawn,
   cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
@@ -3585,7 +3585,7 @@ export async function publishReportSnapshot({
 
 async function main() {
   const runtime = await startServers();
-  console.log(`HTML Reporter admin: ${runtime.adminUrl}`);
+  console.log(`Pagecast admin: ${runtime.adminUrl}`);
   console.log(`Local report server: ${runtime.publicUrl}`);
   console.log("Press Ctrl-C to stop.");
 

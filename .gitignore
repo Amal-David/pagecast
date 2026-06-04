@@ -1,5 +1,5 @@
 # Runtime data + build deps
-.html-reporter/
+.pagecast/
 node_modules/
 web/node_modules/
 web/dist/

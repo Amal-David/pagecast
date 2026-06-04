@@ -1,16 +1,16 @@
 {
   "name": "pagecast",
   "owner": {
-    "name": "HTML Reporter"
+    "name": "Pagecast"
   },
   "metadata": {
-    "description": "Publish agent-generated HTML reports to durable public URLs on your own Cloudflare account."
+    "description": "Publish agent-generated HTML or Markdown reports to durable public URLs on your own free Cloudflare account."
   },
   "plugins": [
     {
       "name": "pagecast",
       "source": "./plugin",
-      "description": "Offers to publish freshly created HTML reports to a public URL via the pagecast CLI."
+      "description": "Offers to publish freshly created HTML/Markdown reports, plans, and docs to a public URL via the pagecast CLI."
     }
   ]
 }
