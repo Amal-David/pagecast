@@ -184,7 +184,7 @@ function printProjectsResult(result, json) {
 async function serve() {
   const runtime = await startServers({ dataDir, staticDir });
   console.log(`Pagecast admin: ${runtime.adminUrl}`);
-  console.log(`Local report server: ${runtime.publicUrl}`);
+  console.log(`Local published-page server: ${runtime.publicUrl}`);
   console.log("Opening the admin UI in your browser. Press Ctrl-C to stop.");
   openBrowser(runtime.adminUrl);
 

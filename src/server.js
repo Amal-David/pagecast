@@ -3899,7 +3899,7 @@ export async function publishReportSnapshot({
 async function main() {
   const runtime = await startServers();
   console.log(`Pagecast admin: ${runtime.adminUrl}`);
-  console.log(`Local report server: ${runtime.publicUrl}`);
+  console.log(`Local published-page server: ${runtime.publicUrl}`);
   console.log("Press Ctrl-C to stop.");
 
   const shutdown = async () => {

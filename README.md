@@ -48,8 +48,13 @@ npx pagecast
 This starts the local app and opens the admin UI.
 
 - Admin UI: `http://127.0.0.1:4173`
-- Local report server: `http://127.0.0.1:4174`
+- Local published-page server: `http://127.0.0.1:4174`
 - Local data/config: `.pagecast/` in your current working directory
+
+Use the admin UI on `4173` for normal work. The `4174` server is intentionally
+separate: it serves local published-page routes such as `/p/<slug>/` so Pagecast
+can preview the same URL shape it deploys to Cloudflare Pages. Its root path is
+not an app and returns `404`; use `/healthz` only to check that it is running.
 
 From a clone:
 
