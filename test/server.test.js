@@ -2603,3 +2603,51 @@ test("updatePages preserves an already-provisioned feedback config", async () =>
 
   await fs.rm(dir, { recursive: true, force: true });
 });
+
+test("status auto-detects an existing Wrangler login on the first poll", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+
+  // Wrangler is already authenticated from a prior session: whoami returns an
+  // account. No connect/login happens in this test.
+  function authedWrangler() {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.kill = () => {};
+    setImmediate(() => {
+      child.stdout.emit(
+        "data",
+        Buffer.from(
+          JSON.stringify([
+            { name: "pagecast", account_id: "0123456789abcdef0123456789abcdef", account_name: "Personal" }
+          ])
+        )
+      );
+      child.exitCode = 0;
+      child.emit("exit", 0, null);
+    });
+    return child;
+  }
+
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    cloudflareAuthSpawnImpl: authedWrangler,
+    cloudflareListTimeoutMs: 1000
+  });
+
+  try {
+    // The very first status call must reflect the existing login — not report
+    // "not connected" until the user clicks Connect again.
+    const data = await (await fetch(`${runtime.adminUrl}/api/status`)).json();
+    assert.equal(data.cloudflare.loggedIn, true);
+    assert.equal(data.cloudflare.accounts.length, 1);
+  } finally {
+    await runtime.close();
+  }
+});

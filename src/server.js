@@ -1559,6 +1559,13 @@ export function createCloudflareAuthManager({
     return sessionCache ? sessionCache.value : { loggedIn: false, accounts: [] };
   }
 
+  // Whether the session has ever been probed. False on a fresh boot, so callers
+  // can do a one-time refresh to detect an existing Wrangler login instead of
+  // reporting "not connected" until the user clicks Connect again.
+  function isSessionInitialized() {
+    return sessionCache !== null;
+  }
+
   async function refreshSession() {
     let accounts = [];
     try {
@@ -1584,6 +1591,7 @@ export function createCloudflareAuthManager({
     ensureProject,
     setupFeedback,
     cachedSession,
+    isSessionInitialized,
     refreshSession,
     invalidateSession
   };
@@ -3336,9 +3344,16 @@ async function handleApi(
 
   if (url.pathname === "/api/status" && req.method === "GET") {
     const credential = cloudflareCredentialStatus();
-    const session = credential.tokenConfigured
-      ? { loggedIn: credential.accountIdConfigured, accounts: [] }
-      : cloudflareAuth.cachedSession();
+    let session;
+    if (credential.tokenConfigured) {
+      session = { loggedIn: credential.accountIdConfigured, accounts: [] };
+    } else if (!cloudflareAuth.isSessionInitialized()) {
+      // First status call after boot: probe Wrangler once so an existing login
+      // is detected and the UI shows "connected" without a manual reconnect.
+      session = await cloudflareAuth.refreshSession();
+    } else {
+      session = cloudflareAuth.cachedSession();
+    }
     const pages = configStore.get().pages;
     const activeAccount =
       session.accounts.find((account) => account.id === pages.accountId) ||
