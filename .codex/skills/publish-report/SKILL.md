@@ -1,6 +1,6 @@
 ---
 name: publish-report
-description: Publish finished local HTML, Markdown, or built static web projects with Pagecast. Use when the user asks Codex to publish, share, make a public link for, or send a local report/doc/dashboard/web project from terminal, Codex CLI, or Codex desktop, or when Codex has just created a substantial shareable .html, .htm, .md, .markdown, or static build output.
+description: Publish local HTML, Markdown, or built static web projects with Pagecast as shareable public URLs. Use whenever Codex creates or finishes an .html, .htm, .md, .markdown, or static build output that a person could share (a report, plan, doc, dashboard, or analysis) — proactively offer to publish it without being asked — and whenever the user asks to publish, share, make a public link for, or send a local report/doc/dashboard/web project from terminal, Codex CLI, or Codex desktop.
 ---
 
 # Publish With Pagecast
@@ -16,21 +16,29 @@ Cloudflare Pages project.
 Never publish without explicit confirmation. Publishing makes the selected
 artifact publicly reachable.
 
+## Be Proactive
+
+**Default to offering.** Right after you create or finish a shareable file, offer
+once to publish it — do not wait for the user to ask, and do not stay silent
+because you are unsure it is "worth it." If it could be shared, offer. When it is
+borderline, offer anyway; the user can say no.
+
 ## What To Publish
 
-Offer once for finished, shareable artifacts:
+Proactively offer once for any shareable artifact you produce:
 
 - HTML reports, dashboards, coverage reports, Playwright/Lighthouse output, or
   static single-page mini apps.
-- Markdown reports, plans, docs, proposals, release notes, or summaries meant to
-  be read by someone else.
+- Markdown reports, plans, docs, proposals, release notes, analyses, or summaries
+  meant to be read by someone else.
 - Static web projects after they are built. Publish the generated entry file,
   usually `dist/index.html`, `build/index.html`, `out/index.html`, or
   `public/index.html`; Pagecast stages sibling assets from that output folder.
 
-Do not offer for scratch notes, source files, repo metadata, README/CHANGELOG,
-AGENTS.md/CLAUDE.md, task files, secrets, config files, dependency/build folders,
-hidden files, or anything the user has not made shareable.
+Only skip (do not offer) clearly non-shareable files: scratch/draft notes the
+user is keeping private, source files, repo metadata (README/CHANGELOG,
+AGENTS.md/CLAUDE.md), task files, secrets, config files, dependency/build
+folders, and hidden files.
 
 ## Confirmation
 

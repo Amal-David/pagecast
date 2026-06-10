@@ -2034,6 +2034,28 @@ export function createReportStore({
       return { statusCode: 404, message: "Report asset was not found." };
     }
 
+    // Symlink-escape guard for sibling assets. A symlink inside the report folder
+    // (e.g. leak.txt -> /etc/passwd) passes the lexical isPathInside check above,
+    // but fs.stat follows it, so without this a crafted symlink could serve files
+    // outside the report root. Resolve the real path and re-verify containment.
+    // (This mirrors the symlink rejection already enforced when staging snapshots
+    // for Cloudflare.) The entry file itself is exempt: a `path` report can point
+    // at a file the user deliberately chose, including a symlink.
+    if (relativeAssetPath !== "") {
+      try {
+        const realRoot = await fs.realpath(rootDir);
+        const realTarget = await fs.realpath(targetPath);
+        if (!isPathInside(realRoot, realTarget)) {
+          return { statusCode: 403, message: "Asset path is not allowed." };
+        }
+      } catch (error) {
+        if (error.code === "ENOENT") {
+          return { statusCode: 404, message: "Report asset was not found." };
+        }
+        throw error;
+      }
+    }
+
     // When the requested asset IS a markdown entry, render it to HTML in memory
     // so the local preview serves a real document. Sibling assets (images, css)
     // continue to resolve as files. Published snapshots are rendered on disk by
@@ -2960,6 +2982,46 @@ export function createPublicHandler({ store }) {
   };
 }
 
+// DNS-rebinding defense for the admin server. The admin API is unauthenticated
+// and can run shell (folder build commands), so it must only answer requests
+// addressed to a loopback host. A malicious web page that rebinds its own domain
+// to 127.0.0.1 still sends *its* Host header (e.g. "evil.example"), which fails
+// this check, while the real admin UI on 127.0.0.1/localhost passes.
+export function isLoopbackHostHeader(hostHeader, bindHost) {
+  if (!hostHeader) {
+    // No Host header (HTTP/1.0, some internal callers) — the request cannot have
+    // come from a rebound browser origin, so allow it.
+    return true;
+  }
+  let hostname = String(hostHeader);
+  const ipv6 = /^\[([^\]]+)\](?::\d+)?$/.exec(hostname);
+  if (ipv6) {
+    // Bracketed IPv6: "[::1]:4173" -> "::1".
+    hostname = ipv6[1];
+  } else if ((hostname.match(/:/g) || []).length <= 1) {
+    // "host:port" or bare "host" — strip a single trailing ":port" only. A value
+    // with more than one colon is a bare IPv6 literal (e.g. "::1") and is left
+    // intact rather than truncated at its first colon.
+    const colon = hostname.lastIndexOf(":");
+    if (colon > -1) {
+      hostname = hostname.slice(0, colon);
+    }
+  }
+  hostname = hostname.toLowerCase();
+  if (hostname === "localhost" || hostname === "::1") {
+    return true;
+  }
+  // The entire 127.0.0.0/8 block is loopback.
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) {
+    return true;
+  }
+  // An explicitly configured non-default bind host is trusted by definition.
+  if (bindHost && hostname === String(bindHost).toLowerCase()) {
+    return true;
+  }
+  return false;
+}
+
 export function createAdminHandler({
   store,
   configStore,
@@ -2970,10 +3032,19 @@ export function createAdminHandler({
   getLocalPublicBaseUrl,
   tunnelManager,
   deployQueue,
-  watchManager
+  watchManager,
+  bindHost = DEFAULT_HOST
 }) {
   return async function adminHandler(req, res) {
     try {
+      if (!isLoopbackHostHeader(req.headers.host, bindHost)) {
+        sendText(
+          res,
+          403,
+          "Forbidden: the Pagecast admin server only accepts loopback (localhost) requests."
+        );
+        return;
+      }
       const url = new URL(req.url, `http://${req.headers.host || DEFAULT_HOST}`);
 
       if (url.pathname.startsWith("/api/")) {
@@ -3529,7 +3600,12 @@ export async function startServers({
     store,
     pagesPublisher,
     configStore,
-    deployQueue
+    deployQueue,
+    // Auto-sync runs in the background; surface failures (e.g. expired Cloudflare
+    // auth) instead of swallowing them, so a silently-broken watch is visible.
+    onError: (error) => {
+      console.warn(`Pagecast auto-sync failed: ${error?.message || error}`);
+    }
   });
   for (const report of store.listAutoSyncReports()) {
     watchManager.register(report.id);
@@ -3557,7 +3633,8 @@ export async function startServers({
       getLocalPublicBaseUrl: () => localPublicBaseUrl,
       tunnelManager,
       deployQueue,
-      watchManager
+      watchManager,
+      bindHost: host
     })
   );
 

@@ -15,6 +15,7 @@ import {
   createReportStore,
   deployCloudflarePagesSite,
   extractPublicUrl,
+  isLoopbackHostHeader,
   listCloudflarePagesProjects,
   localHtmlPathCandidates,
   normalizeAssetRequestPath,
@@ -93,6 +94,40 @@ test("path reports resolve entry and sibling assets with traversal guards", asyn
 
   const hidden = await store.resolveAsset(report.id, ".env");
   assert.equal(hidden.statusCode, 403);
+});
+
+test("sibling asset that is a symlink escaping the report root is rejected", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportDir = path.join(tempDir, "report");
+  await fs.mkdir(reportDir, { recursive: true });
+  await fs.writeFile(path.join(reportDir, "index.html"), "<h1>Report</h1>");
+
+  // A secret outside the report folder, and a symlink inside it pointing at the
+  // secret. The lexical path of the symlink IS inside the root, so only a
+  // realpath-based guard catches the escape.
+  const secretPath = path.join(tempDir, "secret.txt");
+  await fs.writeFile(secretPath, "TOP SECRET");
+  const linkPath = path.join(reportDir, "leak.txt");
+  try {
+    await fs.symlink(secretPath, linkPath);
+  } catch {
+    return; // Platform without symlink support — nothing to assert.
+  }
+
+  const store = createReportStore({ dataDir });
+  await store.init();
+  const report = await store.addPath(path.join(reportDir, "index.html"));
+
+  const leaked = await store.resolveAsset(report.id, "leak.txt");
+  assert.equal(leaked.statusCode, 403, "symlink escaping the report root must be blocked");
+
+  // A symlink that stays inside the root is still served.
+  const innerTarget = path.join(reportDir, "real.css");
+  await fs.writeFile(innerTarget, "body{}");
+  await fs.symlink(innerTarget, path.join(reportDir, "alias.css"));
+  const inner = await store.resolveAsset(report.id, "alias.css");
+  assert.equal(inner.statusCode, 200, "in-root symlink should still resolve");
 });
 
 test("uploads are cached as report entries", async () => {
@@ -2159,6 +2194,41 @@ test("markdown renderer covers the common subset and is security-hardened", () =
   assert.match(jsLink, /<a href="#">click<\/a>/);
 });
 
+test("markdown renderer never passes raw author HTML through as live markup", () => {
+  // Regression for the raw-<img>/<a> passthrough XSS: literal HTML typed in the
+  // source must be escaped, never emitted as an executable tag, in every block
+  // context (paragraph, heading, list item). Published markdown pages are PUBLIC.
+  const vectors = [
+    "<img src=x onerror=alert(document.domain)>",
+    "# <img src=x onerror=alert(1)>",
+    "- <img src=x onerror=alert(1)>",
+    "> <img src=x onerror=alert(1)>",
+    '<a href="javascript:alert(1)">x</a>',
+    "<svg onload=alert(1)>",
+    "<iframe src=javascript:alert(1)>"
+  ];
+  for (const vector of vectors) {
+    const out = renderMarkdownBody(vector);
+    // No live HTML tag may appear: the author's literal "<" must be escaped to
+    // "&lt;". (The escaped text may still contain inert substrings like
+    // "onerror=" — that is harmless; what matters is it is not a real tag.)
+    assert.doesNotMatch(out, /<(?:img|svg|iframe|script|a )/i, `live tag survived for: ${vector}`);
+    assert.match(out, /&lt;/, `expected escaped output for: ${vector}`);
+  }
+
+  // Emphasis must still apply across a link (previously dropped).
+  assert.match(
+    renderMarkdownBody("**a [b](https://x) c**"),
+    /<strong>a <a href="https:\/\/x">b<\/a> c<\/strong>/
+  );
+
+  // The full document carries a script-blocking CSP as defense in depth.
+  assert.match(
+    markdownToHtml("# hi"),
+    /<meta http-equiv="Content-Security-Policy"[^>]*script/i
+  );
+});
+
 test("markdownToHtml wraps body in a complete self-contained document", () => {
   const doc = markdownToHtml("# Heading\n\nSome **text**.", { title: "My Report" });
   assert.match(doc, /^<!doctype html>/i);
@@ -2281,4 +2351,68 @@ test("markdown uploads are accepted and stored as raw markdown", async () => {
   assert.equal(entry.contentType, "text/html; charset=utf-8");
   assert.match(entry.body, /<h1>Uploaded<\/h1>/);
   assert.match(entry.body, /<strong>drop<\/strong>/);
+});
+
+test("isLoopbackHostHeader allows loopback and rejects rebound foreign hosts", () => {
+  // Allowed: the real admin UI and CLI talk to loopback names/IPs.
+  for (const ok of [
+    "127.0.0.1:4173",
+    "127.0.0.1",
+    "localhost:4173",
+    "localhost",
+    "[::1]:4173",
+    "::1",
+    "127.5.5.5:80",
+    undefined,
+    ""
+  ]) {
+    assert.equal(isLoopbackHostHeader(ok, "127.0.0.1"), true, `expected allow: ${ok}`);
+  }
+  // Rejected: a DNS-rebinding page sends its own domain as Host.
+  for (const bad of [
+    "evil.example",
+    "evil.example:4173",
+    "attacker.com",
+    "169.254.169.254",
+    "192.168.1.50:4173"
+  ]) {
+    assert.equal(isLoopbackHostHeader(bad, "127.0.0.1"), false, `expected reject: ${bad}`);
+  }
+  // An explicitly configured bind host is trusted.
+  assert.equal(isLoopbackHostHeader("0.0.0.0:4173", "0.0.0.0"), true);
+});
+
+test("admin server rejects requests with a non-loopback Host header (DNS rebinding)", async () => {
+  const { request } = await import("node:http");
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-host-"));
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public")
+  });
+
+  const callWithHost = (hostHeader) =>
+    new Promise((resolve, reject) => {
+      const port = runtime.adminServer.address().port;
+      const req = request(
+        { host: "127.0.0.1", port, path: "/api/status", method: "GET", headers: { Host: hostHeader } },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode);
+        }
+      );
+      req.on("error", reject);
+      req.end();
+    });
+
+  try {
+    // A rebound attacker domain is blocked before reaching any handler.
+    assert.equal(await callWithHost("evil.example"), 403);
+    // The legitimate loopback Host is served normally.
+    assert.notEqual(await callWithHost("127.0.0.1"), 403);
+  } finally {
+    await runtime.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
 });

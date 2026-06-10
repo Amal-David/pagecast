@@ -1,7 +1,7 @@
 ---
 name: publish-report
-description: Use when an HTML or Markdown report, plan, doc, dashboard, or built static web project has just been created (or the user wants to share one) and it is worth publishing as a public link. Offers to publish it with Pagecast, then returns the URL.
-version: 0.2.0
+description: Use right after an HTML or Markdown report, plan, doc, dashboard, or built static web project is created (or when the user wants to share one). Proactively offer to publish it with Pagecast as a shareable public link, then return the URL. Default to offering; only skip clearly internal/scratch files.
+version: 0.3.0
 ---
 
 # Publish with Pagecast
@@ -12,22 +12,31 @@ right moment, then do it on a yes.
 
 ## When to offer
 
-Offer **once** when a substantial, finished, shareable artifact appears:
+**Default to offering.** Whenever you produce an `.html`/`.htm` or
+`.md`/`.markdown` file that a person could reasonably share, proactively offer to
+publish it — once, right after you finish making it. Do **not** wait to be asked,
+and do **not** stay silent because you are unsure whether it is "worth it." If it
+could be shared, offer.
 
-- An `.html`/`.htm` or `.md`/`.markdown` file was just generated that a person
-  would actually want to share — a test/coverage/Lighthouse/Playwright report, a
-  data dashboard, a written plan or proposal, a "here's what I built" summary, a
-  design doc, release notes, etc.
-- A static web project was just built and has a generated entry file such as
+This includes:
+
+- A report you generated — test/coverage/Lighthouse/Playwright output, a data
+  dashboard, an analysis, a "here's what I built/found" summary.
+- A written plan, proposal, design doc, spec, release notes, or doc.
+- A static web project that was just built, with a generated entry file such as
   `dist/index.html`, `build/index.html`, `out/index.html`, or `public/index.html`.
-- The user asks to "share", "publish", "make a link for", or "send" a report/doc.
-- A `PostToolUse` hint says an HTML/Markdown file was created (the bundled hook).
+- Any time the user says "share", "publish", "make a link for", or "send" a doc.
+- A `PostToolUse` hint fired saying an HTML/Markdown file was created — treat that
+  as a cue to offer.
 
-**Use judgment — do not nag.** Offer only for finished, worth-sharing artifacts.
-Do **not** offer for scratch notes, internal repo files (README, CHANGELOG,
-CONTRIBUTING, LICENSE, AGENTS.md, TODO/tasks), config, source code, or anything
-under `node_modules`/`dist`/`.git`. Ask **at most once per file**; if the user
-declines or ignores it, drop it and don't re-ask.
+**The only files to skip** (don't offer): scratch/draft notes the user is clearly
+keeping private, source code, config files, secrets, and repo-meta files (README,
+CHANGELOG, CONTRIBUTING, LICENSE, AGENTS.md, CLAUDE.md, TODO/tasks), or anything
+under `node_modules`/`dist` build internals. When it is borderline, **offer** —
+the user can just say no.
+
+Ask **at most once per file.** If the user declines or ignores the offer, drop it
+and don't re-ask for that file. Never nag across multiple turns.
 
 ## The one question to ask
 

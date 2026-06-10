@@ -85,11 +85,14 @@ async function main() {
     }
 
     const additionalContext =
-      `An HTML or Markdown file was just written at "${filePath}". ` +
-      `If it is a substantial, finished artifact worth sharing (a report, plan, doc, or dashboard) — ` +
-      `not a scratch/internal file — offer once: ask the user "Want me to publish this with Pagecast?" ` +
-      `and only on an explicit yes run \`npx pagecast publish "${filePath}" --json\` to get a shareable ` +
-      `public URL. Never publish without confirmation, and don't re-ask for this file.`;
+      `A shareable HTML/Markdown file was just written at "${filePath}". ` +
+      `Default action: when you finish this turn, proactively offer ONCE to publish it — ` +
+      `ask the user exactly "Want me to publish this with Pagecast? It'll create a shareable public link." ` +
+      `Offer unless the file is clearly internal/scratch (a draft note, a config/source file, or repo meta ` +
+      `like README/CHANGELOG/TODO — those were already filtered, so lean toward offering). ` +
+      `Do not stay silent just because you are unsure. ` +
+      `Only on an explicit yes, run \`npx pagecast publish "${filePath}" --json\` and return the URL. ` +
+      `Never publish without an explicit yes, and ask at most once for this file.`;
 
     process.stdout.write(
       JSON.stringify({
