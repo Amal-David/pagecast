@@ -1,6 +1,24 @@
+import { useEffect } from "react";
+import { animate, motion, useMotionValue, useReducedMotion, useTransform } from "framer-motion";
 import { BarChart3, Eye, Loader2 } from "lucide-react";
 import { useFeedbackStats } from "@/hooks/use-pagecast";
 import type { FeedbackStats } from "@/lib/types";
+
+// Animate a number from 0 to value when it changes.
+function CountUp({ value }: { value: number }) {
+  const reduceMotion = useReducedMotion();
+  const mv = useMotionValue(reduceMotion ? value : 0);
+  const rounded = useTransform(mv, (v) => Math.round(v));
+  useEffect(() => {
+    if (reduceMotion) {
+      mv.set(value);
+      return;
+    }
+    const controls = animate(mv, value, { duration: 0.7, ease: "easeOut" });
+    return () => controls.stop();
+  }, [value, reduceMotion, mv]);
+  return <motion.span>{rounded}</motion.span>;
+}
 
 // Map ISO country codes to a flag emoji; falls back to the raw code.
 function flag(code: string) {
@@ -33,13 +51,20 @@ function Breakdown({
         <p className="text-xs text-muted-foreground/70">No data yet.</p>
       ) : (
         <div className="space-y-1">
-          {entries.map(([key, n]) => (
+          {entries.map(([key, n], index) => (
             <div key={key} className="flex items-center gap-2">
               <span className="w-28 shrink-0 truncate text-xs">{label(key)}</span>
               <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-                <div
+                <motion.div
                   className="h-full rounded-full bg-foreground/70"
-                  style={{ width: `${Math.round((n / max) * 100)}%` }}
+                  initial={{ width: 0 }}
+                  animate={{ width: `${Math.round((n / max) * 100)}%` }}
+                  transition={{
+                    type: "spring",
+                    stiffness: 120,
+                    damping: 20,
+                    delay: 0.05 * index
+                  }}
                 />
               </div>
               <span className="w-8 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
@@ -90,7 +115,9 @@ export function FeedbackStatsPanel({
           <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-2">
               <Eye className="h-4 w-4 text-muted-foreground" />
-              <span className="text-2xl font-semibold tabular-nums">{stats.views}</span>
+              <span className="text-2xl font-semibold tabular-nums">
+                <CountUp value={stats.views} />
+              </span>
               <span className="text-xs text-muted-foreground">views</span>
             </div>
             {totalReactions > 0 ? (
@@ -98,12 +125,15 @@ export function FeedbackStatsPanel({
                 {Object.entries(stats.reactions)
                   .filter(([, n]) => n > 0)
                   .map(([emoji, n]) => (
-                    <span
+                    <motion.span
                       key={emoji}
+                      initial={{ scale: 0.6, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      transition={{ type: "spring", stiffness: 500, damping: 18 }}
                       className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs"
                     >
                       {emoji} {n}
-                    </span>
+                    </motion.span>
                   ))}
               </div>
             ) : null}
