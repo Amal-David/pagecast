@@ -77,7 +77,12 @@ interface PublishSummary {
   url: string;
 }
 
-const publishStages = ["Preparing", "Uploading", "Publishing", "Finalizing"];
+const buildStatusLabels: Record<string, string> = {
+  idle: "Not built",
+  building: "Building…",
+  ready: "Ready",
+  failed: "Build failed"
+};
 
 function formatElapsed(ms: number) {
   return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
@@ -842,7 +847,7 @@ function PageWorkspace({
                           : "muted"
                     }
                   >
-                    {report.buildStatus}
+                    {buildStatusLabels[report.buildStatus] ?? report.buildStatus}
                   </Badge>
                 </div>
                 {report.buildOutputDir ? (
@@ -969,50 +974,87 @@ function PublishProgress({
   summary: PublishSummary | null;
 }) {
   if (!active && !summary) return null;
-  const stageIndex = active
-    ? Math.min(publishStages.length - 1, Math.floor(elapsedMs / 1400))
-    : publishStages.length - 1;
+
+  // While publishing we show an honest indeterminate bar — the real deploy time
+  // is variable and we don't fake discrete stages.
+  if (active) {
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="rounded-lg border bg-background p-4"
+      >
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium">Publishing…</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Deploying to Cloudflare — usually a few seconds ({formatElapsed(elapsedMs)})
+            </p>
+          </div>
+          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+        </div>
+        <div className="mt-4 h-1 overflow-hidden rounded-full bg-muted">
+          <motion.div
+            className="h-full w-1/3 rounded-full bg-sky-500"
+            animate={{ x: ["-110%", "330%"] }}
+            transition={{ duration: 1.1, repeat: Infinity, ease: "easeInOut" }}
+          />
+        </div>
+      </motion.div>
+    );
+  }
+
+  // Success: the public URL is the payoff — make it the copyable hero.
+  const url = summary?.url ?? "";
+  const copyLink = async () => {
+    const ok = await copyToClipboard(url);
+    toast[ok ? "success" : "error"](ok ? "Link copied." : "Could not copy link.");
+  };
+  const copyShare = async () => {
+    const ok = await copyToClipboard(`Take a look: ${url}`);
+    toast[ok ? "success" : "error"](ok ? "Share message copied." : "Could not copy.");
+  };
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      className="rounded-lg border bg-background p-4"
+      className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-4"
     >
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="text-sm font-medium">
-            {active ? publishStages[stageIndex] : "Published"}
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {active
-              ? `Working for ${formatElapsed(elapsedMs)}`
-              : `Published in ${formatElapsed(summary?.elapsedMs ?? 0)}`}
-          </p>
-        </div>
-        {active ? (
-          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-        ) : (
-          <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-        )}
-      </div>
-      <div className="mt-4 grid grid-cols-4 gap-1">
-        {publishStages.map((stage, index) => (
-          <div key={stage} className="space-y-1">
-            <div
-              className={cn(
-                "h-1 rounded-full bg-muted transition-colors",
-                index <= stageIndex && "bg-sky-500"
-              )}
-            />
-            <p className="truncate text-[10px] text-muted-foreground">{stage}</p>
-          </div>
-        ))}
-      </div>
-      {summary?.url ? (
-        <p className="mt-3 truncate font-mono text-xs text-muted-foreground">
-          {summary.url}
+      <div className="flex items-center gap-2">
+        <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+        <p className="text-sm font-medium text-emerald-900">
+          Live — published in {formatElapsed(summary?.elapsedMs ?? 0)}
         </p>
+      </div>
+      {url ? (
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+          <button
+            type="button"
+            onClick={copyLink}
+            title="Click to copy"
+            className="min-w-0 flex-1 truncate rounded-md border bg-background px-3 py-2 text-left font-mono text-xs hover:bg-accent"
+          >
+            {url}
+          </button>
+          <div className="flex shrink-0 gap-2">
+            <Button size="sm" variant="outline" onClick={copyLink}>
+              <Copy className="h-3.5 w-3.5" />
+              Copy
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => window.open(url, "_blank", "noopener,noreferrer")}
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              Open
+            </Button>
+            <Button size="sm" variant="ghost" onClick={copyShare}>
+              Share message
+            </Button>
+          </div>
+        </div>
       ) : null}
     </motion.div>
   );
