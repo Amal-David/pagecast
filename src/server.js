@@ -26,6 +26,17 @@ export const DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 export const DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS = 60 * 1000;
 export const CLOUDFLARE_OAUTH_SCOPES = ["account:read", "user:read", "pages:write"];
 
+// Feedback provisioning deploys a Worker + KV, which the base publishing scopes
+// don't permit. These elevate the grant only when the user opts into feedback,
+// so publishing never has to request Workers/KV access up front.
+export const FEEDBACK_OAUTH_SCOPES = [
+  "account:read",
+  "user:read",
+  "pages:write",
+  "workers_scripts:write",
+  "workers_kv:write"
+];
+
 const MIME_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
   [".htm", "text/html; charset=utf-8"],
@@ -1365,8 +1376,8 @@ export function createCloudflareAuthManager({
   // connect/refresh time; the cache is invalidated whenever login state changes.
   let sessionCache = null;
 
-  async function login() {
-    const scopedArgs = CLOUDFLARE_OAUTH_SCOPES.flatMap((scope) => ["--scopes", scope]);
+  async function login(scopes = CLOUDFLARE_OAUTH_SCOPES) {
+    const scopedArgs = scopes.flatMap((scope) => ["--scopes", scope]);
     await runWrangler(["login", ...scopedArgs], loginTimeoutMs);
     sessionCache = null;
   }
@@ -1470,60 +1481,75 @@ export function createCloudflareAuthManager({
     const env = accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {};
     const kvTitle = `${workerName}-store`;
 
-    // 1. Reuse or create the KV namespace.
-    let kvId = "";
-    try {
-      const listOut = await runWrangler(["kv", "namespace", "list"], timeoutMs, env);
-      kvId = findKvNamespaceId(listOut, kvTitle);
-    } catch {
-      // Listing isn't available/authorized — fall through to create.
-    }
-    if (!kvId) {
-      const createOut = await runWrangler(
-        ["kv", "namespace", "create", kvTitle],
+    const provision = async () => {
+      // 1. Reuse or create the KV namespace.
+      let kvId = "";
+      try {
+        const listOut = await runWrangler(["kv", "namespace", "list"], timeoutMs, env);
+        kvId = findKvNamespaceId(listOut, kvTitle);
+      } catch {
+        // Listing isn't available/authorized — fall through to create.
+      }
+      if (!kvId) {
+        const createOut = await runWrangler(
+          ["kv", "namespace", "create", kvTitle],
+          timeoutMs,
+          env
+        );
+        kvId = parseKvNamespaceId(createOut);
+      }
+      if (!kvId) {
+        throw appError("Could not create the feedback KV namespace.", 502);
+      }
+
+      // 2. Stage worker.js + a generated wrangler.toml in a clean temp dir.
+      await fs.rm(deployDir, { recursive: true, force: true });
+      await fs.mkdir(deployDir, { recursive: true });
+      await fs.writeFile(path.join(deployDir, "worker.js"), workerSource, "utf8");
+      const toml = [
+        `name = "${workerName}"`,
+        `main = "worker.js"`,
+        `compatibility_date = "2024-09-01"`,
+        `workers_dev = true`,
+        ``,
+        `[[kv_namespaces]]`,
+        `binding = "PAGECAST_FEEDBACK"`,
+        `id = "${kvId}"`,
+        ``,
+        `[vars]`,
+        `PAGECAST_STATS_TOKEN = "${statsToken}"`,
+        ``
+      ].join("\n");
+      await fs.writeFile(path.join(deployDir, "wrangler.toml"), toml, "utf8");
+
+      // 3. Deploy. Wrangler resolves `main` relative to the config file's dir.
+      const deployOut = await runWrangler(
+        ["deploy", "--config", path.join(deployDir, "wrangler.toml")],
         timeoutMs,
         env
       );
-      kvId = parseKvNamespaceId(createOut);
-    }
-    if (!kvId) {
-      throw appError("Could not create the feedback KV namespace.", 502);
-    }
+      const url = parseWorkerDevUrl(deployOut);
+      if (!url) {
+        throw appError(
+          "Feedback Worker deployed but no workers.dev URL was returned. Enable a workers.dev subdomain in your Cloudflare dashboard, then retry.",
+          502
+        );
+      }
+      return { url, kvId, workerName, statsToken };
+    };
 
-    // 2. Stage worker.js + a generated wrangler.toml in a clean temp dir.
-    await fs.rm(deployDir, { recursive: true, force: true });
-    await fs.mkdir(deployDir, { recursive: true });
-    await fs.writeFile(path.join(deployDir, "worker.js"), workerSource, "utf8");
-    const toml = [
-      `name = "${workerName}"`,
-      `main = "worker.js"`,
-      `compatibility_date = "2024-09-01"`,
-      `workers_dev = true`,
-      ``,
-      `[[kv_namespaces]]`,
-      `binding = "PAGECAST_FEEDBACK"`,
-      `id = "${kvId}"`,
-      ``,
-      `[vars]`,
-      `PAGECAST_STATS_TOKEN = "${statsToken}"`,
-      ``
-    ].join("\n");
-    await fs.writeFile(path.join(deployDir, "wrangler.toml"), toml, "utf8");
-
-    // 3. Deploy. Wrangler resolves `main` relative to the config file's dir.
-    const deployOut = await runWrangler(
-      ["deploy", "--config", path.join(deployDir, "wrangler.toml")],
-      timeoutMs,
-      env
-    );
-    const url = parseWorkerDevUrl(deployOut);
-    if (!url) {
-      throw appError(
-        "Feedback Worker deployed but no workers.dev URL was returned. Enable a workers.dev subdomain in your Cloudflare dashboard, then retry.",
-        502
-      );
+    try {
+      return await provision();
+    } catch (error) {
+      // The base publishing OAuth lacks Workers/KV permission, surfacing as a
+      // Cloudflare "Authentication error [code: 10000]". Elevate the grant to the
+      // feedback scopes once, then retry. (No-op if a token is already broad.)
+      if (/code:\s*10000|authentication error/i.test(stripAnsi(error.message || ""))) {
+        await login(FEEDBACK_OAUTH_SCOPES);
+        return await provision();
+      }
+      throw error;
     }
-    return { url, kvId, workerName, statsToken };
   }
 
   function cachedSession() {
