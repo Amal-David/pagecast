@@ -228,6 +228,25 @@ function cleanCommandOutput(output) {
     .trim();
 }
 
+// Normalize the persisted feedback (reactions + analytics) settings. Returns
+// null until the feedback Worker has been provisioned, so callers can treat the
+// whole feature as off by checking for a truthy `feedback`.
+function normalizeFeedback(feedback) {
+  if (!feedback || typeof feedback !== "object") {
+    return null;
+  }
+  const url = String(feedback.url || "").trim().replace(/\/+$/, "");
+  if (!/^https:\/\/[^\s/]+/i.test(url)) {
+    return null;
+  }
+  return {
+    url,
+    statsToken: String(feedback.statsToken || ""),
+    workerName: String(feedback.workerName || ""),
+    kvId: String(feedback.kvId || "")
+  };
+}
+
 function normalizeConfig(config = {}) {
   const projectName = normalizePagesProjectName(
     config.pages?.projectName || DEFAULT_PAGES_PROJECT_NAME
@@ -242,7 +261,8 @@ function normalizeConfig(config = {}) {
       accountName,
       branch: DEFAULT_PAGES_BRANCH,
       baseUrl: pagesBaseUrl(projectName)
-    }
+    },
+    feedback: normalizeFeedback(config.feedback)
   };
 }
 
@@ -895,10 +915,20 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
     return get();
   }
 
+  async function updateFeedback(feedback) {
+    config = normalizeConfig({
+      pages: config.pages,
+      feedback: feedback === null ? null : { ...(config.feedback || {}), ...feedback }
+    });
+    await save();
+    return get();
+  }
+
   return {
     init,
     get,
     updatePages,
+    updateFeedback,
     configPath
   };
 }
@@ -923,11 +953,41 @@ export function createDeployQueue() {
   return { enqueue };
 }
 
+// Insert the feedback widget into a published HTML document. The widget (served
+// by the user's feedback Worker) beacons a view and renders the reactions bar.
+// Injected just before </body> so it loads after page content. `url` is the
+// Worker origin and `slug` keys this page's stats. Returns the HTML unchanged
+// when feedback is not configured. Pure + exported for testing.
+export function injectFeedbackWidget(html, { url, slug } = {}) {
+  const baseUrl = String(url || "").trim().replace(/\/+$/, "");
+  const pageSlug = String(slug || "").trim();
+  if (!baseUrl || !pageSlug) {
+    return html;
+  }
+  const esc = (value) =>
+    String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/"/g, "&quot;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+  const tag =
+    `<script src="${esc(`${baseUrl}/widget.js`)}" data-slug="${esc(pageSlug)}" defer></script>`;
+  // Avoid double-injecting if the document already carries the widget.
+  if (html.includes(`data-slug="${esc(pageSlug)}"`) && html.includes("/widget.js")) {
+    return html;
+  }
+  if (/<\/body>/i.test(html)) {
+    return html.replace(/<\/body>/i, `${tag}\n</body>`);
+  }
+  return `${html}\n${tag}\n`;
+}
+
 export function createCloudflarePagesPublisher({
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   spawnImpl = spawn,
   timeoutMs = 180000,
-  getRedirects = () => []
+  getRedirects = () => [],
+  getFeedback = () => null
 } = {}) {
   const siteRoot = path.join(dataDir, "pages-site");
   const deployRoot = path.join(dataDir, "pages-deploy");
@@ -966,18 +1026,28 @@ export function createCloudflarePagesPublisher({
   }
 
   async function stagePublication(report, publication) {
-    const destinationRoot = publicationDir(publication.slug || publication.token);
+    const slug = publication.slug || publication.token;
+    const destinationRoot = publicationDir(slug);
     const sourceRoot = publishSourceFor(report);
     await copyPublicTree(sourceRoot, destinationRoot);
+
+    const indexPath = path.join(destinationRoot, "index.html");
+    let html;
     if (isMarkdownFileName(report.entryFile)) {
       // Render the raw markdown entry to real HTML so the published Cloudflare
       // site serves a proper document; sibling assets were copied above.
       const markdown = await fs.readFile(path.join(sourceRoot, report.entryFile), "utf8");
-      const html = markdownToHtml(markdown, { title: report.name });
-      await fs.writeFile(path.join(destinationRoot, "index.html"), html, "utf8");
+      html = markdownToHtml(markdown, { title: report.name });
     } else {
-      await fs.copyFile(path.join(sourceRoot, report.entryFile), path.join(destinationRoot, "index.html"));
+      html = await fs.readFile(path.join(sourceRoot, report.entryFile), "utf8");
     }
+
+    // Inject the reactions + analytics widget when feedback is provisioned.
+    const feedback = getFeedback();
+    if (feedback?.url) {
+      html = injectFeedbackWidget(html, { url: feedback.url, slug });
+    }
+    await fs.writeFile(indexPath, html, "utf8");
   }
 
   async function removePublication(slug) {
@@ -3593,7 +3663,8 @@ export async function startServers({
     dataDir,
     spawnImpl: pagesDeploySpawnImpl,
     timeoutMs: pagesDeployTimeoutMs,
-    getRedirects: () => store.listRedirects()
+    getRedirects: () => store.listRedirects(),
+    getFeedback: () => configStore.get().feedback
   });
   const deployQueue = createDeployQueue();
   const watchManager = createWatchManager({

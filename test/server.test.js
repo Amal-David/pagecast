@@ -11,8 +11,10 @@ import {
   TunnelManager,
   chooseWranglerPagesProject,
   cloudflareCredentialStatus,
+  createConfigStore,
   createDeployQueue,
   createReportStore,
+  injectFeedbackWidget,
   deployCloudflarePagesSite,
   extractPublicUrl,
   isLoopbackHostHeader,
@@ -2415,4 +2417,66 @@ test("admin server rejects requests with a non-loopback Host header (DNS rebindi
     await runtime.close();
     await fs.rm(dataDir, { recursive: true, force: true });
   }
+});
+
+test("injectFeedbackWidget adds the widget script before </body> exactly once", () => {
+  const html = "<!doctype html><html><head></head><body><h1>Report</h1></body></html>";
+  const out = injectFeedbackWidget(html, { url: "https://fb.example.workers.dev", slug: "q3" });
+  assert.match(
+    out,
+    /<script src="https:\/\/fb\.example\.workers\.dev\/widget\.js" data-slug="q3" defer><\/script>\s*<\/body>/
+  );
+  // Idempotent: re-injecting the same widget does not duplicate it.
+  const twice = injectFeedbackWidget(out, { url: "https://fb.example.workers.dev", slug: "q3" });
+  assert.equal((twice.match(/widget\.js/g) || []).length, 1);
+});
+
+test("injectFeedbackWidget appends when there is no </body>, and is a no-op without config", () => {
+  const fragment = "<h1>Bare</h1>";
+  assert.match(
+    injectFeedbackWidget(fragment, { url: "https://fb.workers.dev", slug: "x" }),
+    /<h1>Bare<\/h1>\s*<script[^>]*\/widget\.js[^>]*><\/script>/
+  );
+  // No url or no slug -> unchanged.
+  assert.equal(injectFeedbackWidget(fragment, { url: "", slug: "x" }), fragment);
+  assert.equal(injectFeedbackWidget(fragment, { url: "https://fb.workers.dev", slug: "" }), fragment);
+  assert.equal(injectFeedbackWidget(fragment, {}), fragment);
+});
+
+test("injectFeedbackWidget escapes url/slug into the attributes", () => {
+  const out = injectFeedbackWidget("<body></body>", {
+    url: 'https://e.dev/"><img onerror=1>',
+    slug: 'a"b'
+  });
+  assert.doesNotMatch(out, /onerror=1>/); // the raw breakout is escaped
+  assert.match(out, /&quot;/);
+});
+
+test("config store persists and clears feedback settings", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-cfg-"));
+  const store = createConfigStore({ dataDir: dir });
+  await store.init();
+
+  assert.equal(store.get().feedback, null);
+
+  const updated = await store.updateFeedback({
+    url: "https://pagecast-feedback.acme.workers.dev/",
+    statsToken: "secret",
+    workerName: "pagecast-feedback",
+    kvId: "abc123"
+  });
+  // Trailing slash is normalized away.
+  assert.equal(updated.feedback.url, "https://pagecast-feedback.acme.workers.dev");
+  assert.equal(updated.feedback.statsToken, "secret");
+
+  // Reloading from disk keeps it.
+  const reopened = createConfigStore({ dataDir: dir });
+  await reopened.init();
+  assert.equal(reopened.get().feedback.url, "https://pagecast-feedback.acme.workers.dev");
+
+  // A non-https url is rejected (feature stays off).
+  const bad = await reopened.updateFeedback({ url: "http://insecure.example" });
+  assert.equal(bad.feedback, null);
+
+  await fs.rm(dir, { recursive: true, force: true });
 });
