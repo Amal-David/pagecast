@@ -1,7 +1,7 @@
 {
   "name": "pagecast",
   "displayName": "Pagecast",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "When your agent finishes an HTML or Markdown report, plan, or doc, it proactively offers to publish it to a shareable public URL with Pagecast.",
   "author": {
     "name": "Pagecast"

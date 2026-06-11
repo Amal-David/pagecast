@@ -7,11 +7,14 @@ import { fileURLToPath } from "node:url";
 import {
   deployCloudflarePagesSite,
   getCloudflarePagesStatus,
+  getGoalStatus,
   listCloudflarePagesProjects,
+  publishGoalProgress,
   publishReportSnapshot,
   setupCloudflareFeedback,
   setupCloudflarePages,
-  startServers
+  startServers,
+  stopGoalProgress
 } from "./server.js";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -42,7 +45,8 @@ const VALUE_FLAGS = new Set([
   "mode",
   "output",
   "project",
-  "project-name"
+  "project-name",
+  "slug"
 ]);
 
 function parseFlags(args) {
@@ -325,6 +329,58 @@ async function feedback(args) {
   }
 }
 
+async function goal(args) {
+  const [subcommand, ...rest] = args;
+  const parsed = parseFlags(rest);
+  const json = wantsJson(parsed);
+
+  try {
+    if (subcommand === "publish") {
+      const file = parsed.positionals[0];
+      const slug = optionValue(parsed, "slug") || "goal";
+      const result = await publishGoalProgress({ file, slug, dataDir });
+      if (json) {
+        console.log(JSON.stringify({ ok: true, ...result }));
+      } else {
+        console.log(`${result.started ? "Goal page live" : "Goal page updated"}: ${result.url}`);
+        if (result.recreated) {
+          console.log("(The previous link was gone, so a new URL was created.)");
+        }
+      }
+      return;
+    }
+
+    if (subcommand === "status") {
+      const { goal: g } = await getGoalStatus({ dataDir });
+      if (json) {
+        console.log(JSON.stringify({ ok: true, goal: g || null }));
+      } else if (g?.url) {
+        console.log(`Goal page: ${g.url}`);
+        console.log(`Source: ${g.file || "(unknown)"}`);
+      } else {
+        console.log("No goal page. Run `pagecast goal publish <file>`.");
+      }
+      return;
+    }
+
+    if (subcommand === "stop") {
+      const result = await stopGoalProgress({ dataDir });
+      if (json) {
+        console.log(JSON.stringify({ ok: true, ...result }));
+      } else {
+        console.log(result.stopped ? "Goal page taken offline." : "No goal page to stop.");
+      }
+      return;
+    }
+
+    console.error(`Unknown goal command: ${subcommand || ""}\n`);
+    usage();
+    process.exit(1);
+  } catch (error) {
+    printError(error, json);
+  }
+}
+
 function usage() {
   console.log(
     [
@@ -338,6 +394,9 @@ function usage() {
       "  pagecast pages deploy <dir> --project <name> [--json] Deploy a static folder to Pages",
       "  pagecast feedback setup [--account <id>] [--json]     Set up reactions + view analytics",
       "  pagecast feedback status [--json]                     Show feedback configuration",
+      "  pagecast goal publish <file> [--slug goal] [--json]   Publish/update a live goal-progress page",
+      "  pagecast goal status [--json]                         Show the current goal page",
+      "  pagecast goal stop [--json]                           Take the goal page offline",
       "  pagecast --help                                       Show this help"
     ].join("\n")
   );
@@ -363,6 +422,11 @@ async function run() {
 
   if (command === "feedback") {
     await feedback(rest);
+    return;
+  }
+
+  if (command === "goal") {
+    await goal(rest);
     return;
   }
 

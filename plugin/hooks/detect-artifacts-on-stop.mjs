@@ -18,6 +18,42 @@ const SCAN_DIRS = ["", "dist", "build", "out", "public", "site", "_site", "repor
 const RECENT_MS = 3 * 60 * 1000; // modified within this turn
 const MIN_BYTES = 200; // ignore trivial/placeholder files
 const PUBLISHABLE = /\.(html?|md|markdown)$/i;
+const GOAL_STALE_MS = 2 * 60 * 1000; // nudge if the goal page hasn't been refreshed
+
+// If a live goal-progress page exists and its source file has gone stale (not
+// refreshed recently), nudge the agent to update it. Config-gated, so non-goal
+// sessions never see this. Returns the goal file path (to exclude from the
+// generic scan) or null. Emits + exits if it nudges.
+async function maybeNudgeGoal(event, cwd, now) {
+  let goalFile = null;
+  try {
+    const cfg = JSON.parse(await fs.readFile(path.join(cwd, ".pagecast", "config.json"), "utf8"));
+    if (cfg?.goal?.file) goalFile = cfg.goal.file;
+  } catch {
+    return null; // no config / no goal
+  }
+  if (!goalFile) return null;
+  try {
+    const stat = await fs.stat(goalFile);
+    if (now - stat.mtimeMs <= GOAL_STALE_MS) return goalFile; // fresh — nothing to do
+    // Dedup keyed on the file's mtime so we nudge once per stale period; once the
+    // agent refreshes the file (new mtime) a later staleness can nudge again.
+    const key = `goal-stale:${Math.floor(stat.mtimeMs)}`;
+    const offered = await loadOffered(event.session_id);
+    if (offered.has(key)) return goalFile;
+    await recordOffered(event.session_id, [key]);
+    const msg =
+      "Pagecast: your live goal-progress page may be stale — update " +
+      `"${path.basename(goalFile)}" and run \`npx pagecast goal publish "${goalFile}" --json\` to refresh it.`;
+    process.stdout.write(
+      JSON.stringify({ hookSpecificOutput: { hookEventName: "Stop", systemMessage: msg } })
+    );
+    process.exit(0);
+  } catch {
+    return null; // goal file gone
+  }
+  return goalFile;
+}
 
 function readStdin() {
   return new Promise((resolve) => {
@@ -72,11 +108,16 @@ async function main() {
 
     const cwd = event.cwd || process.cwd();
     const now = Date.now();
+
+    // Goal-progress reinforcement first (may emit + exit). Returns the goal file
+    // so we can exclude it from the generic "publish this" scan below.
+    const goalFile = await maybeNudgeGoal(event, cwd, now);
+
     const found = [];
     for (const sub of SCAN_DIRS) {
       found.push(...(await scan(path.join(cwd, sub), now)));
     }
-    const unique = Array.from(new Set(found));
+    const unique = Array.from(new Set(found)).filter((p) => p !== goalFile);
     if (unique.length === 0) process.exit(0);
 
     const offered = await loadOffered(event.session_id);

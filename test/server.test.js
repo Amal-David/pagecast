@@ -16,10 +16,13 @@ import {
   createDeployQueue,
   createReportStore,
   findKvNamespaceId,
+  getGoalStatus,
   injectBadge,
   injectFeedbackWidget,
   parseKvNamespaceId,
   parseWorkerDevUrl,
+  publishGoalProgress,
+  stopGoalProgress,
   deployCloudflarePagesSite,
   extractPublicUrl,
   isLoopbackHostHeader,
@@ -2694,6 +2697,130 @@ test("config badge defaults on, persists when toggled off, and survives a pages 
   const reopened = createConfigStore({ dataDir: dir });
   await reopened.init();
   assert.equal(reopened.get().badge, false);
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+// Headless Cloudflare fakes for goal-page tests: an authenticated whoami + a
+// project list, and a deploy spawn that always succeeds.
+function makeHeadlessFakes() {
+  const { fakeSpawn: authSpawn } = makeWranglerFake((args) => {
+    if (args.includes("whoami")) {
+      return {
+        code: 0,
+        output: JSON.stringify({ accounts: [{ name: "Personal", id: "abcdef0123456789abcdef0123456789" }] })
+      };
+    }
+    if (args.includes("list")) {
+      return { code: 0, output: JSON.stringify([{ name: "pagecast", account_id: "abcdef0123456789abcdef0123456789" }]) };
+    }
+    return { code: 0, output: "" };
+  });
+  const deployCommands = [];
+  function fakeDeploy(command, args) {
+    deployCommands.push(args);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => child.emit("exit", null, "SIGTERM");
+    setImmediate(() => {
+      child.stdout.emit("data", Buffer.from("deploy complete"));
+      child.emit("exit", 0, null);
+    });
+    return child;
+  }
+  return { authSpawn, fakeDeploy, deployCommands };
+}
+
+test("goal publish is idempotent: update re-syncs the SAME url, never a new link", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const goalFile = path.join(tempDir, "pagecast-goal.md");
+  await fs.writeFile(goalFile, "# Goal\n\nStatus: started\n");
+  const { authSpawn, fakeDeploy } = makeHeadlessFakes();
+  const opts = {
+    file: goalFile,
+    dataDir,
+    cloudflareAuthSpawnImpl: authSpawn,
+    pagesDeploySpawnImpl: fakeDeploy,
+    cloudflareListTimeoutMs: 1000,
+    pagesDeployTimeoutMs: 1000
+  };
+
+  // First call: starts the page at the vanity /p/goal/ URL.
+  const first = await publishGoalProgress(opts);
+  assert.equal(first.started, true);
+  assert.equal(first.slug, "goal");
+  assert.match(first.url, /\/p\/goal\/$/);
+  const stagedIndex = path.join(dataDir, "pages-site", "p", "goal", "index.html");
+  assert.match(await fs.readFile(stagedIndex, "utf8"), /Status: started/);
+
+  // config.goal recorded the page.
+  const status = await getGoalStatus({ dataDir });
+  assert.equal(status.goal.url, first.url);
+  assert.equal(status.goal.slug, "goal");
+
+  // Edit the file, then call again — SAME url/token, fresh content, no new link.
+  await fs.writeFile(goalFile, "# Goal\n\nStatus: 80% done\n");
+  const second = await publishGoalProgress(opts);
+  assert.equal(second.started, false);
+  assert.equal(second.url, first.url);
+  assert.equal(second.token, first.token);
+  assert.match(await fs.readFile(stagedIndex, "utf8"), /80% done/);
+
+  // The shared-page badge is present on the goal page too.
+  assert.match(await fs.readFile(stagedIndex, "utf8"), /data-pagecast-badge/);
+});
+
+test("goal stop revokes the page and clears config.goal", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const goalFile = path.join(tempDir, "pagecast-goal.md");
+  await fs.writeFile(goalFile, "# Goal\n");
+  const { authSpawn, fakeDeploy } = makeHeadlessFakes();
+  const opts = {
+    file: goalFile,
+    dataDir,
+    cloudflareAuthSpawnImpl: authSpawn,
+    pagesDeploySpawnImpl: fakeDeploy,
+    cloudflareListTimeoutMs: 1000,
+    pagesDeployTimeoutMs: 1000
+  };
+  await publishGoalProgress(opts);
+  assert.ok((await getGoalStatus({ dataDir })).goal);
+
+  const stopped = await stopGoalProgress({
+    dataDir,
+    cloudflareAuthSpawnImpl: authSpawn,
+    pagesDeploySpawnImpl: fakeDeploy,
+    cloudflareListTimeoutMs: 1000,
+    pagesDeployTimeoutMs: 1000
+  });
+  assert.equal(stopped.stopped, true);
+  assert.equal((await getGoalStatus({ dataDir })).goal, null);
+});
+
+test("config.goal persists and survives pages/feedback updates", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-goalcfg-"));
+  const store = createConfigStore({ dataDir: dir });
+  await store.init();
+  assert.equal(store.get().goal, null);
+
+  await store.setGoal({
+    token: "goal-abc",
+    slug: "goal",
+    url: "https://pagecast.pages.dev/p/goal/",
+    file: "/tmp/pagecast-goal.md",
+    startedAt: "2026-06-11T00:00:00.000Z"
+  });
+  assert.equal(store.get().goal.slug, "goal");
+
+  // A pages update (publish persists the account) must not wipe the goal.
+  const after = await store.updatePages({ projectName: "proj" });
+  assert.equal(after.goal?.url, "https://pagecast.pages.dev/p/goal/");
+  // A feedback update must not wipe it either.
+  const after2 = await store.updateFeedback(null);
+  assert.equal(after2.goal?.url, "https://pagecast.pages.dev/p/goal/");
 
   await fs.rm(dir, { recursive: true, force: true });
 });

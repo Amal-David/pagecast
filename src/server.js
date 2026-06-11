@@ -311,6 +311,28 @@ function normalizeFeedback(feedback) {
   };
 }
 
+// The live goal-progress page currently published, or null. Tracks the
+// publication (token/slug) so updates re-sync the SAME URL in place rather than
+// minting a new link.
+function normalizeGoal(goal) {
+  if (!goal || typeof goal !== "object") {
+    return null;
+  }
+  const token = String(goal.token || "");
+  const url = String(goal.url || "").trim();
+  if (!token || !/^https:\/\/[^\s/]+/i.test(url)) {
+    return null;
+  }
+  return {
+    token,
+    slug: String(goal.slug || token),
+    url,
+    file: String(goal.file || ""),
+    startedAt: String(goal.startedAt || ""),
+    updatedAt: String(goal.updatedAt || "")
+  };
+}
+
 function normalizeConfig(config = {}) {
   const projectName = normalizePagesProjectName(
     config.pages?.projectName || DEFAULT_PAGES_PROJECT_NAME
@@ -329,7 +351,9 @@ function normalizeConfig(config = {}) {
     feedback: normalizeFeedback(config.feedback),
     // A subtle "Published with Pagecast" badge on shared pages (the word-of-mouth
     // loop). On by default; can be turned off (the white-label/monetization lever).
-    badge: config.badge !== false
+    badge: config.badge !== false,
+    // The currently-published live goal-progress page (or null).
+    goal: normalizeGoal(config.goal)
   };
 }
 
@@ -977,10 +1001,11 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
         accountId: nextAccountId,
         accountName: nextAccountName
       },
-      // Preserve feedback + badge config — a pages update (e.g. persisting the
-      // account on publish) must not wipe other settings.
+      // Preserve feedback + badge + goal config — a pages update (e.g. persisting
+      // the account on publish) must not wipe other settings.
       feedback: config.feedback,
-      badge: config.badge
+      badge: config.badge,
+      goal: config.goal
     });
     await save();
     return get();
@@ -992,10 +1017,17 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
     return get();
   }
 
+  async function setGoal(goal) {
+    config = normalizeConfig({ ...config, goal });
+    await save();
+    return get();
+  }
+
   async function updateFeedback(feedback) {
     config = normalizeConfig({
       pages: config.pages,
       badge: config.badge,
+      goal: config.goal,
       feedback: feedback === null ? null : { ...(config.feedback || {}), ...feedback }
     });
     await save();
@@ -1005,6 +1037,7 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
   return {
     init,
     setBadge,
+    setGoal,
     get,
     updatePages,
     updateFeedback,
@@ -4413,6 +4446,178 @@ export async function publishReportSnapshot({
     projectName: configStore.get().pages.projectName,
     reportId: report.id
   };
+}
+
+// Publish (or update in place) the live goal-progress page. Idempotent: the first
+// call publishes <file> and records it in config.goal; later calls re-sync the
+// SAME slug/URL with the file's new content (never minting a new link). Stop with
+// stopGoalProgress. Designed for headless agent use (`npx pagecast goal publish`).
+export async function publishGoalProgress({
+  file,
+  slug: requestedSlug = "goal",
+  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
+  cloudflareAuthSpawnImpl = spawn,
+  pagesDeploySpawnImpl = spawn,
+  cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
+  pagesDeployTimeoutMs = 180000
+} = {}) {
+  if (!file) {
+    throw appError("Provide a path to the goal-progress file.", 400);
+  }
+  const absFile = path.resolve(file);
+
+  const store = createReportStore({ dataDir });
+  await store.init();
+  const { configStore, cloudflareAuth, pagesPublisher } = await createHeadlessCloudflareContext({
+    dataDir,
+    cloudflareAuthSpawnImpl,
+    pagesDeploySpawnImpl,
+    cloudflareListTimeoutMs,
+    pagesDeployTimeoutMs
+  });
+
+  const credential = cloudflareCredentialStatus();
+  if (!credential.tokenConfigured) {
+    const session = await cloudflareAuth.refreshSession();
+    if (!session.loggedIn) {
+      throw appError(
+        "Not signed in to Cloudflare. Run `npx pagecast` once, click Connect Cloudflare, then retry.",
+        401
+      );
+    }
+  }
+  const target = await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
+  if (target.cloudflare.needsAccountChoice) {
+    throw appError(
+      "Multiple Cloudflare accounts found. Run `npx pagecast` to choose one, then retry.",
+      409
+    );
+  }
+
+  const pagesConfig = () => configStore.get().pages;
+  const existing = configStore.get().goal;
+
+  // Stage the goal page from an ISOLATED copy, never the user's folder: a goal
+  // file written in the project root would otherwise drag every sibling (and
+  // potentially private files) into the published page. We copy just the file
+  // into .pagecast/goal-src/ and publish that.
+  const goalSrcDir = path.join(dataDir, "goal-src");
+  const isHtml = /\.html?$/i.test(absFile);
+  const entryName = isHtml ? "index.html" : "goal.md";
+  const stagedSource = path.join(goalSrcDir, entryName);
+  await fs.rm(goalSrcDir, { recursive: true, force: true });
+  await fs.mkdir(goalSrcDir, { recursive: true });
+  await fs.copyFile(absFile, stagedSource);
+
+  // UPDATE: the recorded goal page is still active — re-sync the same slug/URL.
+  if (existing?.token) {
+    const match = store.findActivePublication(existing.token);
+    if (match && match.publication.kind === "snapshot") {
+      const url = await pagesPublisher.syncPublication({
+        report: match.report,
+        publication: match.publication,
+        pagesConfig: pagesConfig()
+      });
+      await store.syncSnapshot(existing.token);
+      const next = await configStore.setGoal({
+        ...existing,
+        url,
+        file: absFile,
+        updatedAt: nowIso()
+      });
+      return {
+        url,
+        slug: next.goal.slug,
+        token: existing.token,
+        started: false,
+        recreated: false
+      };
+    }
+    // Recorded link was revoked/removed out-of-band — fall through and recreate.
+  }
+
+  // START: publish the isolated copy as a snapshot, then try a vanity slug.
+  const report = await store.addPath(stagedSource);
+  const draft = store.draftPublication(report.id, { label: "goal", kind: "snapshot" });
+  let url = await pagesPublisher.publish({
+    report: draft.report,
+    publication: draft.publication,
+    pagesConfig: pagesConfig()
+  });
+  await store.commitPublication(report.id, draft.publication);
+
+  let slug = draft.publication.token;
+  try {
+    const { oldSlug, newSlug } = await store.renameSlug(draft.publication.token, requestedSlug);
+    if (oldSlug !== newSlug) {
+      url = await pagesPublisher.renamePublication({
+        oldSlug,
+        newSlug,
+        report: draft.report,
+        publication: draft.publication,
+        pagesConfig: pagesConfig()
+      });
+      slug = newSlug;
+    }
+  } catch {
+    // Vanity slug taken/reserved/invalid — keep the random token slug.
+  }
+
+  const startedAt = existing?.startedAt || nowIso();
+  await configStore.setGoal({
+    token: draft.publication.token,
+    slug,
+    url,
+    file: absFile,
+    startedAt,
+    updatedAt: nowIso()
+  });
+  return {
+    url,
+    slug,
+    token: draft.publication.token,
+    started: true,
+    recreated: Boolean(existing?.token)
+  };
+}
+
+export async function getGoalStatus({ dataDir = path.join(PROJECT_ROOT, ".pagecast") } = {}) {
+  const configStore = createConfigStore({ dataDir });
+  await configStore.init();
+  return { goal: configStore.get().goal };
+}
+
+export async function stopGoalProgress({
+  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
+  cloudflareAuthSpawnImpl = spawn,
+  pagesDeploySpawnImpl = spawn,
+  cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
+  pagesDeployTimeoutMs = 180000
+} = {}) {
+  const store = createReportStore({ dataDir });
+  await store.init();
+  const { configStore, cloudflareAuth, pagesPublisher } = await createHeadlessCloudflareContext({
+    dataDir,
+    cloudflareAuthSpawnImpl,
+    pagesDeploySpawnImpl,
+    cloudflareListTimeoutMs,
+    pagesDeployTimeoutMs
+  });
+  const goal = configStore.get().goal;
+  if (!goal?.token) {
+    return { stopped: false, url: null };
+  }
+  const match = store.findActivePublication(goal.token);
+  if (match) {
+    const credential = cloudflareCredentialStatus();
+    if (credential.tokenConfigured || (await cloudflareAuth.refreshSession()).loggedIn) {
+      await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
+      await pagesPublisher.revoke([goal.slug || goal.token], configStore.get().pages);
+    }
+    await store.revokePublication(goal.token);
+  }
+  await configStore.setGoal(null);
+  return { stopped: true, url: goal.url };
 }
 
 async function main() {

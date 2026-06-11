@@ -61,6 +61,45 @@ a file yet. If the user wants it shared, first write the plan markdown to a file
 (e.g. `./plan.md`), then publish that path. Don't overwrite an existing file the
 user cares about — pick a clear new name.
 
+## Live goal / progress page
+
+When you're working toward a **`/goal`** (you'll see the goal condition in your
+context) and the work will span many turns / a long autonomous run, the user
+often can't see what's happening. Proactively **offer once**:
+
+> "Want me to publish a live progress page for this goal? You'll get a public
+> link you can open anytime to see status and what's done."
+
+On an explicit **yes**:
+
+1. Write a `pagecast-goal.md` in the working dir with the goal, status, a
+   done/next checklist, and a one-line "latest", e.g.:
+   ```markdown
+   # <short goal title>
+
+   **Goal:** <the goal condition, in your own words>
+   **Status:** In progress · updated <time>
+   **Progress:** 3 / 8 steps
+
+   ## Done
+   - [x] <step>
+
+   ## Next
+   - [ ] <step>
+
+   ## Latest
+   <one line: what you just did / any blocker>
+   ```
+2. Run `npx pagecast goal publish "<abs path>/pagecast-goal.md" --json` and give
+   the user the returned `url`.
+3. **After each meaningful step**, rewrite `pagecast-goal.md` and re-run the
+   **same** `npx pagecast goal publish … --json` — it updates the **same URL** in
+   place (do NOT use plain `publish`, which mints a new link each time).
+4. When the goal is met, do a final update; optionally `npx pagecast goal stop`.
+
+There is one goal page per workspace. If a command reports `recreated: true`, the
+old link was gone and the URL changed — tell the user the new URL.
+
 For static web projects that should get a new shareable `/p/<token>/` link,
 build first and publish the generated entry file:
 

@@ -123,6 +123,23 @@ If the user does not specify a branch, omit `--branch`; Pagecast deploys to
 passes the account to Wrangler internally through `CLOUDFLARE_ACCOUNT_ID` when
 needed.
 
+## Live Goal / Progress Page
+
+When working toward a `/goal` (a long autonomous run the user can't easily watch),
+proactively offer once: "Want me to publish a live progress page you can check
+anytime?" On an explicit yes:
+
+1. Write a `pagecast-goal.md` with the goal, status, a done/next checklist, and a
+   one-line "latest".
+2. `npx pagecast goal publish "/abs/pagecast-goal.md" --json` → give the user the
+   `url`.
+3. After each meaningful step, rewrite the file and re-run the **same** command —
+   it updates the **same URL** in place. Do NOT use plain `publish` (mints a new
+   link). `npx pagecast goal stop` when done.
+
+One goal page per workspace; if a result has `recreated: true`, the URL changed —
+surface the new one.
+
 ## App Workflow
 
 Use the app when the user needs to manage folders or existing links:
