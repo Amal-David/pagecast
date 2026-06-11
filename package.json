@@ -1,6 +1,6 @@
 {
   "name": "pagecast",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "description": "Preview local HTML reports and static mini apps, then publish them to shareable URLs.",
   "license": "MIT",
