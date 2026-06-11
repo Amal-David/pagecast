@@ -23,13 +23,17 @@ Re-publishing the same file **updates the same URL** in place.
 ## Use
 1. Open a local HTML/Markdown file in Chrome (`file://…`).
 2. Make sure `npx pagecast` is running and connected.
-3. Click the Pagecast toolbar icon → **Publish to Pagecast**.
-4. Copy or open the public link. Edit the file and click again → same link updates.
+3. Either:
+   - Click the Pagecast toolbar icon → **Publish to Pagecast** (shows the link with
+     Copy / Open), or
+   - **Right-click the page → "Publish to Pagecast"** — the public link opens
+     automatically when it's ready, and a notification shows the result.
+4. Copy or open the public link. Edit the file and publish again → same link updates.
 
 ## Notes
 - A browser extension can't start the local server for you. If Pagecast isn't
   running, the popup tells you to run `npx pagecast` (with a copy button).
 - The extension talks only to `http://127.0.0.1:4173`; the admin server reflects
   CORS only for `chrome-extension://` origins.
-- Icons here are simple placeholders — swap in brand art before a Web Store
-  submission.
+- Web Store submission assets (listing copy, privacy policy, screenshots, promo
+  images, packaging steps) live in `store/`.

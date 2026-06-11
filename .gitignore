@@ -1,5 +1,6 @@
 # Runtime data + build deps
 .pagecast/
+pagecast-extension.zip
 node_modules/
 web/node_modules/
 web/dist/
