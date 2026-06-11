@@ -800,7 +800,7 @@ function PageWorkspace({
                 {report.name}
               </h2>
               <Badge variant={report.publicUrl ? "secondary" : "outline"}>
-                {report.publicUrl ? "Published" : "Draft"}
+                {hasActiveLinks ? "Published" : "Draft"}
               </Badge>
               {report.kind === "upload" ? (
                 <Badge variant="muted" className="gap-1">

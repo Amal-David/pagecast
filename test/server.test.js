@@ -16,6 +16,7 @@ import {
   createDeployQueue,
   createReportStore,
   findKvNamespaceId,
+  injectBadge,
   injectFeedbackWidget,
   parseKvNamespaceId,
   parseWorkerDevUrl,
@@ -1866,10 +1867,12 @@ test("editing a path report writes a working copy and leaves the source untouche
     const workingIndex = path.join(dataDir, "working", report.id, "index.html");
     assert.equal(await fs.readFile(workingIndex, "utf8"), editedHtml);
 
-    // A subsequent snapshot stages from the working copy.
+    // A subsequent snapshot stages from the working copy (plus the injected badge).
     const publication = await publishSnapshot(runtime.adminUrl, report.id);
     const stagedIndex = path.join(dataDir, "pages-site", "p", publication.slug, "index.html");
-    assert.equal(await fs.readFile(stagedIndex, "utf8"), editedHtml);
+    const staged = await fs.readFile(stagedIndex, "utf8");
+    assert.ok(staged.includes(editedHtml), "staged content reflects the working-copy edit");
+    assert.match(staged, /data-pagecast-badge/);
   } finally {
     await runtime.close();
   }
@@ -2660,4 +2663,37 @@ test("status auto-detects an existing Wrangler login on the first poll", async (
   } finally {
     await runtime.close();
   }
+});
+
+test("injectBadge adds a removable Pagecast badge once", () => {
+  const html = "<!doctype html><html><body><h1>Report</h1></body></html>";
+  const out = injectBadge(html);
+  assert.match(out, /data-pagecast-badge/);
+  assert.match(out, /Published with/);
+  assert.match(out, /pagecasthq\.pages\.dev/);
+  // Idempotent.
+  assert.equal((injectBadge(out).match(/data-pagecast-badge/g) || []).length, 1);
+  // Appends when there is no </body>.
+  assert.match(injectBadge("<h1>bare</h1>"), /<h1>bare<\/h1>\s*<a data-pagecast-badge/);
+});
+
+test("config badge defaults on, persists when toggled off, and survives a pages update", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-badge-"));
+  const store = createConfigStore({ dataDir: dir });
+  await store.init();
+  assert.equal(store.get().badge, true);
+
+  await store.setBadge(false);
+  assert.equal(store.get().badge, false);
+
+  // A pages update (as publish does) must not silently re-enable the badge.
+  const after = await store.updatePages({ projectName: "proj" });
+  assert.equal(after.badge, false);
+
+  // Reload from disk keeps it off.
+  const reopened = createConfigStore({ dataDir: dir });
+  await reopened.init();
+  assert.equal(reopened.get().badge, false);
+
+  await fs.rm(dir, { recursive: true, force: true });
 });

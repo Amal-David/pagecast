@@ -163,7 +163,9 @@ function createReportId(fileName) {
 }
 
 function createPublicToken(label) {
-  return `${slugifyReportName(label)}-${randomBytes(8).toString("hex")}`;
+  // 16 bytes = 128 bits of entropy. The unguessable token IS the access-control
+  // model for /p/<token>/ links, so keep it well beyond brute-forceable.
+  return `${slugifyReportName(label)}-${randomBytes(16).toString("hex")}`;
 }
 
 function isPathInside(rootDir, targetPath) {
@@ -324,7 +326,10 @@ function normalizeConfig(config = {}) {
       branch: DEFAULT_PAGES_BRANCH,
       baseUrl: pagesBaseUrl(projectName)
     },
-    feedback: normalizeFeedback(config.feedback)
+    feedback: normalizeFeedback(config.feedback),
+    // A subtle "Published with Pagecast" badge on shared pages (the word-of-mouth
+    // loop). On by default; can be turned off (the white-label/monetization lever).
+    badge: config.badge !== false
   };
 }
 
@@ -972,10 +977,17 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
         accountId: nextAccountId,
         accountName: nextAccountName
       },
-      // Preserve feedback config — a pages update (e.g. persisting the account on
-      // publish) must not wipe an already-provisioned feedback Worker.
-      feedback: config.feedback
+      // Preserve feedback + badge config — a pages update (e.g. persisting the
+      // account on publish) must not wipe other settings.
+      feedback: config.feedback,
+      badge: config.badge
     });
+    await save();
+    return get();
+  }
+
+  async function setBadge(enabled) {
+    config = normalizeConfig({ ...config, badge: enabled !== false });
     await save();
     return get();
   }
@@ -983,6 +995,7 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
   async function updateFeedback(feedback) {
     config = normalizeConfig({
       pages: config.pages,
+      badge: config.badge,
       feedback: feedback === null ? null : { ...(config.feedback || {}), ...feedback }
     });
     await save();
@@ -991,6 +1004,7 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
 
   return {
     init,
+    setBadge,
     get,
     updatePages,
     updateFeedback,
@@ -1047,12 +1061,33 @@ export function injectFeedbackWidget(html, { url, slug } = {}) {
   return `${html}\n${tag}\n`;
 }
 
+// Inject a subtle "Published with Pagecast" badge into a shared page. This is the
+// word-of-mouth loop — a recipient of the link sees it and can publish their own.
+// Idempotent; pure + exported for testing. Toggled off for white-label.
+export function injectBadge(html) {
+  if (/data-pagecast-badge/i.test(html)) {
+    return html;
+  }
+  const tag =
+    '<a data-pagecast-badge href="https://pagecasthq.pages.dev/?ref=badge" target="_blank" rel="noopener"' +
+    ' style="position:fixed;left:14px;bottom:14px;z-index:2147483646;display:inline-flex;align-items:center;' +
+    "padding:6px 11px;font:500 12px/1 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:#52525b;" +
+    "text-decoration:none;background:#fff;border:1px solid #e4e4e7;border-radius:999px;" +
+    'box-shadow:0 2px 10px rgba(0,0,0,.06)">Published with&nbsp;' +
+    '<strong style="font-weight:600;color:#c9530a">Pagecast</strong></a>';
+  if (/<\/body>/i.test(html)) {
+    return html.replace(/<\/body>/i, `${tag}\n</body>`);
+  }
+  return `${html}\n${tag}\n`;
+}
+
 export function createCloudflarePagesPublisher({
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   spawnImpl = spawn,
   timeoutMs = 180000,
   getRedirects = () => [],
-  getFeedback = () => null
+  getFeedback = () => null,
+  getBadge = () => true
 } = {}) {
   const siteRoot = path.join(dataDir, "pages-site");
   const deployRoot = path.join(dataDir, "pages-deploy");
@@ -1111,6 +1146,10 @@ export function createCloudflarePagesPublisher({
     const feedback = getFeedback();
     if (feedback?.url) {
       html = injectFeedbackWidget(html, { url: feedback.url, slug });
+    }
+    // Inject the "Published with Pagecast" badge unless turned off (white-label).
+    if (getBadge()) {
+      html = injectBadge(html);
     }
     await fs.writeFile(indexPath, html, "utf8");
   }
@@ -3461,6 +3500,14 @@ async function handleApi(
     return;
   }
 
+  // Toggle the "Published with Pagecast" badge on shared pages (white-label off).
+  if (url.pathname === "/api/config/badge" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    const config = await configStore.setBadge(body.enabled !== false);
+    sendJson(res, 200, { config });
+    return;
+  }
+
   // Provision (or re-provision) the feedback Worker + KV on the user's account.
   // Creates real Cloudflare resources, so it only runs on this explicit action.
   if (url.pathname === "/api/feedback/setup" && req.method === "POST") {
@@ -3944,7 +3991,8 @@ export async function startServers({
     spawnImpl: pagesDeploySpawnImpl,
     timeoutMs: pagesDeployTimeoutMs,
     getRedirects: () => store.listRedirects(),
-    getFeedback: () => configStore.get().feedback
+    getFeedback: () => configStore.get().feedback,
+    getBadge: () => configStore.get().badge
   });
   const deployQueue = createDeployQueue();
   const watchManager = createWatchManager({
@@ -4039,7 +4087,8 @@ async function createHeadlessCloudflareContext({
     timeoutMs: pagesDeployTimeoutMs,
     // Headless/CLI publishes (incl. the agent skill's `npx pagecast publish`)
     // must inject the feedback widget too, not just the running app.
-    getFeedback: () => configStore.get().feedback
+    getFeedback: () => configStore.get().feedback,
+    getBadge: () => configStore.get().badge
   });
   return { configStore, cloudflareAuth, pagesPublisher };
 }

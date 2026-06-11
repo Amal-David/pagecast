@@ -79,6 +79,7 @@ export interface FeedbackConfig {
 export interface AppConfig {
   pages: PagesConfig;
   feedback: FeedbackConfig | null;
+  badge: boolean;
 }
 
 export interface FeedbackStats {

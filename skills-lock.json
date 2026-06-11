@@ -67,6 +67,12 @@
       "skillPath": "skills/tailwind/SKILL.md",
       "computedHash": "81c15c45ad0fad512fc7b34985c24b567762c9c6bb976827c5991ec9dec88ca5"
     },
+    "text-to-lottie": {
+      "source": "diffusionstudio/lottie",
+      "sourceType": "github",
+      "skillPath": "skills/text-to-lottie/SKILL.md",
+      "computedHash": "c5a6f2bf9e6fd5efea2be93af6514292962f9244eaaa22edb4d5b08f543a5110"
+    },
     "three": {
       "source": "heygen-com/hyperframes",
       "sourceType": "github",

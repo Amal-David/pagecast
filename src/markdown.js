@@ -355,8 +355,8 @@ h3 { font-size: 1.25rem; }
 h4 { font-size: 1.05rem; }
 h5, h6 { font-size: 1rem; }
 p { margin: 0 0 1.1rem; }
-a { color: #2563eb; text-decoration: underline; text-underline-offset: 2px; }
-a:hover { color: #1d4ed8; }
+a { color: #c9530a; text-decoration: underline; text-underline-offset: 2px; }
+a:hover { color: #a8430a; }
 strong { font-weight: 650; }
 ul, ol { margin: 0 0 1.1rem; padding-left: 1.5rem; }
 li { margin: 0.25rem 0; }
