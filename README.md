@@ -90,6 +90,10 @@ security model, and caveats: [PASSWORD-PROTECTION.md](PASSWORD-PROTECTION.md).
 
 ## Deploy History
 
+<p align="center">
+  <img src="media/screenshots/deploy-history.png" alt="Pagecast admin UI: Settings → Deploy history listing whole-site deployment snapshots, newest first, with the live snapshot delete-protected and a keep-newest-N cleanup" width="460">
+</p>
+
 Every publish or re-sync creates a new Cloudflare Pages deployment — an immutable
 snapshot of your whole site at that moment, each with its own `<hash>.pages.dev`
 URL. Over time these pile up. View and remove them from the admin UI
