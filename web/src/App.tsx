@@ -1418,8 +1418,29 @@ function PreviewPane({
   publication: Report["publications"][number] | null;
 }) {
   const [device, setDevice] = useState<"desktop" | "mobile">("desktop");
+  const frameShellRef = useRef<HTMLDivElement>(null);
+  const [frameScale, setFrameScale] = useState(1);
   const src = report.localUrl || "";
   const displayUrl = publication?.publicUrl || report.localUrl || "";
+  const viewport = device === "desktop"
+    ? { width: 1280, height: 900, label: "1280px desktop" }
+    : { width: 390, height: 780, label: "390px mobile" };
+
+  useEffect(() => {
+    const shell = frameShellRef.current;
+    if (!shell) return;
+
+    const updateScale = () => {
+      const availableWidth = shell.clientWidth;
+      const nextScale = Math.min(1, Math.max(0.35, availableWidth / viewport.width));
+      setFrameScale(Number(nextScale.toFixed(3)));
+    };
+
+    updateScale();
+    const observer = new ResizeObserver(updateScale);
+    observer.observe(shell);
+    return () => observer.disconnect();
+  }, [viewport.width]);
 
   return (
     <aside className="hidden min-h-0 border-l bg-background xl:flex xl:flex-col">
@@ -1432,6 +1453,9 @@ function PreviewPane({
                 /p/{publication.slug}/
               </Badge>
             ) : null}
+            <Badge variant="outline" className="font-mono text-[11px]">
+              {viewport.label}
+            </Badge>
           </div>
         </div>
         <div className="flex items-center gap-1">
@@ -1455,12 +1479,16 @@ function PreviewPane({
           </Button>
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto bg-muted/30 p-5">
+      <div ref={frameShellRef} className="min-h-0 flex-1 overflow-auto bg-muted/30 p-5">
         <div
           className={cn(
-            "mx-auto flex h-full min-h-[620px] flex-col overflow-hidden rounded-lg border bg-background shadow-sm",
-            device === "mobile" ? "max-w-[390px]" : "max-w-full"
+            "mx-auto overflow-hidden rounded-lg border bg-background shadow-sm",
+            device === "mobile" ? "w-fit" : "max-w-full"
           )}
+          style={{
+            width: viewport.width * frameScale,
+            minHeight: viewport.height * frameScale + 40
+          }}
         >
           <div className="flex h-10 shrink-0 items-center gap-2 border-b bg-muted/20 px-3">
             <div className="min-w-0 flex-1 truncate rounded-md border bg-background px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
@@ -1470,13 +1498,25 @@ function PreviewPane({
             <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
           </div>
           {src ? (
-            <iframe
-              src={src}
-              title={`Preview of ${report.name}`}
-              className="min-h-0 flex-1 border-0 bg-background"
-            />
+            <div
+              style={{
+                width: viewport.width * frameScale,
+                height: viewport.height * frameScale
+              }}
+            >
+              <iframe
+                src={src}
+                title={`Preview of ${report.name}`}
+                className="origin-top-left border-0 bg-background"
+                style={{
+                  width: viewport.width,
+                  height: viewport.height,
+                  transform: `scale(${frameScale})`
+                }}
+              />
+            </div>
           ) : (
-            <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+            <div className="flex h-80 items-center justify-center text-sm text-muted-foreground">
               Nothing to preview yet.
             </div>
           )}
