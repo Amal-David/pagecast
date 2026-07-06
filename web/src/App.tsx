@@ -1019,8 +1019,8 @@ function PageWorkspace({
   // Collapse the draft whenever the selected report or its protection changes.
   // Also reset the publish-time choices: PageWorkspace is a single persistent
   // instance (not keyed by report id), so without this `publishAsDrop` would
-  // leak across report switches and a later "Publish drop" could mark the wrong
-  // report as a guessable drop.
+  // leak across report switches and a later short-link publish could mark the
+  // wrong report as a guessable drop.
   useEffect(() => {
     setPasswordDraftOpen(false);
     setPasswordDraft("");
@@ -1133,7 +1133,7 @@ function PageWorkspace({
                   ) : (
                     <Cloud className="h-4 w-4" />
                   )}
-                  {publishAsDrop ? "Publish drop" : "Publish URL"}
+                  {publishAsDrop ? "Publish short link" : "Publish URL"}
                 </Button>
               )}
               <DropdownMenu>
@@ -1240,13 +1240,13 @@ function PageWorkspace({
                 />
               ) : null}
               <SettingsRow
-                label="Publish as a drop"
-                value={publishAsDrop ? "Short link" : "Private link"}
+                label="Short public link"
+                value={publishAsDrop ? "Easy to share" : "Hard to guess"}
                 control={
                   <Switch
                     checked={publishAsDrop}
                     onCheckedChange={setPublishAsDrop}
-                    aria-label="Publish as a drop"
+                    aria-label="Use a short public link"
                   />
                 }
               />
