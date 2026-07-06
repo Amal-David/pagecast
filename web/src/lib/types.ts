@@ -124,9 +124,16 @@ export interface FeedbackConfig {
   kvId: string;
 }
 
+export interface LocalConfig {
+  hostname: string;
+  adminPort: number;
+  publicPort: number;
+}
+
 export interface AppConfig {
   pages: PagesConfig;
   feedback: FeedbackConfig | null;
+  local: LocalConfig;
   badge: boolean;
   // Default link lifetime for new publishes ("30d" out of the box, "never" =
   // permanent). A per-publish expiry overrides it.

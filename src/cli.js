@@ -2,6 +2,7 @@
 import path from "node:path";
 import process from "node:process";
 import { spawn } from "node:child_process";
+import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
@@ -30,6 +31,8 @@ const packageVersion = createRequire(import.meta.url)("../package.json").version
 // must live in the user's working directory, not next to the installed code.
 const dataDir = path.join(process.cwd(), ".pagecast");
 const staticDir = path.join(packageRoot, "public");
+const cliPath = fileURLToPath(import.meta.url);
+const backgroundPidPath = path.join(dataDir, "pagecast.pid");
 
 function openBrowser(url) {
   const platform = process.platform;
@@ -43,6 +46,68 @@ function openBrowser(url) {
   } catch {
     // Headless or no browser available — the printed URL is the fallback.
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function dashboardReady(url) {
+  try {
+    const response = await fetch(`${url}/api/status`, {
+      signal: AbortSignal.timeout(750)
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForDashboard(url, { timeoutMs = 5000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await dashboardReady(url)) {
+      return true;
+    }
+    await sleep(150);
+  }
+  return false;
+}
+
+async function readBackgroundPid() {
+  try {
+    const raw = await fs.readFile(backgroundPidPath, "utf8");
+    const pid = Number(raw.trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function processIsRunning(pid) {
+  if (!pid) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function removeBackgroundPid() {
+  await fs.rm(backgroundPidPath, { force: true }).catch(() => {});
+}
+
+async function configuredLocalUrls() {
+  const store = createConfigStore({ dataDir });
+  await store.init();
+  const { local } = store.get();
+  return {
+    adminUrl: `http://${local.hostname}:${local.adminPort}`,
+    publicUrl: `http://${local.hostname}:${local.publicPort}`
+  };
 }
 
 async function confirmPrompt(question) {
@@ -100,13 +165,16 @@ const VALUE_FLAGS = new Set([
   "account-id",
   "branch",
   "expires",
+  "host",
   "keep",
   "label",
   "mode",
   "output",
   "password",
+  "port",
   "project",
   "project-name",
+  "public-port",
   "slug"
 ]);
 
@@ -266,12 +334,26 @@ function printProjectsResult(result, json) {
   }
 }
 
-async function serve() {
-  const runtime = await startServers({ dataDir, staticDir });
+async function serve(args = []) {
+  const parsed = parseFlags(args);
+  const host = optionValue(parsed, "host");
+  const port = optionValue(parsed, "port");
+  const publicPort = optionValue(parsed, "public-port");
+  const runtime = await startServers({
+    dataDir,
+    staticDir,
+    host: host || undefined,
+    adminPort: port ? Number(port) : undefined,
+    publicPort: publicPort ? Number(publicPort) : undefined
+  });
   console.log(`Pagecast admin: ${runtime.adminUrl}`);
   console.log(`Local published-page server: ${runtime.publicUrl}`);
-  console.log("Opening the admin UI in your browser. Press Ctrl-C to stop.");
-  openBrowser(runtime.adminUrl);
+  if (parsed.flags.has("no-open")) {
+    console.log("Running quietly. Press Ctrl-C to stop.");
+  } else {
+    console.log("Opening the admin UI in your browser. Press Ctrl-C to stop.");
+    openBrowser(runtime.adminUrl);
+  }
 
   const shutdown = async () => {
     await runtime.close();
@@ -279,6 +361,80 @@ async function serve() {
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
+}
+
+async function background(args = []) {
+  const [subcommand = "status"] = args;
+  const urls = await configuredLocalUrls();
+
+  if (subcommand === "start") {
+    if (await dashboardReady(urls.adminUrl)) {
+      console.log(`Pagecast is already running: ${urls.adminUrl}`);
+      return;
+    }
+    const existingPid = await readBackgroundPid();
+    if (processIsRunning(existingPid)) {
+      console.log(`Pagecast background process is starting: ${urls.adminUrl}`);
+      return;
+    }
+    await fs.mkdir(dataDir, { recursive: true });
+    const child = spawn(process.execPath, [cliPath, "serve", "--no-open"], {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: "ignore",
+      env: process.env
+    });
+    child.unref();
+    await fs.writeFile(backgroundPidPath, `${child.pid}\n`, "utf8");
+    const ready = await waitForDashboard(urls.adminUrl);
+    const refreshed = await configuredLocalUrls();
+    console.log(
+      ready
+        ? `Pagecast is running: ${refreshed.adminUrl}`
+        : `Pagecast background process started. Try ${refreshed.adminUrl} in a moment.`
+    );
+    return;
+  }
+
+  if (subcommand === "stop") {
+    const pid = await readBackgroundPid();
+    if (processIsRunning(pid)) {
+      process.kill(pid, "SIGTERM");
+      await sleep(250);
+      console.log("Pagecast background process stopped.");
+    } else {
+      console.log("Pagecast background process is not running.");
+    }
+    await removeBackgroundPid();
+    return;
+  }
+
+  if (subcommand === "status") {
+    const pid = await readBackgroundPid();
+    const ready = await dashboardReady(urls.adminUrl);
+    if (ready) {
+      console.log(`Pagecast is running: ${urls.adminUrl}`);
+    } else if (processIsRunning(pid)) {
+      console.log(`Pagecast background process is starting: ${urls.adminUrl}`);
+    } else {
+      console.log(`Pagecast is stopped. Start it with: pagecast background start`);
+    }
+    return;
+  }
+
+  console.error(`Unknown background command: ${subcommand}\n`);
+  usage();
+  process.exit(1);
+}
+
+async function openLocalDashboard() {
+  let urls = await configuredLocalUrls();
+  if (!(await dashboardReady(urls.adminUrl))) {
+    await background(["start"]);
+    urls = await configuredLocalUrls();
+  }
+  openBrowser(urls.adminUrl);
+  console.log(`Opened Pagecast: ${urls.adminUrl}`);
 }
 
 async function publish(args) {
@@ -619,7 +775,10 @@ function usage() {
   console.log(
     [
       "Usage:",
-      "  pagecast [serve]                                      Start the local app and open the admin UI",
+      "  pagecast [serve] [--no-open] [--port 4173] [--public-port 4174]",
+      "                                                        Start the local app and open the admin UI",
+      "  pagecast open                                        Open the local app, starting it in the background if needed",
+      "  pagecast background start|stop|status                Keep the local app running without a terminal tab",
       "  pagecast publish <path> [--password <pw>|--no-password] [--expires <7d|12h|never>] [--json]",
       "                                                        Publish an HTML/Markdown snapshot",
       "  pagecast publish site <dir> --project <name> [--json] Deploy a static folder to Pages",
@@ -683,8 +842,18 @@ async function run() {
     return;
   }
 
+  if (command === "background") {
+    await background(rest);
+    return;
+  }
+
+  if (command === "open") {
+    await openLocalDashboard();
+    return;
+  }
+
   if (!command || command === "serve") {
-    await serve();
+    await serve(rest);
     return;
   }
 

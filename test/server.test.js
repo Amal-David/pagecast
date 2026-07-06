@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1179,7 +1180,7 @@ test("draft reports preview locally and only published versions are public", asy
     assert.equal(addResponse.status, 201);
 
     const addData = await addResponse.json();
-    assert.match(addData.report.localUrl, /^http:\/\/127\.0\.0\.1:\d+\/preview\/.+\/$/);
+    assert.match(addData.report.localUrl, /^http:\/\/pagecast\.localhost:\d+\/preview\/.+\/$/);
     assert.equal(addData.report.publications.length, 0);
 
     const reportResponse = await fetch(addData.report.localUrl);
@@ -2290,6 +2291,85 @@ test("custom slug rename moves the folder, writes a 301 redirect, and validates"
   }
 });
 
+test("custom slug rename rolls back when the publish deploy fails", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportDir = path.join(tempDir, "report");
+  await fs.mkdir(reportDir, { recursive: true });
+  const reportPath = path.join(reportDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>Rename rollback</h1>");
+
+  let deployCount = 0;
+  function fakeDeploy() {
+    deployCount += 1;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.kill = (signal = "SIGTERM") => {
+      child.signalCode = signal;
+      child.emit("exit", null, signal);
+    };
+    setTimeout(() => {
+      if (deployCount === 1) {
+        child.stdout.emit("data", Buffer.from("Cloudflare Pages deploy complete"));
+        child.exitCode = 0;
+        child.emit("exit", 0, null);
+      } else {
+        child.stderr.emit("data", Buffer.from("rename deploy failed"));
+        child.exitCode = 1;
+        child.emit("exit", 1, null);
+      }
+    }, 5);
+    return child;
+  }
+
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    pagesDeploySpawnImpl: fakeDeploy,
+    pagesDeployTimeoutMs: 1000
+  });
+
+  try {
+    await configurePages(runtime.adminUrl);
+    const report = await addPathReport(runtime.adminUrl, reportPath);
+    const publication = await publishSnapshot(runtime.adminUrl, report.id);
+    const oldSlug = publication.slug;
+
+    const renameResponse = await fetch(
+      `${runtime.adminUrl}/api/publications/${publication.token}/slug`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: "should-not-stick" })
+      }
+    );
+    assert.equal(renameResponse.status, 502);
+
+    const reportsResponse = await fetch(`${runtime.adminUrl}/api/reports`);
+    assert.equal(reportsResponse.status, 200);
+    const reportsData = await reportsResponse.json();
+    const refreshed = reportsData.reports.find((item) => item.id === report.id);
+    const refreshedPublication = refreshed.publications.find(
+      (item) => item.token === publication.token
+    );
+    assert.equal(refreshedPublication.slug, oldSlug);
+    assert.equal(refreshedPublication.publicUrl, publication.publicUrl);
+
+    const oldUrlResponse = await fetch(`${runtime.publicUrl}/p/${oldSlug}/`);
+    assert.equal(oldUrlResponse.status, 200);
+    assert.match(await oldUrlResponse.text(), /Rename rollback/);
+    const newUrlResponse = await fetch(`${runtime.publicUrl}/p/should-not-stick/`);
+    assert.equal(newUrlResponse.status, 404);
+  } finally {
+    await runtime.close();
+  }
+});
+
 // --- 1f: working copy editor ----------------------------------------------
 
 test("editing a path report writes a working copy and leaves the source untouched", async () => {
@@ -2382,6 +2462,63 @@ test("editing content with an active snapshot pushes the edit live via the same 
 
     const stagedIndex = path.join(dataDir, "pages-site", "p", publication.slug, "index.html");
     assert.match(await fs.readFile(stagedIndex, "utf8"), /v1 edited/);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("editing content syncs older pages.dev links to their own Pages project", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportDir = path.join(tempDir, "report");
+  await fs.mkdir(reportDir, { recursive: true });
+  const reportPath = path.join(reportDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>mixed-0</h1>");
+
+  const { fakeDeploy, state } = makeInstrumentedDeploy();
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    pagesDeploySpawnImpl: fakeDeploy,
+    pagesDeployTimeoutMs: 1000
+  });
+
+  try {
+    await configurePages(runtime.adminUrl, "current-project");
+    const report = await addPathReport(runtime.adminUrl, reportPath);
+    const publication = await publishSnapshot(runtime.adminUrl, report.id);
+    await runtime.store.commitPublication(report.id, {
+      ...publication,
+      token: "legacy-token",
+      slug: "legacy-page",
+      label: "legacy",
+      publicUrl: "https://legacy-project.pages.dev/p/legacy-page/",
+      pagesProjectName: "",
+      pagesBaseUrl: "",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      revokedAt: null,
+      expiresAt: null
+    });
+
+    const putResponse = await fetch(`${runtime.adminUrl}/api/reports/${report.id}/content`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html: "<h1>mixed-1</h1>" })
+    });
+    assert.equal(putResponse.status, 200);
+
+    const deployedProjects = state.args.map((args) => args[args.indexOf("--project-name") + 1]);
+    assert.ok(deployedProjects.includes("current-project"));
+    assert.ok(deployedProjects.includes("legacy-project"));
+
+    const reportsResponse = await fetch(`${runtime.adminUrl}/api/reports`);
+    const reportsData = await reportsResponse.json();
+    const refreshed = reportsData.reports.find((item) => item.id === report.id);
+    const legacy = refreshed.publications.find((item) => item.token === "legacy-token");
+    assert.equal(legacy.publicUrl, "https://legacy-project.pages.dev/p/legacy-page/");
   } finally {
     await runtime.close();
   }
@@ -2849,6 +2986,8 @@ test("isLoopbackHostHeader allows loopback and rejects rebound foreign hosts", (
     "127.0.0.1",
     "localhost:4173",
     "localhost",
+    "pagecast.localhost:4173",
+    "pagecast.localhost",
     "[::1]:4173",
     "::1",
     "127.5.5.5:80",
@@ -2869,6 +3008,45 @@ test("isLoopbackHostHeader allows loopback and rejects rebound foreign hosts", (
   }
   // An explicitly configured bind host is trusted.
   assert.equal(isLoopbackHostHeader("0.0.0.0:4173", "0.0.0.0"), true);
+});
+
+test("startServers falls back from an occupied persisted port and saves the working pair", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-local-ports-"));
+  const blocker = createHttpServer((req, res) => {
+    res.writeHead(200).end("busy");
+  });
+  await new Promise((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+  const blockedPort = blocker.address().port;
+  const configStore = createConfigStore({ dataDir });
+  await configStore.init();
+  await configStore.setLocalRuntime({
+    adminPort: blockedPort,
+    publicPort: blockedPort + 1
+  });
+
+  let runtime;
+  try {
+    runtime = await startServers({
+      dataDir,
+      staticDir: path.resolve("public")
+    });
+    const adminPort = Number(new URL(runtime.adminUrl).port);
+    const publicPort = Number(new URL(runtime.publicUrl).port);
+    assert.notEqual(adminPort, blockedPort);
+    assert.equal(runtime.adminUrl, `http://pagecast.localhost:${adminPort}`);
+    assert.equal(runtime.publicUrl, `http://pagecast.localhost:${publicPort}`);
+
+    const persistedStore = createConfigStore({ dataDir });
+    await persistedStore.init();
+    assert.equal(persistedStore.get().local.adminPort, adminPort);
+    assert.equal(persistedStore.get().local.publicPort, publicPort);
+  } finally {
+    if (runtime) {
+      await runtime.close();
+    }
+    await new Promise((resolve) => blocker.close(resolve));
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
 });
 
 test("admin server rejects requests with a non-loopback Host header (DNS rebinding)", async () => {
@@ -2906,7 +3084,7 @@ test("admin server rejects requests with a non-loopback Host header (DNS rebindi
   }
 });
 
-test("a wildcard bind host (0.0.0.0, e.g. in Docker) yields loopback URLs and does not trust Host: 0.0.0.0", async () => {
+test("a wildcard bind host (0.0.0.0, e.g. in Docker) yields friendly loopback URLs and does not trust Host: 0.0.0.0", async () => {
   const { request } = await import("node:http");
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-wildcard-"));
   const runtime = await startServers({
@@ -2934,8 +3112,8 @@ test("a wildcard bind host (0.0.0.0, e.g. in Docker) yields loopback URLs and do
   try {
     // Client-facing URLs must use a loopback host, never the wildcard bind
     // address (browsers, incl. Chrome 128+, refuse to connect to 0.0.0.0).
-    assert.match(runtime.adminUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
-    assert.match(runtime.publicUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.match(runtime.adminUrl, /^http:\/\/pagecast\.localhost:\d+$/);
+    assert.match(runtime.publicUrl, /^http:\/\/pagecast\.localhost:\d+$/);
     // The wildcard bind must NOT make `Host: 0.0.0.0` a trusted loopback host.
     assert.equal(await callWithHost("0.0.0.0"), 403);
     // Real loopback Hosts still pass.

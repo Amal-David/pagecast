@@ -22,6 +22,7 @@ const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 
 export const DEFAULT_HOST = "127.0.0.1";
+export const DEFAULT_LOCAL_HOSTNAME = "pagecast.localhost";
 export const DEFAULT_ADMIN_PORT = 4173;
 export const DEFAULT_PUBLIC_PORT = 4174;
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
@@ -75,6 +76,13 @@ export function appError(message, statusCode = 400) {
   error.statusCode = statusCode;
   error.expose = true;
   return error;
+}
+
+function isProvisionablePagesError(error) {
+  const message = stripAnsi(error?.message || "");
+  return /project.*not.*found|could not find.*project|does not exist|no such project|account|select an account/i.test(
+    message
+  );
 }
 
 function contentTypeFor(filePath) {
@@ -207,6 +215,14 @@ function normalizePagesProjectName(value) {
   return projectName;
 }
 
+function normalizePagesProjectNameSafe(value) {
+  try {
+    return normalizePagesProjectName(value || "");
+  } catch {
+    return "";
+  }
+}
+
 function normalizeAccountId(value) {
   const accountId = String(value || "").trim();
   if (!accountId) {
@@ -245,6 +261,60 @@ function normalizeAccountName(value) {
 
 function pagesBaseUrl(projectName) {
   return `https://${projectName}.pages.dev`;
+}
+
+function pagesProjectNameFromPublicUrl(publicUrl) {
+  try {
+    const hostname = new URL(publicUrl).hostname.toLowerCase();
+    if (!hostname.endsWith(".pages.dev")) {
+      return "";
+    }
+    return normalizePagesProjectNameSafe(hostname.slice(0, -".pages.dev".length));
+  } catch {
+    return "";
+  }
+}
+
+function publicUrlOrigin(publicUrl) {
+  try {
+    return stripTrailingSlash(new URL(publicUrl).origin);
+  } catch {
+    return "";
+  }
+}
+
+function pagesConfigForPublication(publication, currentPages) {
+  const currentProjectName = normalizePagesProjectNameSafe(currentPages?.projectName) || DEFAULT_PAGES_PROJECT_NAME;
+  const currentBaseUrl = stripTrailingSlash(currentPages?.baseUrl || pagesBaseUrl(currentProjectName));
+  const storedProjectName = normalizePagesProjectNameSafe(publication.pagesProjectName);
+  const inferredProjectName = pagesProjectNameFromPublicUrl(publication.publicUrl);
+  const projectName = storedProjectName || inferredProjectName || currentProjectName;
+  const storedBaseUrl = publication.pagesBaseUrl ? stripTrailingSlash(publication.pagesBaseUrl) : "";
+  const inferredBaseUrl = inferredProjectName ? pagesBaseUrl(inferredProjectName) : "";
+  const publicOrigin = publicUrlOrigin(publication.publicUrl);
+
+  if (!storedProjectName && !inferredProjectName && publicOrigin && publicOrigin !== currentBaseUrl) {
+    throw appError(
+      `This published link belongs to ${publicOrigin}, but Pagecast is connected to ${currentBaseUrl}. Click Publish URL to publish it to the current Pages project, or switch back to the original project before syncing.`,
+      409
+    );
+  }
+
+  return {
+    ...currentPages,
+    projectName,
+    accountId: normalizeAccountIdSafe(publication.pagesAccountId || currentPages?.accountId),
+    accountName: publication.pagesAccountName || currentPages?.accountName || "",
+    branch: DEFAULT_PAGES_BRANCH,
+    baseUrl: storedBaseUrl || inferredBaseUrl || currentBaseUrl || pagesBaseUrl(projectName)
+  };
+}
+
+function rememberPublicationPagesTarget(publication, pagesConfig) {
+  publication.pagesProjectName = pagesConfig.projectName;
+  publication.pagesAccountId = normalizeAccountIdSafe(pagesConfig.accountId);
+  publication.pagesAccountName = normalizeAccountName(pagesConfig.accountName || "");
+  publication.pagesBaseUrl = stripTrailingSlash(pagesConfig.baseUrl || pagesBaseUrl(pagesConfig.projectName));
 }
 
 // Derive the REAL production base URL from a `wrangler pages deploy` output.
@@ -400,6 +470,31 @@ function normalizeDefaultExpiry(value) {
   }
 }
 
+function normalizeLocalPort(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
+}
+
+function normalizeRuntimePort(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 0 && port <= 65535 ? port : fallback;
+}
+
+function normalizeLocalHostname(value) {
+  const hostname = String(value || "").trim().toLowerCase();
+  return /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/.test(hostname)
+    ? hostname
+    : DEFAULT_LOCAL_HOSTNAME;
+}
+
+function normalizeLocalConfig(local = {}) {
+  return {
+    hostname: normalizeLocalHostname(local.hostname || DEFAULT_LOCAL_HOSTNAME),
+    adminPort: normalizeLocalPort(local.adminPort, DEFAULT_ADMIN_PORT),
+    publicPort: normalizeLocalPort(local.publicPort, DEFAULT_PUBLIC_PORT)
+  };
+}
+
 function normalizeConfig(config = {}) {
   const projectName = normalizePagesProjectName(
     config.pages?.projectName || DEFAULT_PAGES_PROJECT_NAME
@@ -428,6 +523,9 @@ function normalizeConfig(config = {}) {
     // manifest by default. The UI can turn this off for workspaces where the
     // operator wants manual-only imports.
     cloudflareSyncEnabled: config.cloudflareSyncEnabled !== false,
+    // Friendly local dashboard identity. These are advisory runtime defaults:
+    // explicit CLI args / env vars still win, and fallback ports are persisted.
+    local: normalizeLocalConfig(config.local),
     // HMAC secret for signing edge password-gate session cookies. Generated once
     // (see createConfigStore.init) and kept stable so cookies survive redeploys;
     // preserved here so partial config rebuilds don't drop it.
@@ -1368,6 +1466,7 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
       goal: config.goal,
       defaultExpiry: config.defaultExpiry,
       cloudflareSyncEnabled: config.cloudflareSyncEnabled,
+      local: config.local,
       authCookieSecret: config.authCookieSecret,
       telemetry: config.telemetry,
       telemetryId: config.telemetryId,
@@ -1391,6 +1490,12 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
 
   async function setCloudflareSyncEnabled(enabled) {
     config = normalizeConfig({ ...config, cloudflareSyncEnabled: enabled !== false });
+    await save();
+    return get();
+  }
+
+  async function setLocalRuntime(local) {
+    config = normalizeConfig({ ...config, local: { ...config.local, ...local } });
     await save();
     return get();
   }
@@ -1432,6 +1537,7 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
       goal: config.goal,
       defaultExpiry: config.defaultExpiry,
       cloudflareSyncEnabled: config.cloudflareSyncEnabled,
+      local: config.local,
       authCookieSecret: config.authCookieSecret,
       telemetry: config.telemetry,
       telemetryId: config.telemetryId,
@@ -1448,6 +1554,7 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
     setGoal,
     setDefaultExpiry,
     setCloudflareSyncEnabled,
+    setLocalRuntime,
     setTelemetry,
     ensureTelemetryId,
     markTelemetryNotified,
@@ -1924,8 +2031,17 @@ export function createCloudflarePagesPublisher({
     if (oldSlug && oldSlug !== newSlug) {
       await removePublication(oldSlug);
     }
-    const baseUrl = await deploy(pagesConfig);
-    return joinUrl(baseUrl, `/p/${encodeURIComponent(newSlug)}/`);
+    try {
+      const baseUrl = await deploy(pagesConfig);
+      return joinUrl(baseUrl, `/p/${encodeURIComponent(newSlug)}/`);
+    } catch (error) {
+      if (oldSlug && oldSlug !== newSlug) {
+        await removePublication(newSlug).catch(() => {});
+        await stagePublication(report, { ...publication, slug: oldSlug }, { pagesBaseUrl: pagesConfig?.baseUrl })
+          .catch(() => {});
+      }
+      throw error;
+    }
   }
 
   async function revoke(slugs, pagesConfig) {
@@ -2052,10 +2168,12 @@ export function createWatchManager({
     }
     for (const publication of snapshots) {
       try {
+        const pagesConfig = pagesConfigForPublication(publication, configStore.get().pages);
+        rememberPublicationPagesTarget(publication, pagesConfig);
         await pagesPublisher.syncPublication({
           report,
           publication,
-          pagesConfig: configStore.get().pages
+          pagesConfig
         });
         await store.syncSnapshot(publication.token);
       } catch (error) {
@@ -2482,6 +2600,10 @@ export function createReportStore({
       // slug). Legacy publications default to false (treated as private).
       drop: publication.drop === true,
       publicUrl: kind === "snapshot" ? publication.publicUrl || null : null,
+      pagesProjectName: normalizePagesProjectNameSafe(publication.pagesProjectName),
+      pagesAccountId: normalizeAccountIdSafe(publication.pagesAccountId),
+      pagesAccountName: normalizeAccountName(publication.pagesAccountName || ""),
+      pagesBaseUrl: publication.pagesBaseUrl ? stripTrailingSlash(publication.pagesBaseUrl) : "",
       revokedAt: publication.revokedAt || null,
       updatedAt: publication.updatedAt || publication.createdAt
     };
@@ -3130,6 +3252,7 @@ export function createReportStore({
     const publicUrl =
       normalized.publicUrl ||
       joinUrl(normalized.baseUrl || pagesBaseUrl, `/p/${encodeURIComponent(normalized.slug)}/`);
+    const pagesProjectName = pagesProjectNameFromPublicUrl(publicUrl);
     const publication = {
       token,
       slug: normalized.slug,
@@ -3137,6 +3260,12 @@ export function createReportStore({
       kind: "snapshot",
       drop: false,
       publicUrl,
+      pagesProjectName,
+      pagesAccountId: "",
+      pagesAccountName: "",
+      pagesBaseUrl: pagesProjectName
+        ? `https://${pagesProjectName}.pages.dev`
+        : publicUrlOrigin(publicUrl),
       createdAt,
       updatedAt,
       revokedAt: null,
@@ -3380,6 +3509,27 @@ export function createReportStore({
     addRedirect(`/p/${oldSlug}/`, `/p/${newSlug}/`);
     await save();
     return { ...match, oldSlug, newSlug };
+  }
+
+  async function restorePublicationSlug(token, previous) {
+    const match = findPublication(token);
+    if (!match) {
+      return null;
+    }
+    const oldSlug = previous?.slug || match.publication.token;
+    const failedSlug = match.publication.slug || match.publication.token;
+    match.publication.slug = oldSlug;
+    match.publication.publicUrl =
+      previous && Object.hasOwn(previous, "publicUrl") ? previous.publicUrl : match.publication.publicUrl;
+    match.publication.updatedAt = previous?.publicationUpdatedAt || match.publication.updatedAt;
+    match.report.updatedAt = previous?.reportUpdatedAt || match.report.updatedAt;
+    redirects = redirects.filter((entry) => {
+      const from = `/p/${oldSlug}/`;
+      const to = `/p/${failedSlug}/`;
+      return !(entry.from === from && entry.to === to);
+    });
+    await save();
+    return match;
   }
 
   async function resolveAsset(id, rawAssetPath = "") {
@@ -3692,6 +3842,7 @@ export function createReportStore({
     revokeAll,
     syncSnapshot,
     renameSlug,
+    restorePublicationSlug,
     detachToWorkingCopy,
     readContent,
     writeContent,
@@ -4211,12 +4362,6 @@ function reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl }) {
   };
 }
 
-function activeSnapshotSlugs(report) {
-  return (report.publications || [])
-    .filter((publication) => !publication.revokedAt && publication.kind === "snapshot")
-    .map((publication) => publication.slug || publication.token);
-}
-
 async function detectAndPersistCloudflareProjects({ cloudflareAuth, configStore }) {
   const currentConfig = configStore.getPublicConfig();
   const projects = await cloudflareAuth.listProjects({
@@ -4442,7 +4587,7 @@ export function isLoopbackHostHeader(hostHeader, bindHost) {
     }
   }
   hostname = hostname.toLowerCase();
-  if (hostname === "localhost" || hostname === "::1") {
+  if (hostname === "localhost" || hostname === DEFAULT_LOCAL_HOSTNAME || hostname === "::1") {
     return true;
   }
   // The entire 127.0.0.0/8 block is loopback.
@@ -4583,6 +4728,48 @@ async function handleApi(
   }
 ) {
   const options = reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl });
+
+  async function syncSnapshotPublication({ report, publication }) {
+    await deployQueue.enqueue(async () => {
+      const currentPages = configStore.get().pages;
+      let pagesConfig = pagesConfigForPublication(publication, currentPages);
+      rememberPublicationPagesTarget(publication, pagesConfig);
+      try {
+        publication.publicUrl = await pagesPublisher.syncPublication({
+          report,
+          publication,
+          pagesConfig
+        });
+      } catch (error) {
+        const stillCurrentProject =
+          pagesConfig.projectName === currentPages.projectName &&
+          stripTrailingSlash(pagesConfig.baseUrl) === stripTrailingSlash(currentPages.baseUrl);
+        if (!stillCurrentProject || !isProvisionablePagesError(error)) {
+          throw error;
+        }
+        await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
+        pagesConfig = pagesConfigForPublication(publication, configStore.get().pages);
+        rememberPublicationPagesTarget(publication, pagesConfig);
+        publication.publicUrl = await pagesPublisher.syncPublication({
+          report,
+          publication,
+          pagesConfig
+        });
+      }
+    });
+    return store.syncSnapshot(publication.token);
+  }
+
+  async function revokeSnapshotPublications(publications) {
+    for (const publication of publications) {
+      if (publication.revokedAt || publication.kind !== "snapshot") {
+        continue;
+      }
+      const slug = publication.slug || publication.token;
+      const pagesConfig = pagesConfigForPublication(publication, configStore.get().pages);
+      await deployQueue.enqueue(() => pagesPublisher.revoke([slug], pagesConfig));
+    }
+  }
 
   if (url.pathname === "/api/status" && req.method === "GET") {
     const credential = cloudflareCredentialStatus();
@@ -4998,12 +5185,15 @@ async function handleApi(
     if (gated) {
       await store.commitPublication(id, draft.publication);
     }
-    const deployOnce = () =>
-      (gated ? pagesPublisher.syncPublication : pagesPublisher.publish)({
+    const deployOnce = () => {
+      const pagesConfig = configStore.get().pages;
+      rememberPublicationPagesTarget(draft.publication, pagesConfig);
+      return (gated ? pagesPublisher.syncPublication : pagesPublisher.publish)({
         report: store.get(id),
         publication: draft.publication,
-        pagesConfig: configStore.get().pages
+        pagesConfig
       });
+    };
     try {
       await deployQueue.enqueue(async () => {
         try {
@@ -5012,12 +5202,7 @@ async function handleApi(
           // Self-provision and retry once when the failure is a missing Pages
           // project or account, so a snapshot can publish without first visiting
           // the Cloudflare panel.
-          const message = stripAnsi(error.message || "");
-          const provisionable =
-            /project.*not.*found|could not find.*project|does not exist|no such project|account|select an account/i.test(
-              message
-            );
-          if (!provisionable) {
+          if (!isProvisionablePagesError(error)) {
             throw error;
           }
           await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
@@ -5080,14 +5265,7 @@ async function handleApi(
     let publication;
     if (latest) {
       const match = store.findActivePublication(latest.token);
-      await deployWith(() =>
-        pagesPublisher.syncPublication({
-          report: match.report,
-          publication: match.publication,
-          pagesConfig: configStore.get().pages
-        })
-      );
-      publication = (await store.syncSnapshot(latest.token)).publication;
+      publication = (await syncSnapshotPublication(match)).publication;
     } else {
       const expiresAt = resolveExpiresAt({ expires: body.expires, defaultExpiry: configStore.get().defaultExpiry });
       const draft = store.draftPublication(report.id, { kind: "snapshot", expiresAt });
@@ -5101,12 +5279,14 @@ async function handleApi(
       }
       try {
         await deployWith(async () => {
+          const pagesConfig = configStore.get().pages;
+          rememberPublicationPagesTarget(draft.publication, pagesConfig);
           draft.publication.publicUrl = await (gated
             ? pagesPublisher.syncPublication
             : pagesPublisher.publish)({
             report: store.get(report.id),
             publication: draft.publication,
-            pagesConfig: configStore.get().pages
+            pagesConfig
           });
         });
       } catch (error) {
@@ -5145,31 +5325,7 @@ async function handleApi(
     if (existing.report.kind === "folder" && existing.report.buildCommand) {
       await store.buildReport(existing.report.id);
     }
-    await deployQueue.enqueue(async () => {
-      try {
-        await pagesPublisher.syncPublication({
-          report: existing.report,
-          publication: existing.publication,
-          pagesConfig: configStore.get().pages
-        });
-      } catch (error) {
-        const message = stripAnsi(error.message || "");
-        const provisionable =
-          /project.*not.*found|could not find.*project|does not exist|no such project|account|select an account/i.test(
-            message
-          );
-        if (!provisionable) {
-          throw error;
-        }
-        await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
-        await pagesPublisher.syncPublication({
-          report: existing.report,
-          publication: existing.publication,
-          pagesConfig: configStore.get().pages
-        });
-      }
-    });
-    const { report, publication } = await store.syncSnapshot(token);
+    const { report, publication } = await syncSnapshotPublication(existing);
     sendJson(res, 200, {
       report: store.formatReport(report, options),
       publication: store.formatPublication(publication, options)
@@ -5199,30 +5355,7 @@ async function handleApi(
     await store.setPublicationExpiry(token, expiresAt);
     // Redeploy so the edge middleware manifest reflects the new expiry.
     try {
-      await deployQueue.enqueue(async () => {
-        try {
-          await pagesPublisher.syncPublication({
-            report: existing.report,
-            publication: existing.publication,
-            pagesConfig: configStore.get().pages
-          });
-        } catch (error) {
-          const message = stripAnsi(error.message || "");
-          const provisionable =
-            /project.*not.*found|could not find.*project|does not exist|no such project|account|select an account/i.test(
-              message
-            );
-          if (!provisionable) {
-            throw error;
-          }
-          await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
-          await pagesPublisher.syncPublication({
-            report: existing.report,
-            publication: existing.publication,
-            pagesConfig: configStore.get().pages
-          });
-        }
-      });
+      await syncSnapshotPublication(existing);
     } catch (error) {
       await store.setPublicationExpiry(token, previousExpiresAt).catch(() => {});
       throw error;
@@ -5243,18 +5376,31 @@ async function handleApi(
     if (!existing) {
       throw appError("Published link was not found.", 404);
     }
+    const previous = {
+      slug: existing.publication.slug || existing.publication.token,
+      publicUrl: existing.publication.publicUrl,
+      publicationUpdatedAt: existing.publication.updatedAt,
+      reportUpdatedAt: existing.report.updatedAt
+    };
     // Validate + reserve the slug (throws 400/409) before any deploy work.
     const { oldSlug, newSlug } = await store.renameSlug(token, body.slug);
-    if (oldSlug !== newSlug && existing.publication.kind === "snapshot") {
-      await deployQueue.enqueue(() =>
-        pagesPublisher.renamePublication({
-          oldSlug,
-          newSlug,
-          report: existing.report,
-          publication: existing.publication,
-          pagesConfig: configStore.get().pages
-        })
-      );
+    try {
+      if (oldSlug !== newSlug && existing.publication.kind === "snapshot") {
+        await deployQueue.enqueue(() => {
+          const pagesConfig = pagesConfigForPublication(existing.publication, configStore.get().pages);
+          rememberPublicationPagesTarget(existing.publication, pagesConfig);
+          return pagesPublisher.renamePublication({
+            oldSlug,
+            newSlug,
+            report: existing.report,
+            publication: existing.publication,
+            pagesConfig
+          });
+        });
+      }
+    } catch (error) {
+      await store.restorePublicationSlug(token, previous).catch(() => {});
+      throw error;
     }
     const refreshed = store.findPublication(token);
     sendJson(res, 200, {
@@ -5271,12 +5417,7 @@ async function handleApi(
     if (!reportBeforeRevoke) {
       throw appError("Report was not found.", 404);
     }
-    const snapshotSlugs = activeSnapshotSlugs(reportBeforeRevoke);
-    if (snapshotSlugs.length > 0) {
-      await deployQueue.enqueue(() =>
-        pagesPublisher.revoke(snapshotSlugs, configStore.get().pages)
-      );
-    }
+    await revokeSnapshotPublications(reportBeforeRevoke.publications || []);
     const { report, revokedCount } = await store.revokeAll(id);
     sendJson(res, 200, {
       revokedCount,
@@ -5293,12 +5434,7 @@ async function handleApi(
       if (watchManager) {
         watchManager.unregister(id);
       }
-      const snapshotSlugs = activeSnapshotSlugs(reportBeforeDelete);
-      if (snapshotSlugs.length > 0) {
-        await deployQueue.enqueue(() =>
-          pagesPublisher.revoke(snapshotSlugs, configStore.get().pages)
-        );
-      }
+      await revokeSnapshotPublications(reportBeforeDelete.publications || []);
     }
     const removed = await store.remove(id);
     sendJson(res, removed ? 200 : 404, { removed });
@@ -5313,10 +5449,7 @@ async function handleApi(
       throw appError("Published link was not found.", 404);
     }
     if (!existing.publication.revokedAt && existing.publication.kind === "snapshot") {
-      const slug = existing.publication.slug || existing.publication.token;
-      await deployQueue.enqueue(() =>
-        pagesPublisher.revoke([slug], configStore.get().pages)
-      );
+      await revokeSnapshotPublications([existing.publication]);
     }
     const { report, publication } = await store.revokePublication(token);
     sendJson(res, 200, {
@@ -5348,14 +5481,7 @@ async function handleApi(
     // Push the edit live to every active snapshot of this report (same URL).
     const snapshots = store.activeSnapshotPublications(report);
     for (const publication of snapshots) {
-      await deployQueue.enqueue(async () => {
-        await pagesPublisher.syncPublication({
-          report,
-          publication,
-          pagesConfig: configStore.get().pages
-        });
-        await store.syncSnapshot(publication.token);
-      });
+      await syncSnapshotPublication({ report, publication });
     }
     sendJson(res, 200, { report: store.formatReport(store.get(id), options) });
     return;
@@ -5396,31 +5522,7 @@ async function handleApi(
     const snapshots = store.activeSnapshotPublications(report);
     try {
       for (const publication of snapshots) {
-        await deployQueue.enqueue(async () => {
-          try {
-            await pagesPublisher.syncPublication({
-              report,
-              publication,
-              pagesConfig: configStore.get().pages
-            });
-          } catch (error) {
-            const message = stripAnsi(error.message || "");
-            const provisionable =
-              /project.*not.*found|could not find.*project|does not exist|no such project|account|select an account/i.test(
-                message
-              );
-            if (!provisionable) {
-              throw error;
-            }
-            await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
-            await pagesPublisher.syncPublication({
-              report,
-              publication,
-              pagesConfig: configStore.get().pages
-            });
-          }
-          await store.syncSnapshot(publication.token);
-        });
+        await syncSnapshotPublication({ report, publication });
       }
     } catch (error) {
       if (prevPasswordState) {
@@ -5477,10 +5579,26 @@ function closeServer(server) {
   });
 }
 
+function isPortInUse(error) {
+  return error && error.code === "EADDRINUSE";
+}
+
+function localPortCandidates(adminPort, publicPort) {
+  const candidates = [[adminPort, publicPort]];
+  for (let admin = DEFAULT_ADMIN_PORT; admin <= DEFAULT_ADMIN_PORT + 18; admin += 2) {
+    const pair = [admin, admin + 1];
+    if (!candidates.some(([a, p]) => a === pair[0] && p === pair[1])) {
+      candidates.push(pair);
+    }
+  }
+  return candidates;
+}
+
 export async function startServers({
   host = process.env.HOST || DEFAULT_HOST,
-  adminPort = Number(process.env.PORT || DEFAULT_ADMIN_PORT),
-  publicPort = Number(process.env.PUBLIC_PORT || DEFAULT_PUBLIC_PORT),
+  adminPort,
+  publicPort,
+  displayHost,
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   staticDir = path.join(PROJECT_ROOT, "public"),
   spawnImpl = spawn,
@@ -5496,6 +5614,19 @@ export async function startServers({
   await store.init();
   const configStore = createConfigStore({ dataDir });
   await configStore.init();
+  const localConfig = configStore.get().local;
+  const explicitAdminPort = adminPort !== undefined || process.env.PORT;
+  const explicitPublicPort = publicPort !== undefined || process.env.PUBLIC_PORT;
+  const resolvedAdminPort = normalizeRuntimePort(
+    adminPort !== undefined ? adminPort : process.env.PORT || localConfig.adminPort,
+    DEFAULT_ADMIN_PORT
+  );
+  const resolvedPublicPort = normalizeRuntimePort(
+    publicPort !== undefined ? publicPort : process.env.PUBLIC_PORT || localConfig.publicPort,
+    DEFAULT_PUBLIC_PORT
+  );
+  const fallbackAllowed = !explicitAdminPort && !explicitPublicPort;
+  const displayHostname = normalizeLocalHostname(displayHost || localConfig.hostname);
   const cloudflareAuth = createCloudflareAuthManager({
     spawnImpl: cloudflareAuthSpawnImpl,
     loginTimeoutMs: cloudflareLoginTimeoutMs,
@@ -5538,64 +5669,93 @@ export async function startServers({
   // `hostForUrl` brackets IPv6 literals (e.g. ::1) so URLs stay well-formed:
   // http://[::1]:4173, not http://::1:4173.
   const urlHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-  const hostForUrl = urlHost.includes(":") ? `[${urlHost}]` : urlHost;
+  const externalUrlHost =
+    urlHost === "127.0.0.1" || urlHost === "::1" ? displayHostname : urlHost;
+  const hostForUrl = externalUrlHost.includes(":") ? `[${externalUrlHost}]` : externalUrlHost;
 
-  const publicServer = createServer(createPublicHandler({ store }));
-  await listen(publicServer, { host, port: publicPort });
-  const actualPublicPort = publicServer.address().port;
-  const localPublicBaseUrl = `http://${hostForUrl}:${actualPublicPort}`;
-  let adminBaseUrl = null;
-  const tunnelManager = new TunnelManager({
-    localUrl: localPublicBaseUrl,
-    spawnImpl,
-    timeoutMs: tunnelTimeoutMs
-  });
+  let lastPortError = null;
+  for (const [candidateAdminPort, candidatePublicPort] of localPortCandidates(resolvedAdminPort, resolvedPublicPort)) {
+    const publicServer = createServer(createPublicHandler({ store }));
+    let actualPublicPort = candidatePublicPort;
+    try {
+      await listen(publicServer, { host, port: candidatePublicPort });
+      actualPublicPort = publicServer.address().port;
+    } catch (error) {
+      await closeServer(publicServer).catch(() => {});
+      if (fallbackAllowed && isPortInUse(error)) {
+        lastPortError = error;
+        continue;
+      }
+      throw error;
+    }
 
-  const adminServer = createServer(
-    createAdminHandler({
+    const localPublicBaseUrl = `http://${hostForUrl}:${actualPublicPort}`;
+    let adminBaseUrl = null;
+    const tunnelManager = new TunnelManager({
+      localUrl: localPublicBaseUrl,
+      spawnImpl,
+      timeoutMs: tunnelTimeoutMs
+    });
+
+    const adminServer = createServer(
+      createAdminHandler({
+        store,
+        configStore,
+        cloudflareAuth,
+        pagesPublisher,
+        staticDir,
+        getAdminBaseUrl: () => adminBaseUrl,
+        getLocalPublicBaseUrl: () => localPublicBaseUrl,
+        tunnelManager,
+        deployQueue,
+        watchManager,
+        bindHost: urlHost
+      })
+    );
+
+    try {
+      await listen(adminServer, { host, port: candidateAdminPort });
+    } catch (error) {
+      await closeServer(publicServer).catch(() => {});
+      if (fallbackAllowed && isPortInUse(error)) {
+        lastPortError = error;
+        continue;
+      }
+      throw error;
+    }
+
+    const actualAdminPort = adminServer.address().port;
+    const adminUrl = `http://${hostForUrl}:${actualAdminPort}`;
+    adminBaseUrl = adminUrl;
+    if (fallbackAllowed) {
+      await configStore.setLocalRuntime({
+        hostname: displayHostname,
+        adminPort: actualAdminPort,
+        publicPort: actualPublicPort
+      });
+    }
+
+    return {
+      adminServer,
+      publicServer,
       store,
       configStore,
       cloudflareAuth,
       pagesPublisher,
-      staticDir,
-      getAdminBaseUrl: () => adminBaseUrl,
-      getLocalPublicBaseUrl: () => localPublicBaseUrl,
       tunnelManager,
       deployQueue,
       watchManager,
-      bindHost: urlHost
-    })
-  );
-
-  try {
-    await listen(adminServer, { host, port: adminPort });
-  } catch (error) {
-    await closeServer(publicServer);
-    throw error;
+      adminUrl,
+      publicUrl: localPublicBaseUrl,
+      async close() {
+        watchManager.closeAll();
+        await tunnelManager.stop();
+        await Promise.all([closeServer(adminServer), closeServer(publicServer)]);
+      }
+    };
   }
 
-  const actualAdminPort = adminServer.address().port;
-  const adminUrl = `http://${hostForUrl}:${actualAdminPort}`;
-  adminBaseUrl = adminUrl;
-
-  return {
-    adminServer,
-    publicServer,
-    store,
-    configStore,
-    cloudflareAuth,
-    pagesPublisher,
-    tunnelManager,
-    deployQueue,
-    watchManager,
-    adminUrl,
-    publicUrl: localPublicBaseUrl,
-    async close() {
-      watchManager.closeAll();
-      await tunnelManager.stop();
-      await Promise.all([closeServer(adminServer), closeServer(publicServer)]);
-    }
-  };
+  throw lastPortError || appError("Could not find an available local Pagecast port.", 500);
 }
 
 async function createHeadlessCloudflareContext({
@@ -6106,6 +6266,7 @@ export async function publishReportSnapshot({
   if (store.get(report.id).passwordProtected || draft.publication.expiresAt) {
     await store.commitPublication(report.id, draft.publication);
     try {
+      rememberPublicationPagesTarget(draft.publication, configStore.get().pages);
       draft.publication.publicUrl = await pagesPublisher.syncPublication({
         report: store.get(report.id),
         publication: draft.publication,
@@ -6117,6 +6278,7 @@ export async function publishReportSnapshot({
     }
     await store.syncSnapshot(draft.publication.token);
   } else {
+    rememberPublicationPagesTarget(draft.publication, configStore.get().pages);
     draft.publication.publicUrl = await pagesPublisher.publish({
       report: draft.report,
       publication: draft.publication,
