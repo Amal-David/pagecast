@@ -1,22 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
-import {
-  DndContext,
-  KeyboardSensor,
-  PointerSensor,
-  closestCenter,
-  useSensor,
-  useSensors,
-  type DragEndEvent
-} from "@dnd-kit/core";
-import {
-  SortableContext,
-  arrayMove,
-  sortableKeyboardCoordinates,
-  useSortable,
-  verticalListSortingStrategy
-} from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
 import { toast } from "sonner";
 import {
   Activity,
@@ -29,7 +12,6 @@ import {
   ExternalLink,
   FileText,
   Filter,
-  GripVertical,
   Home,
   Link2,
   Loader2,
@@ -84,7 +66,6 @@ import {
   useDeleteReport,
   usePasswordProtection,
   usePublishSnapshot,
-  useReorder,
   useReports,
   useRevokeAll,
   useSetCloudflareSyncEnabled,
@@ -129,6 +110,69 @@ function displayAccountName(cloudflare: CloudflareStatus | undefined) {
     return name;
   }
   return cloudflare?.loggedIn || cloudflare?.accountId ? "Cloudflare account" : "";
+}
+
+function newestActivePublication(report: Report) {
+  return report.publications
+    .filter((publication) => publication.active)
+    .reduce<Report["publications"][number] | null>((latest, publication) => {
+      if (!latest) return publication;
+      return new Date(publication.updatedAt).getTime() > new Date(latest.updatedAt).getTime()
+        ? publication
+        : latest;
+    }, null);
+}
+
+function publishedSortTime(report: Report) {
+  const publication = newestActivePublication(report);
+  if (!publication) return 0;
+  const time = new Date(publication.updatedAt).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function reportUpdatedSortTime(report: Report) {
+  const time = new Date(report.updatedAt).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function compareSidebarReports(a: Report, b: Report) {
+  const publishedDiff = publishedSortTime(b) - publishedSortTime(a);
+  if (publishedDiff !== 0) return publishedDiff;
+
+  const activeDiff =
+    Number(b.publications.some((publication) => publication.active)) -
+    Number(a.publications.some((publication) => publication.active));
+  if (activeDiff !== 0) return activeDiff;
+
+  const updatedDiff = reportUpdatedSortTime(b) - reportUpdatedSortTime(a);
+  if (updatedDiff !== 0) return updatedDiff;
+
+  return a.name.localeCompare(b.name);
+}
+
+function sidebarDateLabel(iso: string | null | undefined) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric"
+  });
+}
+
+function sidebarRelativeTime(iso: string | null | undefined) {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const seconds = Math.round((Date.now() - then) / 1000);
+  if (seconds < 45) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days} ${days === 1 ? "day" : "days"} ago`;
+  return sidebarDateLabel(iso);
 }
 
 function useElapsed(startedAt: number | null) {
@@ -179,7 +223,7 @@ export function App() {
       return;
     }
     if (!selectedReportId || !reportItems.some((report) => report.id === selectedReportId)) {
-      setSelectedReportId(reportItems[0].id);
+      setSelectedReportId([...reportItems].sort(compareSidebarReports)[0].id);
     }
   }, [reportItems, reports.isLoading, selectedReportId]);
 
@@ -686,21 +730,14 @@ function PageSidebar({
   onRequestDelete: (report: Report) => void;
   onRequestRevokeAll: (report: Report) => void;
 }) {
-  // Local mirror for instant drag feedback; react-query is the source of truth
-  // and the optimistic reorder mutation reconciles it.
   const [items, setItems] = useState<Report[]>(reports);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "published" | "draft" | "mini">("all");
-  const reorder = useReorder();
 
   useEffect(() => {
     setItems(reports);
   }, [reports]);
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
-  );
   const activeLinkCount = reports.reduce(
     (total, report) => total + report.publications.filter((publication) => publication.active).length,
     0
@@ -714,18 +751,7 @@ function PageSidebar({
       (filter === "draft" && activeCount === 0) ||
       (filter === "mini" && report.kind === "folder");
     return matchesQuery && matchesFilter;
-  });
-
-  const handleDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    const oldIndex = items.findIndex((item) => item.id === active.id);
-    const newIndex = items.findIndex((item) => item.id === over.id);
-    if (oldIndex === -1 || newIndex === -1) return;
-    const next = arrayMove(items, oldIndex, newIndex);
-    setItems(next);
-    reorder.mutate(next.map((item) => item.id));
-  };
+  }).sort(compareSidebarReports);
 
   return (
     <aside className="min-h-0 border-b bg-background lg:border-b-0 lg:border-r">
@@ -811,29 +837,18 @@ function PageSidebar({
               </p>
             </div>
           ) : (
-            <DndContext
-              sensors={sensors}
-              collisionDetection={closestCenter}
-              onDragEnd={handleDragEnd}
-            >
-              <SortableContext
-                items={displayedItems.map((item) => item.id)}
-                strategy={verticalListSortingStrategy}
-              >
-                {displayedItems.map((report) => (
-                  <SortablePageRow
-                    key={report.id}
-                    report={report}
-                    isSelected={
-                      activeView === "pages" && selectedReportId === report.id
-                    }
-                    onSelect={onSelectReport}
-                    onRequestDelete={onRequestDelete}
-                    onRequestRevokeAll={onRequestRevokeAll}
-                  />
-                ))}
-              </SortableContext>
-            </DndContext>
+            displayedItems.map((report) => (
+              <PageRow
+                key={report.id}
+                report={report}
+                isSelected={
+                  activeView === "pages" && selectedReportId === report.id
+                }
+                onSelect={onSelectReport}
+                onRequestDelete={onRequestDelete}
+                onRequestRevokeAll={onRequestRevokeAll}
+              />
+            ))
           )}
         </nav>
 
@@ -855,7 +870,7 @@ function PageSidebar({
   );
 }
 
-function SortablePageRow({
+function PageRow({
   report,
   isSelected,
   onSelect,
@@ -868,19 +883,24 @@ function SortablePageRow({
   onRequestDelete: (report: Report) => void;
   onRequestRevokeAll: (report: Report) => void;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: report.id });
   const activeLinkCount = report.publications.filter((publication) => publication.active).length;
   const hasActiveLinks = activeLinkCount > 0;
+  const latestPublication = newestActivePublication(report);
+  const publishedDate = sidebarDateLabel(latestPublication?.updatedAt);
+  const publishedRelative = sidebarRelativeTime(latestPublication?.updatedAt);
+  const secondaryText = hasActiveLinks
+    ? [
+        "Published",
+        publishedDate,
+        publishedRelative && publishedRelative !== publishedDate ? publishedRelative : ""
+      ].filter(Boolean).join(" · ")
+    : "Draft";
 
   return (
     <div
-      ref={setNodeRef}
-      style={{ transform: CSS.Transform.toString(transform), transition }}
       className={cn(
         "group relative mb-1 flex items-center rounded-md transition-colors hover:bg-accent",
-        isSelected && "bg-emerald-50 ring-1 ring-emerald-100",
-        isDragging && "z-10 bg-background opacity-80 shadow-md"
+        isSelected && "bg-emerald-50 ring-1 ring-emerald-100"
       )}
     >
       {isSelected ? (
@@ -891,23 +911,14 @@ function SortablePageRow({
       ) : null}
       <button
         type="button"
-        {...attributes}
-        {...listeners}
-        aria-label={`Reorder ${report.name}`}
-        className="flex h-8 w-5 shrink-0 cursor-grab touch-none items-center justify-center text-muted-foreground/50 opacity-0 transition-opacity hover:text-muted-foreground focus-visible:opacity-100 active:cursor-grabbing group-hover:opacity-100"
-      >
-        <GripVertical className="h-4 w-4" />
-      </button>
-      <button
-        type="button"
         onClick={() => onSelect(report)}
-        className="flex min-w-0 flex-1 items-start gap-2.5 rounded-md py-2 pr-1 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="flex min-w-0 flex-1 items-start gap-2.5 rounded-md py-2 pl-6 pr-1 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
         <FileText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">{report.name}</span>
           <span className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
-            <span>{hasActiveLinks ? "Published" : "Draft"}</span>
+            <span className="truncate">{secondaryText}</span>
             {report.importedFromCloudflare ? (
               <span className="inline-flex items-center gap-1">
                 <CloudDownload className="h-3 w-3" />
