@@ -1062,110 +1062,26 @@ function PageWorkspace({
   const publishBlocked = cloudflareReady && !connected;
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(520px,1fr)_minmax(430px,42vw)]">
-      <section className="min-h-0 overflow-y-auto bg-background">
-        <div className="sticky top-0 z-10 border-b bg-background/95 px-5 py-5 backdrop-blur">
-          <div className="mb-6 flex items-center gap-2 text-xs text-muted-foreground">
-            <span>Pages</span>
-            <span>/</span>
-            <span className="font-medium text-foreground">{report.name}</span>
-          </div>
-          <div className="flex flex-col gap-4">
-            <div className="flex min-w-0 flex-1 items-start gap-3">
-              <FileText className="mt-1 h-6 w-6 shrink-0 text-muted-foreground" />
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h2 className="min-w-0 break-words text-2xl font-semibold tracking-tight">
-                    {report.name}
-                  </h2>
-                  <Badge variant={hasActiveLinks ? "secondary" : "outline"}>
-                    {hasActiveLinks ? "Published" : "Draft"}
-                  </Badge>
-                  {report.importedFromCloudflare ? (
-                    <Badge variant="muted" className="gap-1">
-                      <CloudDownload className="h-3 w-3" />
-                      synced
-                    </Badge>
-                  ) : null}
-                </div>
-                <p className="mt-2 flex flex-wrap gap-x-2 gap-y-1 text-sm text-muted-foreground">
-                  <span>Last synced {relativeTime(latestSnapshot?.updatedAt || report.updatedAt)}</span>
-                  <span aria-hidden="true">·</span>
-                  <span>{latestSnapshot?.expiresAt ? "Expires" : "Never expires"}</span>
-                </p>
-              </div>
-            </div>
-            <div className="flex shrink-0 flex-wrap items-center gap-2">
-              {latestSnapshot?.publicUrl ? (
-                <Button asChild size="sm" className="bg-emerald-600 text-white hover:bg-emerald-700">
-                  <a href={latestSnapshot.publicUrl} target="_blank" rel="noreferrer">
-                    <ExternalLink className="h-4 w-4" />
-                    Open
-                  </a>
-                </Button>
-              ) : null}
-              <Button variant="outline" size="sm" onClick={() => onEdit(report)}>
-                <Pencil className="h-4 w-4" />
-                Edit
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => onPreview(report)}>
-                <Monitor className="h-4 w-4" />
-                Preview
-              </Button>
-              {publishBlocked ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button size="sm" onClick={onConnect} variant="secondary">
-                      <Cloud className="h-4 w-4" />
-                      Publish URL
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Connect Cloudflare first</TooltipContent>
-                </Tooltip>
-              ) : (
-                <Button
-                  size="sm"
-                  onClick={() => onPublish(report, publishAsDrop)}
-                  disabled={publishPending || buildPending}
-                >
-                  {isPublishingThisReport ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Cloud className="h-4 w-4" />
-                  )}
-                  {publishAsDrop ? "Publish short link" : "Publish URL"}
-                </Button>
-              )}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button size="icon" variant="outline" className="h-9 w-9" aria-label="More actions">
-                    <MoreHorizontal className="h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  {hasActiveLinks ? (
-                    <>
-                      <DropdownMenuItem onSelect={() => onRequestRevokeAll(report)}>
-                        <WifiOff className="h-4 w-4" />
-                        Take links offline
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                    </>
-                  ) : null}
-                  <DropdownMenuItem
-                    onSelect={() => onRequestDelete(report)}
-                    className="text-destructive focus:text-destructive"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                    Delete page
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          </div>
-        </div>
+    <div className="h-full min-h-0 overflow-y-auto bg-muted/20">
+      <div className="mx-auto flex min-h-full max-w-[1480px] flex-col gap-4 p-5">
+        <PreviewPane
+          report={report}
+          publication={latestSnapshot || activePublications[0] || null}
+          hasActiveLinks={hasActiveLinks}
+          isPublishing={isPublishingThisReport}
+          publishAsDrop={publishAsDrop}
+          publishPending={publishPending}
+          buildPending={buildPending}
+          publishBlocked={publishBlocked}
+          onConnect={onConnect}
+          onEdit={onEdit}
+          onPreview={onPreview}
+          onPublish={onPublish}
+          onRequestDelete={onRequestDelete}
+          onRequestRevokeAll={onRequestRevokeAll}
+        />
 
-        <div className="space-y-4 p-5">
+        <div className="space-y-4">
           {publishBlocked ? (
             <div className="flex flex-col gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-start gap-2.5">
@@ -1383,9 +1299,7 @@ function PageWorkspace({
             />
           ) : null}
         </div>
-      </section>
-
-      <PreviewPane report={report} publication={latestSnapshot || activePublications[0] || null} />
+      </div>
     </div>
   );
 }
@@ -1412,10 +1326,34 @@ function SettingsRow({
 
 function PreviewPane({
   report,
-  publication
+  publication,
+  hasActiveLinks,
+  isPublishing,
+  publishAsDrop,
+  publishPending,
+  buildPending,
+  publishBlocked,
+  onConnect,
+  onEdit,
+  onPreview,
+  onPublish,
+  onRequestDelete,
+  onRequestRevokeAll
 }: {
   report: Report;
   publication: Report["publications"][number] | null;
+  hasActiveLinks: boolean;
+  isPublishing: boolean;
+  publishAsDrop: boolean;
+  publishPending: boolean;
+  buildPending: boolean;
+  publishBlocked: boolean;
+  onConnect: () => void;
+  onEdit: (report: Report) => void;
+  onPreview: (report: Report) => void;
+  onPublish: (report: Report, drop: boolean) => void;
+  onRequestDelete: (report: Report) => void;
+  onRequestRevokeAll: (report: Report) => void;
 }) {
   const [device, setDevice] = useState<"desktop" | "mobile">("desktop");
   const frameShellRef = useRef<HTMLDivElement>(null);
@@ -1443,43 +1381,138 @@ function PreviewPane({
   }, [viewport.width]);
 
   return (
-    <aside className="hidden min-h-0 border-l bg-background xl:flex xl:flex-col">
-      <div className="flex h-[4.25rem] items-center justify-between border-b px-5">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-semibold">Preview</h3>
-            {publication?.slug ? (
-              <Badge variant="muted" className="max-w-[18rem] truncate font-mono text-[11px]">
-                /p/{publication.slug}/
+    <section className="relative overflow-hidden rounded-lg border bg-background shadow-sm">
+      <div className="pointer-events-none absolute left-4 right-4 top-4 z-20 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="pointer-events-auto min-w-0 rounded-lg border bg-background/90 px-3 py-2 shadow-sm backdrop-blur sm:max-w-[min(680px,62%)]">
+          <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+            <span>Pages</span>
+            <span>/</span>
+            <span className="truncate font-medium text-foreground">{report.name}</span>
+          </div>
+          <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
+            <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
+            <h2 className="min-w-0 truncate text-xl font-semibold tracking-tight">
+              {report.name}
+            </h2>
+            <Badge variant={hasActiveLinks ? "secondary" : "outline"}>
+              {hasActiveLinks ? "Published" : "Draft"}
+            </Badge>
+            {report.importedFromCloudflare ? (
+              <Badge variant="muted" className="gap-1">
+                <CloudDownload className="h-3 w-3" />
+                synced
               </Badge>
             ) : null}
-            <Badge variant="outline" className="font-mono text-[11px]">
-              {viewport.label}
-            </Badge>
           </div>
+          <p className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-muted-foreground">
+            <span>Last synced {relativeTime(publication?.updatedAt || report.updatedAt)}</span>
+            <span aria-hidden="true">·</span>
+            <span>{publication?.expiresAt ? "Expires" : "Never expires"}</span>
+          </p>
         </div>
-        <div className="flex items-center gap-1">
+
+        <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-2 rounded-lg border bg-background/90 p-1.5 shadow-sm backdrop-blur">
+          {publication?.publicUrl ? (
+            <Button asChild size="sm" className="bg-emerald-600 text-white hover:bg-emerald-700">
+              <a href={publication.publicUrl} target="_blank" rel="noreferrer">
+                <ExternalLink className="h-4 w-4" />
+                Open
+              </a>
+            </Button>
+          ) : null}
+          <Button variant="outline" size="sm" onClick={() => onEdit(report)}>
+            <Pencil className="h-4 w-4" />
+            Edit
+          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="icon"
+                variant={device === "desktop" ? "secondary" : "ghost"}
+                className="h-9 w-9"
+                onClick={() => setDevice("desktop")}
+                aria-label="Desktop preview"
+              >
+                <Monitor className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Desktop preview</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="icon"
+                variant={device === "mobile" ? "secondary" : "ghost"}
+                className="h-9 w-9"
+                onClick={() => setDevice("mobile")}
+                aria-label="Mobile preview"
+              >
+                <Smartphone className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Mobile preview</TooltipContent>
+          </Tooltip>
           <Button
-            size="icon"
-            variant={device === "desktop" ? "secondary" : "ghost"}
-            className="h-8 w-8"
-            onClick={() => setDevice("desktop")}
-            aria-label="Desktop preview"
+            variant="outline"
+            size="sm"
+            onClick={() => onPreview(report)}
           >
             <Monitor className="h-4 w-4" />
+            Preview
           </Button>
-          <Button
-            size="icon"
-            variant={device === "mobile" ? "secondary" : "ghost"}
-            className="h-8 w-8"
-            onClick={() => setDevice("mobile")}
-            aria-label="Mobile preview"
-          >
-            <Smartphone className="h-4 w-4" />
-          </Button>
+          {publishBlocked ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button size="sm" onClick={onConnect} variant="secondary">
+                  <Cloud className="h-4 w-4" />
+                  Publish URL
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Connect Cloudflare first</TooltipContent>
+            </Tooltip>
+          ) : (
+            <Button
+              size="sm"
+              onClick={() => onPublish(report, publishAsDrop)}
+              disabled={publishPending || buildPending}
+            >
+              {isPublishing ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Cloud className="h-4 w-4" />
+              )}
+              {publishAsDrop ? "Publish short link" : "Publish URL"}
+            </Button>
+          )}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="icon" variant="outline" className="h-9 w-9" aria-label="More actions">
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {hasActiveLinks ? (
+                <>
+                  <DropdownMenuItem onSelect={() => onRequestRevokeAll(report)}>
+                    <WifiOff className="h-4 w-4" />
+                    Take links offline
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              ) : null}
+              <DropdownMenuItem
+                onSelect={() => onRequestDelete(report)}
+                className="text-destructive focus:text-destructive"
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete page
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
-      <div ref={frameShellRef} className="min-h-0 flex-1 overflow-auto bg-muted/30 p-5">
+
+      <div ref={frameShellRef} className="min-h-[660px] overflow-auto bg-muted/30 px-5 pb-5 pt-40 lg:pt-28">
         <div
           className={cn(
             "mx-auto overflow-hidden rounded-lg border bg-background shadow-sm",
@@ -1494,6 +1527,9 @@ function PreviewPane({
             <div className="min-w-0 flex-1 truncate rounded-md border bg-background px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
               {displayUrl || "Preview URL"}
             </div>
+            <Badge variant="outline" className="shrink-0 font-mono text-[11px]">
+              {viewport.label}
+            </Badge>
             <RefreshCw className="h-3.5 w-3.5 text-muted-foreground" />
             <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
           </div>
@@ -1522,7 +1558,7 @@ function PreviewPane({
           )}
         </div>
       </div>
-    </aside>
+    </section>
   );
 }
 
