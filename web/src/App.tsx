@@ -11,8 +11,6 @@ import {
   Copy,
   ExternalLink,
   FileText,
-  Filter,
-  Home,
   Link2,
   Loader2,
   Monitor,
@@ -25,7 +23,6 @@ import {
   Settings,
   Smartphone,
   Trash2,
-  Upload,
   WifiOff,
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -148,31 +145,6 @@ function compareSidebarReports(a: Report, b: Report) {
   if (updatedDiff !== 0) return updatedDiff;
 
   return a.name.localeCompare(b.name);
-}
-
-function sidebarDateLabel(iso: string | null | undefined) {
-  if (!iso) return "";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric"
-  });
-}
-
-function sidebarRelativeTime(iso: string | null | undefined) {
-  if (!iso) return "";
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "";
-  const seconds = Math.round((Date.now() - then) / 1000);
-  if (seconds < 45) return "just now";
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
-  const days = Math.round(hours / 24);
-  if (days < 30) return `${days} ${days === 1 ? "day" : "days"} ago`;
-  return sidebarDateLabel(iso);
 }
 
 function useElapsed(startedAt: number | null) {
@@ -361,18 +333,22 @@ export function App() {
           </div>
         ) : null}
 
-        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[56px_360px_minmax(0,1fr)] xl:grid-cols-[56px_400px_minmax(0,1fr)]">
+        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[52px_320px_minmax(0,1fr)]">
           <AppRail activeView={activeView} onPages={() => setActiveView("pages")} onSettings={goToSettings} />
-          <PageSidebar
-            reports={reportItems}
-            selectedReportId={selectedReportId}
-            activeView={activeView}
-            isLoading={reports.isLoading}
-            onSelectReport={selectReport}
-            onOpenSettings={() => setActiveView("settings")}
-            onRequestDelete={setPendingDelete}
-            onRequestRevokeAll={setPendingRevoke}
-          />
+          {activeView === "settings" ? (
+            <SettingsSidebar />
+          ) : (
+            <PageSidebar
+              reports={reportItems}
+              selectedReportId={selectedReportId}
+              activeView={activeView}
+              isLoading={reports.isLoading}
+              onSelectReport={selectReport}
+              onOpenSettings={() => setActiveView("settings")}
+              onRequestDelete={setPendingDelete}
+              onRequestRevokeAll={setPendingRevoke}
+            />
+          )}
 
           <main className="min-w-0 overflow-hidden bg-muted/20">
             {activeView === "settings" ? (
@@ -401,7 +377,7 @@ export function App() {
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.18 }}
-                  className="mx-auto flex max-w-6xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8"
+                  className="mx-auto flex max-w-[1180px] flex-col gap-5 px-4 py-4 sm:px-5 lg:px-6"
                 >
                   <PageWorkspace
                     report={selectedReport}
@@ -553,9 +529,9 @@ function TopBar({
 }) {
   return (
     <header className="z-30 border-b bg-background/95 backdrop-blur">
-      <div className="flex h-[4.25rem] items-center justify-between gap-4 px-4 sm:px-6">
+      <div className="flex h-14 items-center justify-between gap-4 px-4 sm:px-5">
         <div className="flex min-w-0 items-center gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
             <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden="true">
               <circle cx="6.5" cy="17.5" r="2.5" fill="currentColor" />
               <path
@@ -568,7 +544,7 @@ function TopBar({
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h1 className="truncate text-lg font-semibold tracking-tight">
+              <h1 className="truncate text-base font-semibold tracking-tight">
                 Pagecast
               </h1>
               <Badge variant={connected ? "secondary" : "outline"} className="hidden gap-1 sm:inline-flex">
@@ -576,7 +552,7 @@ function TopBar({
                 {connected ? "Connected" : "Not connected"}
               </Badge>
             </div>
-            <p className="truncate text-xs text-muted-foreground">
+            <p className="truncate text-[11px] text-muted-foreground">
               {connected
                 ? `${accountName} / ${projectName}`
                 : "Share pages without setting up hosting"}
@@ -640,20 +616,6 @@ function AppRail({
           <TooltipTrigger asChild>
             <Button
               size="icon"
-              variant="ghost"
-              className="h-9 w-9 text-muted-foreground"
-              onClick={onPages}
-              aria-label="Home"
-            >
-              <Home className="h-4 w-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="right">Home</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              size="icon"
               variant={activeView === "pages" ? "secondary" : "ghost"}
               className="h-9 w-9"
               onClick={onPages}
@@ -663,34 +625,6 @@ function AppRail({
             </Button>
           </TooltipTrigger>
           <TooltipContent side="right">Pages</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-9 w-9 text-muted-foreground"
-              disabled
-              aria-label="Links"
-            >
-              <Link2 className="h-4 w-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="right">Links</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-9 w-9 text-muted-foreground"
-              disabled
-              aria-label="Activity"
-            >
-              <Activity className="h-4 w-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="right">Activity</TooltipContent>
         </Tooltip>
       </div>
       <Tooltip>
@@ -707,6 +641,38 @@ function AppRail({
         </TooltipTrigger>
         <TooltipContent side="right">Settings</TooltipContent>
       </Tooltip>
+    </aside>
+  );
+}
+
+function SettingsSidebar() {
+  return (
+    <aside className="hidden min-h-0 border-r bg-background lg:block">
+      <div className="border-b p-4">
+        <div className="flex items-center gap-2">
+          <Settings className="h-4 w-4 text-muted-foreground" />
+          <h2 className="text-sm font-semibold">Settings</h2>
+        </div>
+      </div>
+      <nav className="space-y-1 p-2" aria-label="Settings sections">
+        {[
+          ["Publishing", Cloud],
+          ["Deploy history", RefreshCw],
+          ["Link defaults", Link2],
+          ["Feedback", Activity]
+        ].map(([label, Icon]) => (
+          <div
+            key={label as string}
+            className={cn(
+              "flex items-center gap-2 rounded-md px-3 py-2 text-sm",
+              label === "Publishing" ? "bg-accent font-medium" : "text-muted-foreground"
+            )}
+          >
+            <Icon className="h-4 w-4" />
+            <span>{label as string}</span>
+          </div>
+        ))}
+      </nav>
     </aside>
   );
 }
@@ -732,16 +698,12 @@ function PageSidebar({
 }) {
   const [items, setItems] = useState<Report[]>(reports);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<"all" | "published" | "draft" | "mini">("all");
+  const [filter, setFilter] = useState<"all" | "published" | "draft" | "mini" | "recovered">("all");
 
   useEffect(() => {
     setItems(reports);
   }, [reports]);
 
-  const activeLinkCount = reports.reduce(
-    (total, report) => total + report.publications.filter((publication) => publication.active).length,
-    0
-  );
   const displayedItems = items.filter((report) => {
     const activeCount = report.publications.filter((publication) => publication.active).length;
     const matchesQuery = report.name.toLowerCase().includes(query.trim().toLowerCase());
@@ -749,7 +711,8 @@ function PageSidebar({
       filter === "all" ||
       (filter === "published" && activeCount > 0) ||
       (filter === "draft" && activeCount === 0) ||
-      (filter === "mini" && report.kind === "folder");
+      (filter === "mini" && report.kind === "folder") ||
+      (filter === "recovered" && report.importedFromCloudflare);
     return matchesQuery && matchesFilter;
   }).sort(compareSidebarReports);
 
@@ -762,14 +725,9 @@ function PageSidebar({
               <PanelLeft className="h-4 w-4 text-muted-foreground" />
               <h2 className="text-sm font-semibold">Pages</h2>
             </div>
-            <div className="flex items-center gap-1.5">
-              <Badge variant="muted">{reports.length}</Badge>
-              {activeLinkCount > 0 ? (
-                <Badge variant="secondary">{activeLinkCount} links</Badge>
-              ) : null}
-            </div>
+            <Badge variant="muted">{reports.length}</Badge>
           </div>
-          <div className="grid grid-cols-[minmax(0,1fr)_36px] gap-2">
+          <div>
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -780,21 +738,14 @@ function PageSidebar({
                 aria-label="Search pages"
               />
             </div>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button size="icon" variant="outline" className="h-9 w-9" aria-label="Filter pages">
-                  <Filter className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Filter pages</TooltipContent>
-            </Tooltip>
           </div>
           <div className="mt-3 flex flex-wrap gap-1.5">
             {[
               ["all", "All"],
-              ["published", "Published"],
+              ["published", "Live"],
               ["draft", "Draft"],
-              ["mini", "Mini apps"]
+              ["mini", "Apps"],
+              ["recovered", "Recovered"]
             ].map(([value, label]) => (
               <Button
                 key={value}
@@ -808,7 +759,7 @@ function PageSidebar({
             ))}
           </div>
           <details className="mt-3">
-            <summary className="flex cursor-pointer list-none items-center justify-center gap-2 rounded-md border px-3 py-2 text-xs font-medium hover:bg-accent">
+            <summary className="flex cursor-pointer list-none items-center justify-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-900 hover:bg-emerald-100">
               <Plus className="h-3.5 w-3.5" />
               Add page
             </summary>
@@ -885,16 +836,16 @@ function PageRow({
 }) {
   const activeLinkCount = report.publications.filter((publication) => publication.active).length;
   const hasActiveLinks = activeLinkCount > 0;
-  const latestPublication = newestActivePublication(report);
-  const publishedDate = sidebarDateLabel(latestPublication?.updatedAt);
-  const publishedRelative = sidebarRelativeTime(latestPublication?.updatedAt);
-  const secondaryText = hasActiveLinks
-    ? [
-        "Published",
-        publishedDate,
-        publishedRelative && publishedRelative !== publishedDate ? publishedRelative : ""
-      ].filter(Boolean).join(" · ")
-    : "Draft";
+  const stateLabel = hasActiveLinks ? "Live" : "Draft";
+  const detailLabels = [
+    report.importedFromCloudflare ? "Recovered" : "",
+    report.kind === "folder" ? "Mini app" : "",
+    report.kind === "upload" ? "Upload" : "",
+    report.passwordProtected ? "Protected" : ""
+  ].filter(Boolean);
+  const secondaryText = detailLabels.length > 0
+    ? `${stateLabel} · ${detailLabels.join(" · ")}`
+    : stateLabel;
 
   return (
     <div
@@ -912,30 +863,21 @@ function PageRow({
       <button
         type="button"
         onClick={() => onSelect(report)}
-        className="flex min-w-0 flex-1 items-start gap-2.5 rounded-md py-2 pl-6 pr-1 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md py-2 pl-6 pr-1 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
-        <FileText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+        <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">{report.name}</span>
           <span className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
             <span className="truncate">{secondaryText}</span>
-            {report.importedFromCloudflare ? (
-              <span className="inline-flex items-center gap-1">
-                <CloudDownload className="h-3 w-3" />
-                synced
-              </span>
-            ) : null}
-            {report.kind === "upload" ? (
-              <span className="inline-flex items-center gap-1">
-                <Upload className="h-3 w-3" />
-                upload
-              </span>
-            ) : null}
           </span>
         </span>
-        <span className={cn("ml-2 shrink-0 text-[11px]", hasActiveLinks ? "text-emerald-700" : "text-muted-foreground")}>
-          {activeLinkCount} {activeLinkCount === 1 ? "link" : "links"}
-        </span>
+        {hasActiveLinks ? (
+          <span className="ml-2 inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+            <Link2 className="h-3 w-3" />
+            {activeLinkCount}
+          </span>
+        ) : null}
       </button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -1371,9 +1313,16 @@ function PreviewPane({
   const [frameScale, setFrameScale] = useState(1);
   const src = report.localUrl || "";
   const displayUrl = publication?.publicUrl || report.localUrl || "";
+  const activePublicationCount = report.publications.filter((item) => item.active).length;
   const viewport = device === "desktop"
-    ? { width: 1280, height: 900, label: "1280px desktop" }
-    : { width: 390, height: 780, label: "390px mobile" };
+    ? { width: 1280, height: 900, label: "Desktop" }
+    : { width: 390, height: 780, label: "Mobile" };
+
+  const copySelectedLink = async () => {
+    const url = publication?.publicUrl || report.localUrl || "";
+    const ok = url ? await copyToClipboard(url) : false;
+    toast[ok ? "success" : "error"](ok ? "Link copied." : "No link to copy.");
+  };
 
   useEffect(() => {
     const shell = frameShellRef.current;
@@ -1392,85 +1341,42 @@ function PreviewPane({
   }, [viewport.width]);
 
   return (
-    <section className="relative overflow-hidden rounded-lg border bg-background shadow-sm">
-      <div className="pointer-events-none absolute left-4 right-4 top-4 z-20 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div className="pointer-events-auto min-w-0 rounded-lg border bg-background/90 px-3 py-2 shadow-sm backdrop-blur sm:max-w-[min(680px,62%)]">
+    <section className="overflow-hidden rounded-lg border bg-background shadow-sm">
+      <div className="flex flex-col gap-3 border-b px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
+        <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
             <span>Pages</span>
             <span>/</span>
             <span className="truncate font-medium text-foreground">{report.name}</span>
           </div>
-          <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
             <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
             <h2 className="min-w-0 truncate text-xl font-semibold tracking-tight">
               {report.name}
             </h2>
             <Badge variant={hasActiveLinks ? "secondary" : "outline"}>
-              {hasActiveLinks ? "Published" : "Draft"}
+              {hasActiveLinks ? "Live" : "Draft"}
             </Badge>
+            {hasActiveLinks ? (
+              <span className="text-xs text-muted-foreground">
+                {activePublicationCount} active {activePublicationCount === 1 ? "link" : "links"}
+              </span>
+            ) : null}
             {report.importedFromCloudflare ? (
               <Badge variant="muted" className="gap-1">
                 <CloudDownload className="h-3 w-3" />
-                synced
+                Recovered
               </Badge>
             ) : null}
           </div>
-          <p className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-muted-foreground">
-            <span>Last synced {relativeTime(publication?.updatedAt || report.updatedAt)}</span>
-            <span aria-hidden="true">·</span>
-            <span>{publication?.expiresAt ? "Expires" : "Never expires"}</span>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {hasActiveLinks
+              ? `Updated ${relativeTime(publication?.updatedAt || report.updatedAt)}`
+              : "Not published yet"}
           </p>
         </div>
 
-        <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-2 rounded-lg border bg-background/90 p-1.5 shadow-sm backdrop-blur">
-          {publication?.publicUrl ? (
-            <Button asChild size="sm" className="bg-emerald-600 text-white hover:bg-emerald-700">
-              <a href={publication.publicUrl} target="_blank" rel="noreferrer">
-                <ExternalLink className="h-4 w-4" />
-                Open
-              </a>
-            </Button>
-          ) : null}
-          <Button variant="outline" size="sm" onClick={() => onEdit(report)}>
-            <Pencil className="h-4 w-4" />
-            Edit
-          </Button>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                size="icon"
-                variant={device === "desktop" ? "secondary" : "ghost"}
-                className="h-9 w-9"
-                onClick={() => setDevice("desktop")}
-                aria-label="Desktop preview"
-              >
-                <Monitor className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Desktop preview</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                size="icon"
-                variant={device === "mobile" ? "secondary" : "ghost"}
-                className="h-9 w-9"
-                onClick={() => setDevice("mobile")}
-                aria-label="Mobile preview"
-              >
-                <Smartphone className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Mobile preview</TooltipContent>
-          </Tooltip>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => onPreview(report)}
-          >
-            <Monitor className="h-4 w-4" />
-            Preview
-          </Button>
+        <div className="flex max-w-full flex-wrap items-center gap-2">
           {publishBlocked ? (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -1495,6 +1401,24 @@ function PreviewPane({
               {publishAsDrop ? "Publish short link" : "Publish URL"}
             </Button>
           )}
+          {publication?.publicUrl ? (
+            <>
+              <Button asChild size="sm" variant="outline">
+                <a href={publication.publicUrl} target="_blank" rel="noreferrer">
+                  <ExternalLink className="h-4 w-4" />
+                  Open
+                </a>
+              </Button>
+              <Button variant="outline" size="sm" onClick={copySelectedLink}>
+                <Copy className="h-4 w-4" />
+                Copy
+              </Button>
+            </>
+          ) : null}
+          <Button variant="outline" size="sm" onClick={() => onEdit(report)}>
+            <Pencil className="h-4 w-4" />
+            Edit
+          </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button size="icon" variant="outline" className="h-9 w-9" aria-label="More actions">
@@ -1502,6 +1426,11 @@ function PreviewPane({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => onPreview(report)}>
+                <Monitor className="h-4 w-4" />
+                Open full preview
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
               {hasActiveLinks ? (
                 <>
                   <DropdownMenuItem onSelect={() => onRequestRevokeAll(report)}>
@@ -1523,7 +1452,7 @@ function PreviewPane({
         </div>
       </div>
 
-      <div ref={frameShellRef} className="min-h-[660px] overflow-auto bg-muted/30 px-5 pb-5 pt-40 lg:pt-28">
+      <div ref={frameShellRef} className="min-h-[620px] overflow-auto bg-muted/30 p-4">
         <div
           className={cn(
             "mx-auto overflow-hidden rounded-lg border bg-background shadow-sm",
@@ -1538,10 +1467,39 @@ function PreviewPane({
             <div className="min-w-0 flex-1 truncate rounded-md border bg-background px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
               {displayUrl || "Preview URL"}
             </div>
-            <Badge variant="outline" className="shrink-0 font-mono text-[11px]">
+            <div className="flex shrink-0 items-center gap-1 rounded-md border bg-background p-0.5">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant={device === "desktop" ? "secondary" : "ghost"}
+                    className="h-7 w-7"
+                    onClick={() => setDevice("desktop")}
+                    aria-label="Desktop preview"
+                  >
+                    <Monitor className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Desktop preview</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant={device === "mobile" ? "secondary" : "ghost"}
+                    className="h-7 w-7"
+                    onClick={() => setDevice("mobile")}
+                    aria-label="Mobile preview"
+                  >
+                    <Smartphone className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Mobile preview</TooltipContent>
+              </Tooltip>
+            </div>
+            <Badge variant="outline" className="shrink-0 text-[11px]">
               {viewport.label}
             </Badge>
-            <RefreshCw className="h-3.5 w-3.5 text-muted-foreground" />
             <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
           </div>
           {src ? (
@@ -1671,6 +1629,8 @@ function PublishProgress({
 
 function ActivityDock({ activities }: { activities: ActivityItem[] }) {
   const visible = activities.slice(0, 3);
+  if (visible.length === 0) return null;
+
   return (
     <footer className="hidden h-14 shrink-0 items-center gap-4 border-t bg-background px-6 lg:flex">
       <div className="flex items-center gap-3">
@@ -1682,23 +1642,19 @@ function ActivityDock({ activities }: { activities: ActivityItem[] }) {
         <Badge variant="muted">{activities.length}</Badge>
       </div>
       <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
-        {visible.length === 0 ? (
-          <span className="truncate text-sm text-muted-foreground">No activity yet.</span>
-        ) : (
-          visible.map((item) => {
-            const Icon = activityIcon(item.status);
-            return (
-              <div
-                key={item.id}
-                className="flex min-w-[240px] items-center gap-2 rounded-full bg-muted/40 px-3 py-1.5 text-xs"
-              >
-                <Icon className={cn("h-3.5 w-3.5 shrink-0", activityColor(item.status))} />
-                <span className="truncate">{item.title}</span>
-                <span className="ml-auto shrink-0 text-muted-foreground">{relativeTime(item.createdAt)}</span>
-              </div>
-            );
-          })
-        )}
+        {visible.map((item) => {
+          const Icon = activityIcon(item.status);
+          return (
+            <div
+              key={item.id}
+              className="flex min-w-[240px] items-center gap-2 rounded-full bg-muted/40 px-3 py-1.5 text-xs"
+            >
+              <Icon className={cn("h-3.5 w-3.5 shrink-0", activityColor(item.status))} />
+              <span className="truncate">{item.title}</span>
+              <span className="ml-auto shrink-0 text-muted-foreground">{relativeTime(item.createdAt)}</span>
+            </div>
+          );
+        })}
       </div>
       <span className="shrink-0 text-sm text-muted-foreground">Recent</span>
     </footer>
