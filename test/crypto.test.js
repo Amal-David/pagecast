@@ -6,6 +6,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 import {
+  PAGECAST_SYNC_MANIFEST_PATH,
   PBKDF2_ITERATIONS,
   isValidPasswordHash,
   makePasswordHash,
@@ -82,6 +83,11 @@ test("renderRoutesJson scopes Functions to protected prefixes only", () => {
   assert.deepEqual(JSON.parse(renderRoutesJson(["a", "b", "a"])), {
     version: 1,
     include: ["/p/a/*", "/p/b/*"],
+    exclude: []
+  });
+  assert.deepEqual(JSON.parse(renderRoutesJson([], { includeSyncEndpoint: true })), {
+    version: 1,
+    include: [PAGECAST_SYNC_MANIFEST_PATH],
     exclude: []
   });
   const many = Array.from({ length: 150 }, (_, i) => `s${i}`);
@@ -207,4 +213,35 @@ test("middleware honors a valid signed cookie and ignores a forged one", async (
     next: async () => new Response("css", { status: 200 })
   });
   assert.equal(forged.status, 401);
+});
+
+test("middleware serves the private sync manifest only with the sync token", async () => {
+  const { onRequest } = await loadMiddleware([], {
+    syncToken: "sync-secret",
+    syncManifest: {
+      version: 1,
+      baseUrl: "https://team-reports.pages.dev",
+      publications: [{ slug: "remote-only", files: ["index.html"] }]
+    }
+  });
+
+  let nexted = false;
+  const missing = await onRequest({
+    request: new Request(`https://x.pages.dev${PAGECAST_SYNC_MANIFEST_PATH}`),
+    next: async () => {
+      nexted = true;
+      return new Response("NEXT", { status: 200 });
+    }
+  });
+  assert.equal(missing.status, 404);
+  assert.equal(nexted, false);
+
+  const ok = await onRequest({
+    request: new Request(`https://x.pages.dev${PAGECAST_SYNC_MANIFEST_PATH}?token=sync-secret`),
+    next: async () => new Response("NEXT", { status: 200 })
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers.get("Cache-Control"), "no-store");
+  const manifest = await ok.json();
+  assert.equal(manifest.publications[0].slug, "remote-only");
 });

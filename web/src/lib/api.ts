@@ -1,4 +1,5 @@
 import type {
+  CloudflareSyncResponse,
   ConfigResponse,
   ContentResponse,
   DeleteDeploymentResponse,
@@ -180,6 +181,11 @@ export const api = {
       json: { default: value }
     }),
 
+  setCloudflareSyncEnabled: (enabled: boolean) =>
+    request<ConfigResponse>("/api/config/cloudflare-sync", {
+      json: { enabled }
+    }),
+
   cloudflareConnect: () =>
     request<unknown>("/api/cloudflare/connect", { json: {} }),
 
@@ -188,6 +194,9 @@ export const api = {
 
   cloudflareLogout: () =>
     request<unknown>("/api/cloudflare/logout", { json: {} }),
+
+  syncCloudflarePages: () =>
+    request<CloudflareSyncResponse>("/api/cloudflare/sync", { json: {} }),
 
   feedbackSetup: (accountId?: string) =>
     request<FeedbackSetupResponse>("/api/feedback/setup", {

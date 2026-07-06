@@ -35,6 +35,7 @@ export interface Report {
   order: number;
   autoSync: boolean;
   passwordProtected: boolean;
+  importedFromCloudflare: boolean;
   sourceMode: SourceMode;
   buildCommand: string;
   buildOutputDir: string;
@@ -130,6 +131,9 @@ export interface AppConfig {
   // Default link lifetime for new publishes ("30d" out of the box, "never" =
   // permanent). A per-publish expiry overrides it.
   defaultExpiry: string;
+  // When true, the dashboard periodically imports missing Pagecast links from
+  // Cloudflare Pages. Manual sync is still available when this is off.
+  cloudflareSyncEnabled: boolean;
 }
 
 export interface ConfigResponse {
@@ -164,6 +168,17 @@ export interface StatusResponse {
 }
 
 export interface ReportsResponse {
+  reports: Report[];
+}
+
+export interface CloudflareSyncResponse {
+  imported: Report[];
+  importedCount: number;
+  skipped: { slug: string; reason: string }[];
+  skippedCount: number;
+  failed: { slug: string; error: string }[];
+  warnings: string[];
+  remoteManifestFound: boolean;
   reports: Report[];
 }
 

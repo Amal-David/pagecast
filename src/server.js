@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { markdownToHtml } from "./markdown.js";
 import { generateName, generateUniqueName, generateUnguessableName } from "./nameGenerator.js";
 import {
+  PAGECAST_SYNC_MANIFEST_PATH,
   isValidPasswordHash,
   makePasswordHash,
   renderAuthMiddleware,
@@ -32,6 +33,10 @@ export const DEFAULT_PAGES_BRANCH = "main";
 export const DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 export const DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS = 60 * 1000;
 export const CLOUDFLARE_OAUTH_SCOPES = ["account:read", "user:read", "pages:write"];
+const MAX_SYNC_IMPORT_FILES = MAX_FOLDER_UPLOAD_FILES;
+const MAX_SYNC_IMPORT_BYTES = MAX_FOLDER_UPLOAD_BYTES;
+const MAX_SYNC_IMPORT_FILE_BYTES = MAX_FOLDER_UPLOAD_FILE_BYTES;
+const SYNC_MANIFEST_FETCH_TIMEOUT_MS = 5000;
 
 // Feedback provisioning deploys a Worker + KV, which the base publishing scopes
 // don't permit. These elevate the grant only when the user opts into feedback,
@@ -419,6 +424,10 @@ function normalizeConfig(config = {}) {
     // Default link lifetime for new publishes ("30d" out of the box, "never" =
     // permanent). Configurable; a per-publish --expires overrides it.
     defaultExpiry: normalizeDefaultExpiry(config.defaultExpiry),
+    // Keep the local dashboard reconciled with Pagecast's Cloudflare Pages
+    // manifest by default. The UI can turn this off for workspaces where the
+    // operator wants manual-only imports.
+    cloudflareSyncEnabled: config.cloudflareSyncEnabled !== false,
     // HMAC secret for signing edge password-gate session cookies. Generated once
     // (see createConfigStore.init) and kept stable so cookies survive redeploys;
     // preserved here so partial config rebuilds don't drop it.
@@ -911,6 +920,87 @@ async function copyPublicTree(sourceRoot, destinationRoot) {
   await copyDirectory(sourceRoot);
 }
 
+async function listPublicTreeFiles(rootDir) {
+  const files = [];
+
+  async function walk(currentSource, currentRelative = "") {
+    const entries = await fs.readdir(currentSource, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) {
+        continue;
+      }
+      const sourcePath = path.join(currentSource, entry.name);
+      const relativePath = path.join(currentRelative, entry.name);
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+      if (entry.isDirectory()) {
+        await walk(sourcePath, relativePath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      files.push(relativePath.split(path.sep).join("/"));
+    }
+  }
+
+  try {
+    await walk(rootDir);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  return files.sort((a, b) => a.localeCompare(b));
+}
+
+function firstUsableIso(...values) {
+  for (const value of values) {
+    const text = String(value || "");
+    if (text && !Number.isNaN(Date.parse(text))) {
+      return new Date(text).toISOString();
+    }
+  }
+  return nowIso();
+}
+
+function normalizeSyncRecord(record, { baseUrl = "", source = "" } = {}) {
+  let slug;
+  try {
+    slug = normalizeCustomSlug(record?.slug);
+  } catch {
+    return null;
+  }
+  const files = Array.isArray(record?.files)
+    ? record.files
+        .map((file) => (typeof file === "string" ? file : file?.path))
+        .filter((file) => typeof file === "string" && file.trim())
+    : [];
+  return {
+    slug,
+    source,
+    files,
+    title: String(record?.title || record?.name || "").trim(),
+    label: String(record?.label || "imported").trim(),
+    token: String(record?.token || slug).trim(),
+    publicUrl: String(record?.publicUrl || record?.url || "").trim(),
+    baseUrl: String(record?.baseUrl || baseUrl || "").trim(),
+    createdAt: firstUsableIso(record?.createdAt, record?.created_on),
+    updatedAt: firstUsableIso(record?.updatedAt, record?.modified_on, record?.createdAt, record?.created_on)
+  };
+}
+
+async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs = SYNC_MANIFEST_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchImpl(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function runSpawnCommand({
   spawnImpl,
   command,
@@ -1277,6 +1367,7 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
       badge: config.badge,
       goal: config.goal,
       defaultExpiry: config.defaultExpiry,
+      cloudflareSyncEnabled: config.cloudflareSyncEnabled,
       authCookieSecret: config.authCookieSecret,
       telemetry: config.telemetry,
       telemetryId: config.telemetryId,
@@ -1294,6 +1385,12 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
 
   async function setDefaultExpiry(value) {
     config = normalizeConfig({ ...config, defaultExpiry: value });
+    await save();
+    return get();
+  }
+
+  async function setCloudflareSyncEnabled(enabled) {
+    config = normalizeConfig({ ...config, cloudflareSyncEnabled: enabled !== false });
     await save();
     return get();
   }
@@ -1334,6 +1431,7 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
       badge: config.badge,
       goal: config.goal,
       defaultExpiry: config.defaultExpiry,
+      cloudflareSyncEnabled: config.cloudflareSyncEnabled,
       authCookieSecret: config.authCookieSecret,
       telemetry: config.telemetry,
       telemetryId: config.telemetryId,
@@ -1349,6 +1447,7 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
     setBadge,
     setGoal,
     setDefaultExpiry,
+    setCloudflareSyncEnabled,
     setTelemetry,
     ensureTelemetryId,
     markTelemetryNotified,
@@ -1531,12 +1630,14 @@ export function injectSocialMeta(html, { title, description, url, image, siteNam
 export function createCloudflarePagesPublisher({
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   spawnImpl = spawn,
+  fetchImpl = fetch,
   timeoutMs = 180000,
   getRedirects = () => [],
   getFeedback = () => null,
   getBadge = () => true,
   getProtectedPublications = () => [],
-  getAuthCookieSecret = () => null
+  getAuthCookieSecret = () => null,
+  getSyncToken = () => ""
 } = {}) {
   const siteRoot = path.join(dataDir, "pages-site");
   const deployRoot = path.join(dataDir, "pages-deploy");
@@ -1552,7 +1653,61 @@ export function createCloudflarePagesPublisher({
     return report.workingDir || report.buildOutputRoot || report.rootDir;
   }
 
-  async function ensureSiteRoot() {
+  async function buildSyncManifest(pagesConfig = {}) {
+    const baseUrl = pagesConfig?.baseUrl || pagesBaseUrl(pagesConfig?.projectName || DEFAULT_PAGES_PROJECT_NAME);
+    const pRoot = path.join(siteRoot, "p");
+    const publications = [];
+    let entries = [];
+    try {
+      entries = await fs.readdir(pRoot, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      let slug;
+      try {
+        slug = normalizeCustomSlug(entry.name);
+      } catch {
+        continue;
+      }
+      const root = publicationDir(slug);
+      const files = await listPublicTreeFiles(root);
+      if (!files.includes("index.html") && !files.includes("index.htm")) {
+        continue;
+      }
+      let title = slug;
+      try {
+        const indexName = files.includes("index.html") ? "index.html" : "index.htm";
+        const html = await fs.readFile(path.join(root, indexName), "utf8");
+        title = extractTitle(html, slug) || slug;
+      } catch {
+        title = slug;
+      }
+      publications.push({
+        slug,
+        title,
+        files,
+        publicUrl: baseUrl ? joinUrl(baseUrl, `/p/${encodeURIComponent(slug)}/`) : "",
+        updatedAt: nowIso()
+      });
+    }
+
+    publications.sort((a, b) => a.slug.localeCompare(b.slug));
+    return {
+      version: 1,
+      generatedAt: nowIso(),
+      baseUrl,
+      publications
+    };
+  }
+
+  async function ensureSiteRoot(pagesConfig = {}) {
     await fs.mkdir(siteRoot, { recursive: true });
     await fs.rm(path.join(siteRoot, "index.html"), { force: true });
     await fs.writeFile(path.join(siteRoot, "404.html"), "<!doctype html><title>Not found</title>", "utf8");
@@ -1573,14 +1728,14 @@ export function createCloudflarePagesPublisher({
       await fs.rm(redirectsPath, { force: true });
     }
 
-    await writeAuthAssets();
+    await writeAuthAssets(pagesConfig);
   }
 
   // (Re)generate the edge gate on every deploy. When any publication needs one —
   // password-protected and/or expiring — write functions/_middleware.js (the
   // gate + baked manifest) and a _routes.json scoping the Function to those
   // prefixes only. When none need it, remove both so the site stays pure-static.
-  async function writeAuthAssets() {
+  async function writeAuthAssets(pagesConfig = {}) {
     const manifest = (getProtectedPublications() || []).filter(
       (entry) =>
         entry &&
@@ -1590,8 +1745,11 @@ export function createCloudflarePagesPublisher({
     const functionsDir = path.join(siteRoot, "functions");
     const middlewarePath = path.join(functionsDir, "_middleware.js");
     const routesPath = path.join(siteRoot, "_routes.json");
+    const syncToken = String(getSyncToken() || "");
+    const syncManifest = syncToken ? await buildSyncManifest(pagesConfig) : null;
+    const includeSyncEndpoint = Boolean(syncToken && syncManifest?.publications?.length);
 
-    if (manifest.length === 0) {
+    if (manifest.length === 0 && !includeSyncEndpoint) {
       await fs.rm(functionsDir, { recursive: true, force: true });
       await fs.rm(routesPath, { force: true });
       return;
@@ -1600,10 +1758,19 @@ export function createCloudflarePagesPublisher({
     await fs.mkdir(functionsDir, { recursive: true });
     await fs.writeFile(
       middlewarePath,
-      renderAuthMiddleware(manifest, { cookieSecret: getAuthCookieSecret() || "", badge: getBadge() }),
+      renderAuthMiddleware(manifest, {
+        cookieSecret: getAuthCookieSecret() || "",
+        badge: getBadge(),
+        syncToken,
+        syncManifest
+      }),
       "utf8"
     );
-    await fs.writeFile(routesPath, renderRoutesJson(manifest.map((entry) => entry.slug)), "utf8");
+    await fs.writeFile(
+      routesPath,
+      renderRoutesJson(manifest.map((entry) => entry.slug), { includeSyncEndpoint }),
+      "utf8"
+    );
   }
 
   async function stagePublication(report, publication, { pagesBaseUrl = "" } = {}) {
@@ -1702,7 +1869,7 @@ export function createCloudflarePagesPublisher({
   }
 
   async function deploy(pagesConfig) {
-    await ensureSiteRoot();
+    await ensureSiteRoot(pagesConfig);
     const result = await runPagesDeploy(siteRoot, pagesConfig, DEFAULT_PAGES_BRANCH);
     return result.baseUrl;
   }
@@ -1727,7 +1894,7 @@ export function createCloudflarePagesPublisher({
 
   async function publish({ report, publication, pagesConfig }) {
     const slug = publication.slug || publication.token;
-    await ensureSiteRoot();
+    await ensureSiteRoot(pagesConfig);
     await stagePublication(report, publication, { pagesBaseUrl: pagesConfig?.baseUrl });
     try {
       const baseUrl = await deploy(pagesConfig);
@@ -1743,7 +1910,7 @@ export function createCloudflarePagesPublisher({
   // the last known-good content stays live.
   async function syncPublication({ report, publication, pagesConfig }) {
     const slug = publication.slug || publication.token;
-    await ensureSiteRoot();
+    await ensureSiteRoot(pagesConfig);
     await stagePublication(report, publication, { pagesBaseUrl: pagesConfig?.baseUrl });
     const baseUrl = await deploy(pagesConfig);
     return joinUrl(baseUrl, `/p/${encodeURIComponent(slug)}/`);
@@ -1752,7 +1919,7 @@ export function createCloudflarePagesPublisher({
   // Move a publication's staged content from oldSlug to newSlug and redeploy,
   // returning the new public URL.
   async function renamePublication({ oldSlug, newSlug, report, publication, pagesConfig }) {
-    await ensureSiteRoot();
+    await ensureSiteRoot(pagesConfig);
     await stagePublication(report, { ...publication, slug: newSlug }, { pagesBaseUrl: pagesConfig?.baseUrl });
     if (oldSlug && oldSlug !== newSlug) {
       await removePublication(oldSlug);
@@ -1762,23 +1929,92 @@ export function createCloudflarePagesPublisher({
   }
 
   async function revoke(slugs, pagesConfig) {
-    await ensureSiteRoot();
+    await ensureSiteRoot(pagesConfig);
     for (const slug of slugs) {
       await removePublication(slug);
     }
     return deploy(pagesConfig);
   }
 
+  async function discoverPublishedPages({ pagesConfig = {}, syncToken = "" } = {}) {
+    const baseUrl = pagesConfig?.baseUrl || pagesBaseUrl(pagesConfig?.projectName || DEFAULT_PAGES_PROJECT_NAME);
+    const records = new Map();
+    const warnings = [];
+    let remoteManifestFound = false;
+
+    if (baseUrl && syncToken) {
+      const manifestUrl = joinUrl(
+        baseUrl,
+        `${PAGECAST_SYNC_MANIFEST_PATH}?token=${encodeURIComponent(syncToken)}`
+      );
+      try {
+        const response = await fetchWithTimeout(
+          fetchImpl,
+          manifestUrl,
+          { headers: { Accept: "application/json" } }
+        );
+        if (response.ok) {
+          const contentType = response.headers.get("content-type") || "";
+          if (!contentType.includes("application/json")) {
+            remoteManifestFound = false;
+          } else {
+            const manifest = await response.json();
+            const remoteBaseUrl = String(manifest?.baseUrl || baseUrl);
+            for (const item of manifest?.publications || []) {
+              const record = normalizeSyncRecord(item, {
+                baseUrl: remoteBaseUrl,
+                source: "cloudflare"
+              });
+              if (record) {
+                records.set(record.slug, record);
+              }
+            }
+            remoteManifestFound = true;
+          }
+        } else if (response.status !== 404) {
+          warnings.push(`Cloudflare sync manifest returned ${response.status}.`);
+        }
+      } catch (error) {
+        warnings.push(`Cloudflare sync manifest could not be read: ${error.message || error}.`);
+      }
+    }
+
+    const localManifest = await buildSyncManifest(pagesConfig);
+    for (const item of localManifest.publications) {
+      const record = normalizeSyncRecord(item, {
+        baseUrl: localManifest.baseUrl,
+        source: "local-staged"
+      });
+      if (record) {
+        records.set(record.slug, {
+          ...records.get(record.slug),
+          ...record,
+          sourceRoot: publicationDir(record.slug),
+          source: records.has(record.slug) ? "cloudflare+local-staged" : "local-staged"
+        });
+      }
+    }
+
+    return {
+      publications: [...records.values()].sort((a, b) => a.slug.localeCompare(b.slug)),
+      warnings,
+      remoteManifestFound
+    };
+  }
+
   return {
     siteRoot,
     deployRoot,
+    fetchImpl,
     publish,
     syncPublication,
     renamePublication,
     revoke,
     deploySite,
     publicationDir,
-    publishSourceFor
+    publishSourceFor,
+    discoverPublishedPages,
+    buildSyncManifest
   };
 }
 
@@ -2228,6 +2464,7 @@ export function createReportStore({
 } = {}) {
   const statePath = path.join(dataDir, "reports.json");
   const uploadRoot = path.join(dataDir, "uploads");
+  const importRoot = path.join(dataDir, "imports");
   const workingRoot = path.join(dataDir, "working");
   const reports = new Map();
   let redirects = [];
@@ -2278,6 +2515,7 @@ export function createReportStore({
       // unprotected rather than deploying a broken gate.
       passwordProtected: report.passwordProtected === true && isValidPasswordHash(report.passwordHash),
       passwordHash: isValidPasswordHash(report.passwordHash) ? report.passwordHash : null,
+      importedFromCloudflare: report.importedFromCloudflare === true,
       publications: Array.isArray(report.publications)
         ? report.publications.map(normalizePublication)
         : []
@@ -2300,6 +2538,7 @@ export function createReportStore({
 
   async function init() {
     await fs.mkdir(uploadRoot, { recursive: true });
+    await fs.mkdir(importRoot, { recursive: true });
     await fs.mkdir(workingRoot, { recursive: true });
     if (!(await pathExists(statePath))) {
       await save();
@@ -2431,6 +2670,7 @@ export function createReportStore({
       // Only the boolean is exposed; report.passwordHash (salt + hash) is a
       // server-side secret and is intentionally never serialized to the API.
       passwordProtected: report.passwordProtected === true,
+      importedFromCloudflare: report.importedFromCloudflare === true,
       createdAt: report.createdAt,
       updatedAt: report.updatedAt,
       localUrl: adminBaseUrl ? joinUrl(adminBaseUrl, previewSuffix) : null,
@@ -2710,7 +2950,10 @@ export function createReportStore({
     }
 
     reports.delete(id);
-    if (report.kind === "upload" || (report.kind === "folder" && isPathInside(uploadRoot, report.rootDir))) {
+    if (
+      report.kind === "upload" ||
+      (report.kind === "folder" && (isPathInside(uploadRoot, report.rootDir) || isPathInside(importRoot, report.rootDir)))
+    ) {
       await fs.rm(report.rootDir, { recursive: true, force: true });
     }
     if (report.workingDir && isPathInside(workingRoot, report.workingDir)) {
@@ -2798,6 +3041,157 @@ export function createReportStore({
 
   function get(id) {
     return reports.get(id) || null;
+  }
+
+  async function copyRemotePublicationFiles({ slug, files, destinationRoot, baseUrl, fetchImpl = fetch } = {}) {
+    if (!baseUrl) {
+      throw appError("Cloudflare Pages base URL is required to import this link.", 400);
+    }
+    const fileList = Array.isArray(files) && files.length > 0 ? files : ["index.html"];
+    if (fileList.length > MAX_SYNC_IMPORT_FILES) {
+      throw appError(`Synced page includes more than ${MAX_SYNC_IMPORT_FILES} files.`, 413);
+    }
+
+    await fs.rm(destinationRoot, { recursive: true, force: true });
+    await fs.mkdir(destinationRoot, { recursive: true });
+    let totalBytes = 0;
+    for (const file of fileList) {
+      const relativePath = normalizeAssetRequestPath(file);
+      if (!relativePath) {
+        throw appError("Synced page includes an unsafe file path.", 400);
+      }
+      const urlPath = relativePath
+        .split(path.sep)
+        .map((segment) => encodeURIComponent(segment))
+        .join("/");
+      const assetUrl = joinUrl(baseUrl, `/p/${encodeURIComponent(slug)}/${urlPath}`);
+      const response = await fetchWithTimeout(fetchImpl, assetUrl);
+      if (!response.ok) {
+        throw appError(`Could not import ${relativePath} from Cloudflare (${response.status}).`, 502);
+      }
+      const content = Buffer.from(await response.arrayBuffer());
+      if (content.length > MAX_SYNC_IMPORT_FILE_BYTES) {
+        throw appError("Synced page includes a file that is too large.", 413);
+      }
+      totalBytes += content.length;
+      if (totalBytes > MAX_SYNC_IMPORT_BYTES) {
+        throw appError("Synced page is too large.", 413);
+      }
+      const destinationPath = path.resolve(destinationRoot, relativePath);
+      if (!isPathInside(destinationRoot, destinationPath)) {
+        throw appError("Synced page includes an unsafe file path.", 400);
+      }
+      await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+      await fs.writeFile(destinationPath, content);
+    }
+  }
+
+  async function importPublishedPage(record, { pagesBaseUrl = "", fetchImpl = fetch } = {}) {
+    const normalized = normalizeSyncRecord(record, {
+      baseUrl: pagesBaseUrl,
+      source: record?.source || "cloudflare"
+    });
+    if (!normalized) {
+      throw appError("Synced page record is invalid.", 400);
+    }
+    if (findActivePublicationBySlug(normalized.slug)) {
+      return { imported: false, slug: normalized.slug, reason: "already-present" };
+    }
+
+    const reportDir = path.join(importRoot, normalized.slug);
+    if (record?.sourceRoot) {
+      await copyPublicTree(record.sourceRoot, reportDir);
+    } else {
+      await copyRemotePublicationFiles({
+        slug: normalized.slug,
+        files: normalized.files,
+        destinationRoot: reportDir,
+        baseUrl: normalized.baseUrl || pagesBaseUrl,
+        fetchImpl
+      });
+    }
+
+    const entryFile = await findFolderEntry(reportDir);
+    const createdAt = normalized.createdAt;
+    const updatedAt = normalized.updatedAt || createdAt;
+    let title = normalized.title || normalized.slug;
+    try {
+      const html = await fs.readFile(path.join(reportDir, entryFile), "utf8");
+      title = extractTitle(html, title) || title;
+    } catch {
+      // Keep the manifest title if the entry is not readable as text.
+    }
+
+    const id = createReportId(`cloudflare-${normalized.slug}`);
+    let token = normalized.token || normalized.slug;
+    if (findPublication(token)) {
+      token = `import-${normalized.slug}-${randomBytes(4).toString("hex")}`;
+    }
+    const publicUrl =
+      normalized.publicUrl ||
+      joinUrl(normalized.baseUrl || pagesBaseUrl, `/p/${encodeURIComponent(normalized.slug)}/`);
+    const publication = {
+      token,
+      slug: normalized.slug,
+      label: normalized.label || "imported",
+      kind: "snapshot",
+      drop: false,
+      publicUrl,
+      createdAt,
+      updatedAt,
+      revokedAt: null,
+      expiresAt: null
+    };
+    const report = {
+      id,
+      kind: "folder",
+      name: title,
+      sourcePath: null,
+      rootDir: reportDir,
+      entryFile,
+      order: reports.size,
+      autoSync: false,
+      workingDir: null,
+      sourceMode: "edited-in-pagecast",
+      importedFromCloudflare: true,
+      buildCommand: "",
+      buildOutputDir: "",
+      buildOutputRoot: null,
+      buildStatus: "ready",
+      buildError: "",
+      lastBuildAt: null,
+      passwordProtected: false,
+      passwordHash: null,
+      createdAt,
+      updatedAt,
+      publications: [publication]
+    };
+
+    reports.set(report.id, report);
+    await save();
+    return { imported: true, slug: normalized.slug, reason: "imported", report };
+  }
+
+  async function importPublishedPages(records, options = {}) {
+    const imported = [];
+    const skipped = [];
+    const failed = [];
+    for (const record of records || []) {
+      try {
+        const result = await importPublishedPage(record, options);
+        if (result.imported) {
+          imported.push(formatReport(result.report, options));
+        } else {
+          skipped.push({ slug: result.slug, reason: result.reason });
+        }
+      } catch (error) {
+        failed.push({
+          slug: String(record?.slug || ""),
+          error: error.message || String(error)
+        });
+      }
+    }
+    return { imported, skipped, failed };
   }
 
   function findPublication(token) {
@@ -3286,6 +3680,8 @@ export function createReportStore({
     draftPublication,
     commitPublication,
     publish,
+    importPublishedPage,
+    importPublishedPages,
     findPublication,
     findActivePublication,
     findActivePublicationBySlug,
@@ -4262,6 +4658,13 @@ async function handleApi(
     return;
   }
 
+  if (url.pathname === "/api/config/cloudflare-sync" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    await configStore.setCloudflareSyncEnabled(body.enabled !== false);
+    sendJson(res, 200, { config: configStore.getPublicConfig() });
+    return;
+  }
+
   // Provision (or re-provision) the feedback Worker + KV on the user's account.
   // Creates real Cloudflare resources, so it only runs on this explicit action.
   if (url.pathname === "/api/feedback/setup" && req.method === "POST") {
@@ -4484,6 +4887,34 @@ async function handleApi(
       kept: keep,
       deleted: summary.deleted,
       failed: summary.failed
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/cloudflare/sync" && req.method === "POST") {
+    await readJsonBody(req);
+    const pages = configStore.get().pages;
+    if (!pages.projectName || !pages.baseUrl) {
+      throw appError("No Cloudflare Pages project is configured.", 400);
+    }
+    const discovery = await pagesPublisher.discoverPublishedPages({
+      pagesConfig: pages,
+      syncToken: configStore.get().authCookieSecret || ""
+    });
+    const result = await store.importPublishedPages(discovery.publications, {
+      ...options,
+      pagesBaseUrl: pages.baseUrl,
+      fetchImpl: pagesPublisher.fetchImpl
+    });
+    sendJson(res, 200, {
+      imported: result.imported,
+      importedCount: result.imported.length,
+      skipped: result.skipped,
+      skippedCount: result.skipped.length,
+      failed: result.failed,
+      warnings: discovery.warnings,
+      remoteManifestFound: discovery.remoteManifestFound,
+      reports: store.list(options)
     });
     return;
   }
@@ -5054,6 +5485,7 @@ export async function startServers({
   staticDir = path.join(PROJECT_ROOT, "public"),
   spawnImpl = spawn,
   tunnelTimeoutMs = 30000,
+  fetchImpl = fetch,
   cloudflareAuthSpawnImpl = spawn,
   cloudflareLoginTimeoutMs = DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS,
   cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
@@ -5072,12 +5504,14 @@ export async function startServers({
   const pagesPublisher = createCloudflarePagesPublisher({
     dataDir,
     spawnImpl: pagesDeploySpawnImpl,
+    fetchImpl,
     timeoutMs: pagesDeployTimeoutMs,
     getRedirects: () => store.listRedirects(),
     getFeedback: () => configStore.get().feedback,
     getBadge: () => configStore.get().badge,
     getProtectedPublications: () => store.protectedPublicationManifest(),
-    getAuthCookieSecret: () => configStore.get().authCookieSecret
+    getAuthCookieSecret: () => configStore.get().authCookieSecret,
+    getSyncToken: () => configStore.get().authCookieSecret
   });
   const deployQueue = createDeployQueue();
   const watchManager = createWatchManager({
@@ -5167,6 +5601,7 @@ export async function startServers({
 async function createHeadlessCloudflareContext({
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   store = null,
+  fetchImpl = fetch,
   cloudflareAuthSpawnImpl = spawn,
   pagesDeploySpawnImpl = spawn,
   cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
@@ -5181,6 +5616,7 @@ async function createHeadlessCloudflareContext({
   const pagesPublisher = createCloudflarePagesPublisher({
     dataDir,
     spawnImpl: pagesDeploySpawnImpl,
+    fetchImpl,
     timeoutMs: pagesDeployTimeoutMs,
     // Headless/CLI publishes (incl. the agent skill's `npx pagecast publish`)
     // must inject the feedback widget too, not just the running app.
@@ -5190,7 +5626,8 @@ async function createHeadlessCloudflareContext({
     // re-deploy regenerates (rather than wipes) the edge gate for protected
     // reports. Site-only deploys (deploySite) pass none and never touch it.
     getProtectedPublications: store ? () => store.protectedPublicationManifest() : () => [],
-    getAuthCookieSecret: () => configStore.get().authCookieSecret
+    getAuthCookieSecret: () => configStore.get().authCookieSecret,
+    getSyncToken: () => configStore.get().authCookieSecret
   });
   return { configStore, cloudflareAuth, pagesPublisher };
 }

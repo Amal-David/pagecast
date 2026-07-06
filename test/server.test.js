@@ -2059,6 +2059,137 @@ test("snapshot sync updates the same URL in place without a new publication", as
   }
 });
 
+test("Cloudflare sync imports missing staged Pages links into the dashboard", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    fetchImpl: async (url) => {
+      if (String(url).includes("/__pagecast/manifest.json")) {
+        return new Response("<!doctype html><h1>Pagecast</h1>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" }
+        });
+      }
+      return new Response("Not found.", { status: 404 });
+    }
+  });
+
+  try {
+    await configurePages(runtime.adminUrl);
+    const stagedRoot = path.join(dataDir, "pages-site", "p", "claude-page");
+    await fs.mkdir(stagedRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(stagedRoot, "index.html"),
+      "<!doctype html><title>Claude Page</title><h1>Published elsewhere</h1>",
+      "utf8"
+    );
+    await fs.writeFile(path.join(stagedRoot, "style.css"), "body { color: teal; }", "utf8");
+
+    const response = await fetch(`${runtime.adminUrl}/api/cloudflare/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.importedCount, 1);
+    assert.equal(data.skippedCount, 0);
+    assert.equal(data.remoteManifestFound, false);
+    assert.deepEqual(data.warnings, []);
+    const report = data.reports.find((item) =>
+      item.publications.some((publication) => publication.slug === "claude-page")
+    );
+    assert.ok(report, "synced staged link should appear in reports");
+    assert.equal(report.importedFromCloudflare, true);
+    assert.equal(report.name, "Claude Page");
+    assert.equal(report.publicUrl, "https://team-reports.pages.dev/p/claude-page/");
+    assert.match(await fs.readFile(path.join(dataDir, "imports", "claude-page", "index.html"), "utf8"), /Published elsewhere/);
+
+    const duplicate = await fetch(`${runtime.adminUrl}/api/cloudflare/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    assert.equal(duplicate.status, 200);
+    const duplicateData = await duplicate.json();
+    assert.equal(duplicateData.importedCount, 0);
+    assert.equal(duplicateData.skippedCount, 1);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("Cloudflare sync imports remote manifest links and downloads listed assets", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const fetched = [];
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    fetchImpl: async (url) => {
+      const href = String(url);
+      fetched.push(href);
+      if (href.includes("/__pagecast/manifest.json")) {
+        return new Response(
+          JSON.stringify({
+            version: 1,
+            baseUrl: "https://team-reports.pages.dev",
+            publications: [
+              {
+                slug: "remote-only",
+                title: "Remote Only",
+                files: ["index.html", "style.css"],
+                publicUrl: "https://team-reports.pages.dev/p/remote-only/"
+              }
+            ]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (href.endsWith("/p/remote-only/index.html")) {
+        return new Response("<!doctype html><title>Remote Only</title><h1>Remote</h1>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" }
+        });
+      }
+      if (href.endsWith("/p/remote-only/style.css")) {
+        return new Response("body { color: purple; }", {
+          status: 200,
+          headers: { "Content-Type": "text/css" }
+        });
+      }
+      return new Response("Not found.", { status: 404 });
+    }
+  });
+
+  try {
+    await configurePages(runtime.adminUrl);
+    const response = await fetch(`${runtime.adminUrl}/api/cloudflare/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.remoteManifestFound, true);
+    assert.equal(data.importedCount, 1);
+    assert.ok(fetched.some((href) => href.includes("/__pagecast/manifest.json?token=")));
+    assert.ok(fetched.some((href) => href.endsWith("/p/remote-only/style.css")));
+    const report = data.imported[0];
+    assert.equal(report.importedFromCloudflare, true);
+    assert.equal(report.publicUrl, "https://team-reports.pages.dev/p/remote-only/");
+    assert.match(await fs.readFile(path.join(dataDir, "imports", "remote-only", "style.css"), "utf8"), /purple/);
+  } finally {
+    await runtime.close();
+  }
+});
+
 // --- 1e: custom slug + 301 redirect ---------------------------------------
 
 test("custom slug rename moves the folder, writes a 301 redirect, and validates", async () => {
@@ -2875,6 +3006,66 @@ test("config store persists and clears feedback settings", async () => {
   assert.equal(bad.feedback, null);
 
   await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("Cloudflare auto-sync config defaults on, persists, and survives pages updates", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-sync-cfg-"));
+  const store = createConfigStore({ dataDir: dir });
+  await store.init();
+
+  assert.equal(store.getPublicConfig().cloudflareSyncEnabled, true);
+
+  await store.setCloudflareSyncEnabled(false);
+  assert.equal(store.getPublicConfig().cloudflareSyncEnabled, false);
+
+  const afterPagesUpdate = await store.updatePages({ projectName: "team-reports" });
+  assert.equal(afterPagesUpdate.cloudflareSyncEnabled, false);
+
+  const reopened = createConfigStore({ dataDir: dir });
+  await reopened.init();
+  assert.equal(reopened.getPublicConfig().cloudflareSyncEnabled, false);
+
+  await reopened.setCloudflareSyncEnabled(true);
+  assert.equal(reopened.getPublicConfig().cloudflareSyncEnabled, true);
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("config API toggles Cloudflare auto-sync for dashboard settings", async () => {
+  const tempDir = await makeTempDir();
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir: path.join(tempDir, "data"),
+    staticDir: path.resolve("public")
+  });
+
+  try {
+    const before = await (await fetch(`${runtime.adminUrl}/api/config`)).json();
+    assert.equal(before.config.cloudflareSyncEnabled, true);
+
+    const offResponse = await fetch(`${runtime.adminUrl}/api/config/cloudflare-sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: false })
+    });
+    assert.equal(offResponse.status, 200);
+    assert.equal((await offResponse.json()).config.cloudflareSyncEnabled, false);
+
+    const persisted = await (await fetch(`${runtime.adminUrl}/api/config`)).json();
+    assert.equal(persisted.config.cloudflareSyncEnabled, false);
+
+    const onResponse = await fetch(`${runtime.adminUrl}/api/config/cloudflare-sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: true })
+    });
+    assert.equal(onResponse.status, 200);
+    assert.equal((await onResponse.json()).config.cloudflareSyncEnabled, true);
+  } finally {
+    await runtime.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("feedback wrangler-output parsers extract ids and urls", () => {
