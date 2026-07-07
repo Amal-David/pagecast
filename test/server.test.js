@@ -2191,6 +2191,66 @@ test("Cloudflare sync imports remote manifest links and downloads listed assets"
   }
 });
 
+test("Cloudflare sync rejects oversized remote assets before buffering", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  let oversizedBuffered = false;
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    fetchImpl: async (url) => {
+      const href = String(url);
+      if (href.includes("/__pagecast/manifest.json")) {
+        return new Response(
+          JSON.stringify({
+            version: 1,
+            baseUrl: "https://team-reports.pages.dev",
+            publications: [
+              {
+                slug: "oversized-remote",
+                title: "Oversized Remote",
+                files: ["index.html"],
+                publicUrl: "https://team-reports.pages.dev/p/oversized-remote/"
+              }
+            ]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (href.endsWith("/p/oversized-remote/index.html")) {
+        const response = new Response("<!doctype html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html", "Content-Length": `${25 * 1024 * 1024 + 1}` }
+        });
+        response.arrayBuffer = async () => {
+          oversizedBuffered = true;
+          return new ArrayBuffer(0);
+        };
+        return response;
+      }
+      return new Response("Not found.", { status: 404 });
+    }
+  });
+
+  try {
+    await configurePages(runtime.adminUrl);
+    const response = await fetch(`${runtime.adminUrl}/api/cloudflare/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.importedCount, 0);
+    assert.equal(data.failed.length, 1);
+    assert.equal(oversizedBuffered, false);
+  } finally {
+    await runtime.close();
+  }
+});
+
 // --- 1e: custom slug + 301 redirect ---------------------------------------
 
 test("custom slug rename moves the folder, writes a 301 redirect, and validates", async () => {
@@ -2365,6 +2425,85 @@ test("custom slug rename rolls back when the publish deploy fails", async () => 
     assert.match(await oldUrlResponse.text(), /Rename rollback/);
     const newUrlResponse = await fetch(`${runtime.publicUrl}/p/should-not-stick/`);
     assert.equal(newUrlResponse.status, 404);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("custom slug rename rollback restores redirect-chain rewrites", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportDir = path.join(tempDir, "report");
+  await fs.mkdir(reportDir, { recursive: true });
+  const reportPath = path.join(reportDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>Redirect rollback</h1>");
+
+  let deployCount = 0;
+  function fakeDeploy() {
+    deployCount += 1;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.kill = (signal = "SIGTERM") => {
+      child.signalCode = signal;
+      child.emit("exit", null, signal);
+    };
+    setTimeout(() => {
+      if (deployCount <= 2) {
+        child.stdout.emit("data", Buffer.from("Cloudflare Pages deploy complete"));
+        child.exitCode = 0;
+        child.emit("exit", 0, null);
+      } else {
+        child.stderr.emit("data", Buffer.from("rename deploy failed"));
+        child.exitCode = 1;
+        child.emit("exit", 1, null);
+      }
+    }, 5);
+    return child;
+  }
+
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    pagesDeploySpawnImpl: fakeDeploy,
+    pagesDeployTimeoutMs: 1000
+  });
+
+  try {
+    await configurePages(runtime.adminUrl);
+    const report = await addPathReport(runtime.adminUrl, reportPath);
+    const publication = await publishSnapshot(runtime.adminUrl, report.id);
+    const oldSlug = publication.slug;
+
+    const firstRename = await fetch(
+      `${runtime.adminUrl}/api/publications/${publication.token}/slug`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: "stable-slug" })
+      }
+    );
+    assert.equal(firstRename.status, 200);
+    assert.deepEqual(runtime.store.listRedirects(), [
+      { from: `/p/${oldSlug}/`, to: "/p/stable-slug/" }
+    ]);
+
+    const secondRename = await fetch(
+      `${runtime.adminUrl}/api/publications/${publication.token}/slug`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: "failed-slug" })
+      }
+    );
+    assert.equal(secondRename.status, 502);
+    assert.deepEqual(runtime.store.listRedirects(), [
+      { from: `/p/${oldSlug}/`, to: "/p/stable-slug/" }
+    ]);
   } finally {
     await runtime.close();
   }
@@ -3191,6 +3330,12 @@ test("Cloudflare auto-sync config defaults on, persists, and survives pages upda
   const store = createConfigStore({ dataDir: dir });
   await store.init();
 
+  const fullConfig = store.get();
+  assert.ok(fullConfig.authCookieSecret);
+  assert.ok(fullConfig.syncSecret);
+  assert.notEqual(fullConfig.syncSecret, fullConfig.authCookieSecret);
+  assert.equal(Object.hasOwn(store.getPublicConfig(), "authCookieSecret"), false);
+  assert.equal(Object.hasOwn(store.getPublicConfig(), "syncSecret"), false);
   assert.equal(store.getPublicConfig().cloudflareSyncEnabled, true);
 
   await store.setCloudflareSyncEnabled(false);

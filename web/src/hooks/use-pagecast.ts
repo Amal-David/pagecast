@@ -310,11 +310,15 @@ export function useSyncCloudflarePages() {
       const failedCount = data.failed.length;
       const automatic = options?.automatic === true;
       if (failedCount > 0) {
-        toast.message(
-          `Imported ${data.importedCount} link(s). ${failedCount} could not be synced.`
-        );
+        if (!automatic) {
+          toast.message(
+            `Imported ${data.importedCount} link(s). ${failedCount} could not be synced.`
+          );
+        }
       } else if (data.importedCount > 0) {
-        toast.success(`Imported ${data.importedCount} published link(s).`);
+        if (!automatic) {
+          toast.success(`Imported ${data.importedCount} published link(s).`);
+        }
       } else if (!automatic) {
         toast.message("Published links are already synced.");
       }
@@ -328,14 +332,16 @@ export function useSyncCloudflarePages() {
           message: `Imported ${data.importedCount}, skipped ${data.skippedCount}`
         });
       }
-      invalidateReports(queryClient);
+      queryClient.setQueryData(REPORTS_KEY, data.reports);
       if (!automatic || data.importedCount > 0 || failedCount > 0) {
         void queryClient.invalidateQueries({ queryKey: STATUS_KEY });
       }
     },
-    onError: (error) => {
+    onError: (error, options) => {
       const message = errorMessage(error, "Could not sync published links.");
-      toast.error(message);
+      if (options?.automatic !== true) {
+        toast.error(message);
+      }
       emitActivity({ status: "error", title: "Published sync failed", message });
     }
   });

@@ -533,6 +533,12 @@ function normalizeConfig(config = {}) {
       typeof config.authCookieSecret === "string" && config.authCookieSecret
         ? config.authCookieSecret
         : null,
+    // Independent token for the public sync-manifest endpoint. It must not reuse
+    // the cookie-signing secret because it travels as a query parameter.
+    syncSecret:
+      typeof config.syncSecret === "string" && config.syncSecret
+        ? config.syncSecret
+        : null,
     // Anonymous usage telemetry (which commands run, version, OS). On by default;
     // opt out via `pagecast telemetry disable`, PAGECAST_TELEMETRY=0, or DO_NOT_TRACK=1.
     telemetry: config.telemetry !== false,
@@ -1411,24 +1417,26 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
     await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   }
 
-  // Generate the cookie-signing secret once and keep it; only deploys that gate
-  // a protected page ever use it, but it must be stable across redeploys.
-  function ensureAuthCookieSecret() {
+  // Generate local secrets once and keep them stable across redeploys.
+  function ensureSecrets() {
     if (!config.authCookieSecret) {
       config = { ...config, authCookieSecret: randomBytes(32).toString("hex") };
+    }
+    if (!config.syncSecret) {
+      config = { ...config, syncSecret: randomBytes(32).toString("hex") };
     }
   }
 
   async function init() {
     if (!(await pathExists(configPath))) {
-      ensureAuthCookieSecret();
+      ensureSecrets();
       await save();
       return;
     }
 
     const parsed = safeJsonParse(await fs.readFile(configPath, "utf8"), {});
     config = normalizeConfig(parsed);
-    ensureAuthCookieSecret();
+    ensureSecrets();
     await save();
   }
 
@@ -1436,14 +1444,12 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
     return structuredClone(config);
   }
 
-  // Client-safe view of the config. `authCookieSecret` is the HMAC key that
-  // signs edge password-gate session cookies — it must never reach the browser
-  // (it's served by /api/status and /api/config), or forged auth cookies become
-  // possible. Strip it from anything client- or CLI-output-facing.
+  // Client-safe view of the config. Secrets must never reach the browser
+  // (it's served by /api/status and /api/config), or auth/sync tokens leak.
   function getPublicConfig() {
-    // telemetryId is an internal anonymous id; like authCookieSecret it must never
-    // reach the browser or CLI JSON output. The `telemetry` boolean stays visible.
-    const { authCookieSecret, telemetryId, ...rest } = config;
+    // telemetryId is an internal anonymous id; like secrets it must never reach
+    // the browser or CLI JSON output. The `telemetry` boolean stays visible.
+    const { authCookieSecret, syncSecret, telemetryId, ...rest } = config;
     return structuredClone(rest);
   }
 
@@ -1468,6 +1474,7 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
       cloudflareSyncEnabled: config.cloudflareSyncEnabled,
       local: config.local,
       authCookieSecret: config.authCookieSecret,
+      syncSecret: config.syncSecret,
       telemetry: config.telemetry,
       telemetryId: config.telemetryId,
       telemetryNotified: config.telemetryNotified
@@ -1539,6 +1546,7 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
       cloudflareSyncEnabled: config.cloudflareSyncEnabled,
       local: config.local,
       authCookieSecret: config.authCookieSecret,
+      syncSecret: config.syncSecret,
       telemetry: config.telemetry,
       telemetryId: config.telemetryId,
       telemetryNotified: config.telemetryNotified,
@@ -3191,6 +3199,14 @@ export function createReportStore({
       if (!response.ok) {
         throw appError(`Could not import ${relativePath} from Cloudflare (${response.status}).`, 502);
       }
+      const lengthHeader = response.headers.get("content-length");
+      const contentLength = /^\d+$/.test(lengthHeader || "") ? Number(lengthHeader) : null;
+      if (contentLength !== null && contentLength > MAX_SYNC_IMPORT_FILE_BYTES) {
+        throw appError("Synced page includes a file that is too large.", 413);
+      }
+      if (contentLength !== null && totalBytes + contentLength > MAX_SYNC_IMPORT_BYTES) {
+        throw appError("Synced page is too large.", 413);
+      }
       const content = Buffer.from(await response.arrayBuffer());
       if (content.length > MAX_SYNC_IMPORT_FILE_BYTES) {
         throw appError("Synced page includes a file that is too large.", 413);
@@ -3528,6 +3544,9 @@ export function createReportStore({
       const to = `/p/${failedSlug}/`;
       return !(entry.from === from && entry.to === to);
     });
+    if (Array.isArray(previous?.redirects)) {
+      redirects = previous.redirects.map((entry) => ({ from: entry.from, to: entry.to }));
+    }
     await save();
     return match;
   }
@@ -4766,8 +4785,12 @@ async function handleApi(
         continue;
       }
       const slug = publication.slug || publication.token;
-      const pagesConfig = pagesConfigForPublication(publication, configStore.get().pages);
-      await deployQueue.enqueue(() => pagesPublisher.revoke([slug], pagesConfig));
+      try {
+        const pagesConfig = pagesConfigForPublication(publication, configStore.get().pages);
+        await deployQueue.enqueue(() => pagesPublisher.revoke([slug], pagesConfig));
+      } catch (error) {
+        console.warn(`Pagecast could not revoke ${slug} from Cloudflare: ${error?.message || error}`);
+      }
     }
   }
 
@@ -5084,14 +5107,18 @@ async function handleApi(
     if (!pages.projectName || !pages.baseUrl) {
       throw appError("No Cloudflare Pages project is configured.", 400);
     }
-    const discovery = await pagesPublisher.discoverPublishedPages({
-      pagesConfig: pages,
-      syncToken: configStore.get().authCookieSecret || ""
-    });
-    const result = await store.importPublishedPages(discovery.publications, {
-      ...options,
-      pagesBaseUrl: pages.baseUrl,
-      fetchImpl: pagesPublisher.fetchImpl
+    const { discovery, result } = await deployQueue.enqueue(async () => {
+      const currentConfig = configStore.get();
+      const discovery = await pagesPublisher.discoverPublishedPages({
+        pagesConfig: pages,
+        syncToken: currentConfig.syncSecret || ""
+      });
+      const result = await store.importPublishedPages(discovery.publications, {
+        ...options,
+        pagesBaseUrl: pages.baseUrl,
+        fetchImpl: pagesPublisher.fetchImpl
+      });
+      return { discovery, result };
     });
     sendJson(res, 200, {
       imported: result.imported,
@@ -5241,12 +5268,7 @@ async function handleApi(
         try {
           await run();
         } catch (error) {
-          const message = stripAnsi(error.message || "");
-          const provisionable =
-            /project.*not.*found|could not find.*project|does not exist|no such project|account|select an account/i.test(
-              message
-            );
-          if (!provisionable) {
+          if (!isProvisionablePagesError(error)) {
             throw error;
           }
           await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
@@ -5380,7 +5402,8 @@ async function handleApi(
       slug: existing.publication.slug || existing.publication.token,
       publicUrl: existing.publication.publicUrl,
       publicationUpdatedAt: existing.publication.updatedAt,
-      reportUpdatedAt: existing.report.updatedAt
+      reportUpdatedAt: existing.report.updatedAt,
+      redirects: store.listRedirects()
     };
     // Validate + reserve the slug (throws 400/409) before any deploy work.
     const { oldSlug, newSlug } = await store.renameSlug(token, body.slug);
@@ -5642,7 +5665,7 @@ export async function startServers({
     getBadge: () => configStore.get().badge,
     getProtectedPublications: () => store.protectedPublicationManifest(),
     getAuthCookieSecret: () => configStore.get().authCookieSecret,
-    getSyncToken: () => configStore.get().authCookieSecret
+    getSyncToken: () => configStore.get().syncSecret
   });
   const deployQueue = createDeployQueue();
   const watchManager = createWatchManager({
@@ -5787,7 +5810,7 @@ async function createHeadlessCloudflareContext({
     // reports. Site-only deploys (deploySite) pass none and never touch it.
     getProtectedPublications: store ? () => store.protectedPublicationManifest() : () => [],
     getAuthCookieSecret: () => configStore.get().authCookieSecret,
-    getSyncToken: () => configStore.get().authCookieSecret
+    getSyncToken: () => configStore.get().syncSecret
   });
   return { configStore, cloudflareAuth, pagesPublisher };
 }

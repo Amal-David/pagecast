@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import path from "node:path";
 import process from "node:process";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import {
   createConfigStore,
@@ -33,6 +34,7 @@ const dataDir = path.join(process.cwd(), ".pagecast");
 const staticDir = path.join(packageRoot, "public");
 const cliPath = fileURLToPath(import.meta.url);
 const backgroundPidPath = path.join(dataDir, "pagecast.pid");
+const execFileAsync = promisify(execFile);
 
 function openBrowser(url) {
   const platform = process.platform;
@@ -75,12 +77,26 @@ async function waitForDashboard(url, { timeoutMs = 5000 } = {}) {
 }
 
 async function readBackgroundPid() {
+  const processInfo = await readBackgroundProcess();
+  return processInfo.pid;
+}
+
+async function readBackgroundProcess() {
   try {
     const raw = await fs.readFile(backgroundPidPath, "utf8");
-    const pid = Number(raw.trim());
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("{")) {
+      const parsed = JSON.parse(trimmed);
+      const pid = Number(parsed.pid);
+      return {
+        pid: Number.isInteger(pid) && pid > 0 ? pid : null,
+        command: Array.isArray(parsed.command) ? parsed.command.map(String) : []
+      };
+    }
+    const pid = Number(trimmed);
+    return { pid: Number.isInteger(pid) && pid > 0 ? pid : null, command: [] };
   } catch {
-    return null;
+    return { pid: null, command: [] };
   }
 }
 
@@ -94,6 +110,31 @@ function processIsRunning(pid) {
   } catch {
     return false;
   }
+}
+
+async function readProcessCommand(pid) {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], { timeout: 1000 });
+    return stdout.trim();
+  } catch {
+    return "";
+  }
+}
+
+async function backgroundProcessMatches(processInfo) {
+  if (!processInfo?.pid) {
+    return false;
+  }
+  const command = await readProcessCommand(processInfo.pid);
+  if (!command) {
+    return false;
+  }
+  const runsPagecastServe = (cli) => command.includes(cli) && /\bserve\b/.test(command);
+  if (processInfo.command?.length) {
+    const [nodeExecutable, recordedCliPath] = processInfo.command;
+    return command.includes(nodeExecutable) && runsPagecastServe(recordedCliPath || cliPath);
+  }
+  return runsPagecastServe(cliPath);
 }
 
 async function removeBackgroundPid() {
@@ -372,8 +413,8 @@ async function background(args = []) {
       console.log(`Pagecast is already running: ${urls.adminUrl}`);
       return;
     }
-    const existingPid = await readBackgroundPid();
-    if (processIsRunning(existingPid)) {
+    const existingProcess = await readBackgroundProcess();
+    if (processIsRunning(existingProcess.pid) && (await backgroundProcessMatches(existingProcess))) {
       console.log(`Pagecast background process is starting: ${urls.adminUrl}`);
       return;
     }
@@ -385,7 +426,15 @@ async function background(args = []) {
       env: process.env
     });
     child.unref();
-    await fs.writeFile(backgroundPidPath, `${child.pid}\n`, "utf8");
+    await fs.writeFile(
+      backgroundPidPath,
+      `${JSON.stringify({
+        pid: child.pid,
+        command: [process.execPath, cliPath, "serve", "--no-open"],
+        startedAt: new Date().toISOString()
+      })}\n`,
+      "utf8"
+    );
     const ready = await waitForDashboard(urls.adminUrl);
     const refreshed = await configuredLocalUrls();
     console.log(
@@ -397,9 +446,9 @@ async function background(args = []) {
   }
 
   if (subcommand === "stop") {
-    const pid = await readBackgroundPid();
-    if (processIsRunning(pid)) {
-      process.kill(pid, "SIGTERM");
+    const processInfo = await readBackgroundProcess();
+    if (processIsRunning(processInfo.pid) && (await backgroundProcessMatches(processInfo))) {
+      process.kill(processInfo.pid, "SIGTERM");
       await sleep(250);
       console.log("Pagecast background process stopped.");
     } else {
@@ -410,11 +459,11 @@ async function background(args = []) {
   }
 
   if (subcommand === "status") {
-    const pid = await readBackgroundPid();
+    const processInfo = await readBackgroundProcess();
     const ready = await dashboardReady(urls.adminUrl);
     if (ready) {
       console.log(`Pagecast is running: ${urls.adminUrl}`);
-    } else if (processIsRunning(pid)) {
+    } else if (processIsRunning(processInfo.pid) && (await backgroundProcessMatches(processInfo))) {
       console.log(`Pagecast background process is starting: ${urls.adminUrl}`);
     } else {
       console.log(`Pagecast is stopped. Start it with: pagecast background start`);
@@ -775,7 +824,7 @@ function usage() {
   console.log(
     [
       "Usage:",
-      "  pagecast [serve] [--no-open] [--port 4173] [--public-port 4174]",
+      "  pagecast [serve] [--no-open] [--host <host>] [--port 4173] [--public-port 4174]",
       "                                                        Start the local app and open the admin UI",
       "  pagecast open                                        Open the local app, starting it in the background if needed",
       "  pagecast background start|stop|status                Keep the local app running without a terminal tab",

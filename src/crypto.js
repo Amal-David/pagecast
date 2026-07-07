@@ -83,10 +83,11 @@ export const PAGECAST_SYNC_MANIFEST_PATH = "/__pagecast/manifest.json";
 // sync endpoint invoke the Function; everything else stays static.
 export function renderRoutesJson(slugs, { includeSyncEndpoint = false } = {}) {
   const unique = [...new Set((slugs || []).filter(Boolean))];
+  const maxSlugRules = includeSyncEndpoint ? MAX_ROUTE_RULES - 1 : MAX_ROUTE_RULES;
   let include;
   if (unique.length === 0) {
     include = [];
-  } else if (unique.length > MAX_ROUTE_RULES) {
+  } else if (unique.length > maxSlugRules) {
     include = ["/p/*"];
   } else {
     include = unique.map((slug) => `/p/${slug}/*`);
@@ -238,7 +239,8 @@ function matchSlug(pathname) {
 
 function syncManifestResponse(url) {
   if (url.pathname !== PAGECAST_SYNC_MANIFEST_PATH) return null;
-  if (!SYNC_TOKEN || url.searchParams.get("token") !== SYNC_TOKEN) {
+  const token = url.searchParams.get("token");
+  if (!SYNC_TOKEN || !token || !constantTimeEqual(token, SYNC_TOKEN)) {
     return new Response("Not found.", {
       status: 404,
       headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }

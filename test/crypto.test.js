@@ -92,6 +92,13 @@ test("renderRoutesJson scopes Functions to protected prefixes only", () => {
   });
   const many = Array.from({ length: 150 }, (_, i) => `s${i}`);
   assert.deepEqual(JSON.parse(renderRoutesJson(many)).include, ["/p/*"]);
+  const atSyncCapacity = Array.from({ length: 99 }, (_, i) => `sync${i}`);
+  assert.equal(JSON.parse(renderRoutesJson(atSyncCapacity, { includeSyncEndpoint: true })).include.length, 100);
+  const overSyncCapacity = Array.from({ length: 100 }, (_, i) => `sync${i}`);
+  assert.deepEqual(JSON.parse(renderRoutesJson(overSyncCapacity, { includeSyncEndpoint: true })).include, [
+    "/p/*",
+    PAGECAST_SYNC_MANIFEST_PATH
+  ]);
 });
 
 test("middleware passes through unprotected paths without auth", async () => {
