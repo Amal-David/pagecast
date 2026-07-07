@@ -42,6 +42,22 @@ export function buildPfRules({ targetPort }) {
   ].join("\n");
 }
 
+export function parsePfRulesTargetPort(rules) {
+  const loopbackIp = PORTLESS_LOOPBACK_IP.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = String(rules).match(
+    new RegExp(`to\\s+${loopbackIp}\\s+port\\s+80\\s+->\\s+127\\.0\\.0\\.1\\s+port\\s+(\\d+)`)
+  );
+  return match ? assertPort(match[1]) : null;
+}
+
+export function pfRulesTargetPortMatches(rules, targetPort) {
+  try {
+    return parsePfRulesTargetPort(rules) === assertPort(targetPort);
+  } catch {
+    return false;
+  }
+}
+
 export function buildPfLaunchDaemonPlist({
   label = PF_LAUNCH_DAEMON_LABEL,
   rulesPath = PF_RULES_PATH,

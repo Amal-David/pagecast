@@ -11,7 +11,9 @@ import {
   buildBackgroundLaunchAgentPlist,
   buildLocalUrlInstallScript,
   buildLocalUrlRemoveScript,
-  buildPfRules
+  buildPfRules,
+  parsePfRulesTargetPort,
+  pfRulesTargetPortMatches
 } from "../src/local-system.js";
 
 test("pf rules redirect only the Pagecast loopback alias to the configured admin port", () => {
@@ -19,6 +21,14 @@ test("pf rules redirect only the Pagecast loopback alias to the configured admin
   assert.match(rules, new RegExp(`to ${PORTLESS_LOOPBACK_IP} port 80`));
   assert.match(rules, /-> 127\.0\.0\.1 port 4173/);
   assert.doesNotMatch(rules, /to 127\.0\.0\.1 port 80/);
+});
+
+test("pf rules expose the configured target port for stale redirect checks", () => {
+  const rules = buildPfRules({ targetPort: 4173 });
+  assert.equal(parsePfRulesTargetPort(rules), 4173);
+  assert.equal(pfRulesTargetPortMatches(rules, 4173), true);
+  assert.equal(pfRulesTargetPortMatches(rules, 4321), false);
+  assert.equal(pfRulesTargetPortMatches("pass all", 4173), false);
 });
 
 test("local-url install script writes hosts, pf rules, and a launch daemon", () => {

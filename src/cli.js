@@ -34,7 +34,8 @@ import {
   buildBackgroundLaunchAgentPlist,
   buildLocalUrlInstallScript,
   buildLocalUrlRemoveScript,
-  launchGuiDomain
+  launchGuiDomain,
+  pfRulesTargetPortMatches
 } from "./local-system.js";
 import { classifyCommand, createReporter, resolveTelemetry } from "./telemetry.js";
 
@@ -294,15 +295,35 @@ async function stopManagedBackgroundProcess() {
   return false;
 }
 
-async function portlessLocalUrlInstalled() {
+function adminPortFromUrl(adminUrl) {
+  try {
+    const parsed = new URL(adminUrl);
+    if (parsed.port) {
+      return Number(parsed.port);
+    }
+    return parsed.protocol === "http:" ? 80 : parsed.protocol === "https:" ? 443 : null;
+  } catch {
+    return null;
+  }
+}
+
+async function portlessLocalUrlInstalled({ targetPort } = {}) {
   if (process.platform !== "darwin") {
     return false;
   }
-  return (await fileExists(PF_RULES_PATH)) && (await fileExists(PF_LAUNCH_DAEMON_PATH));
+  const installed = (await fileExists(PF_RULES_PATH)) && (await fileExists(PF_LAUNCH_DAEMON_PATH));
+  if (!installed || targetPort === undefined) {
+    return installed;
+  }
+  const rules = await fs.readFile(PF_RULES_PATH, "utf8").catch(() => null);
+  return rules ? pfRulesTargetPortMatches(rules, targetPort) : false;
 }
 
 async function preferredAdminUrl(urls) {
-  return (await portlessLocalUrlInstalled()) ? PORTLESS_LOCAL_URL : urls.adminUrl;
+  const adminPort = adminPortFromUrl(urls.adminUrl);
+  return adminPort && (await portlessLocalUrlInstalled({ targetPort: adminPort }))
+    ? PORTLESS_LOCAL_URL
+    : urls.adminUrl;
 }
 
 // First-run notice (stderr, so it never pollutes --json stdout).
