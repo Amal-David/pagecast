@@ -113,11 +113,45 @@ function processIsRunning(pid) {
 }
 
 async function readProcessCommand(pid) {
+  if (process.platform === "win32") {
+    return readWindowsProcessCommand(pid);
+  }
   try {
     const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], { timeout: 1000 });
     return stdout.trim();
   } catch {
     return "";
+  }
+}
+
+async function readWindowsProcessCommand(pid) {
+  const normalizedPid = Number(pid);
+  if (!Number.isInteger(normalizedPid) || normalizedPid <= 0) {
+    return "";
+  }
+  const powershellQuery = `$process = Get-CimInstance Win32_Process -Filter "ProcessId = ${normalizedPid}"; if ($process) { $process.CommandLine }`;
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", powershellQuery],
+      { timeout: 1000, windowsHide: true }
+    );
+    return stdout.trim();
+  } catch {
+    try {
+      const { stdout } = await execFileAsync(
+        "wmic",
+        ["process", "where", `ProcessId=${normalizedPid}`, "get", "CommandLine", "/value"],
+        { timeout: 1000, windowsHide: true }
+      );
+      const line = stdout
+        .split(/\r?\n/)
+        .map((value) => value.trim())
+        .find((value) => value.startsWith("CommandLine="));
+      return line ? line.slice("CommandLine=".length).trim() : "";
+    } catch {
+      return "";
+    }
   }
 }
 
