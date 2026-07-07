@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { activityMessage, emitActivity } from "@/lib/activity";
 import type {
+  CloudflareSyncResponse,
   DeploymentsResponse,
   PublishResponse,
   Report,
@@ -297,6 +298,77 @@ export function useSyncPublication() {
       const message = errorMessage(error, "Sync failed.");
       toast.error(message);
       emitActivity({ status: "error", title: "Sync failed", message });
+    }
+  });
+}
+
+export function useSyncCloudflarePages() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (_options?: { automatic?: boolean }) => api.syncCloudflarePages(),
+    onSuccess: (data: CloudflareSyncResponse, options) => {
+      const failedCount = data.failed.length;
+      const automatic = options?.automatic === true;
+      if (failedCount > 0) {
+        if (!automatic) {
+          toast.message(
+            `Imported ${data.importedCount} link(s). ${failedCount} could not be synced.`
+          );
+        }
+      } else if (data.importedCount > 0) {
+        if (!automatic) {
+          toast.success(`Imported ${data.importedCount} published link(s).`);
+        }
+      } else if (!automatic) {
+        toast.message("Published links are already synced.");
+      }
+      if (!automatic && data.warnings.length > 0) {
+        toast.message(data.warnings[0]);
+      }
+      if (!automatic || data.importedCount > 0 || failedCount > 0) {
+        emitActivity({
+          status: failedCount > 0 ? "error" : "success",
+          title: automatic ? "Cloudflare auto-sync" : "Published links synced",
+          message: `Imported ${data.importedCount}, skipped ${data.skippedCount}`
+        });
+      }
+      queryClient.setQueryData(REPORTS_KEY, data.reports);
+      if (!automatic || data.importedCount > 0 || failedCount > 0) {
+        void queryClient.invalidateQueries({ queryKey: STATUS_KEY });
+      }
+    },
+    onError: (error, options) => {
+      const message = errorMessage(error, "Could not sync published links.");
+      if (options?.automatic !== true) {
+        toast.error(message);
+      }
+      emitActivity({ status: "error", title: "Published sync failed", message });
+    }
+  });
+}
+
+export function useSetCloudflareSyncEnabled() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (enabled: boolean) => api.setCloudflareSyncEnabled(enabled),
+    onSuccess: (data) => {
+      toast.success(
+        data.config.cloudflareSyncEnabled
+          ? "Cloudflare auto-sync on."
+          : "Cloudflare auto-sync off."
+      );
+      emitActivity({
+        status: "success",
+        title: data.config.cloudflareSyncEnabled
+          ? "Cloudflare auto-sync on"
+          : "Cloudflare auto-sync off"
+      });
+      void queryClient.invalidateQueries({ queryKey: STATUS_KEY });
+    },
+    onError: (error) => {
+      const message = errorMessage(error, "Could not update Cloudflare auto-sync.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Cloudflare auto-sync failed", message });
     }
   });
 }

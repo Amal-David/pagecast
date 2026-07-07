@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { markdownToHtml } from "./markdown.js";
 import { generateName, generateUniqueName, generateUnguessableName } from "./nameGenerator.js";
 import {
+  PAGECAST_SYNC_MANIFEST_PATH,
   isValidPasswordHash,
   makePasswordHash,
   renderAuthMiddleware,
@@ -21,6 +22,7 @@ const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 
 export const DEFAULT_HOST = "127.0.0.1";
+export const DEFAULT_LOCAL_HOSTNAME = "pagecast.localhost";
 export const DEFAULT_ADMIN_PORT = 4173;
 export const DEFAULT_PUBLIC_PORT = 4174;
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
@@ -32,6 +34,10 @@ export const DEFAULT_PAGES_BRANCH = "main";
 export const DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 export const DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS = 60 * 1000;
 export const CLOUDFLARE_OAUTH_SCOPES = ["account:read", "user:read", "pages:write"];
+const MAX_SYNC_IMPORT_FILES = MAX_FOLDER_UPLOAD_FILES;
+const MAX_SYNC_IMPORT_BYTES = MAX_FOLDER_UPLOAD_BYTES;
+const MAX_SYNC_IMPORT_FILE_BYTES = MAX_FOLDER_UPLOAD_FILE_BYTES;
+const SYNC_MANIFEST_FETCH_TIMEOUT_MS = 5000;
 
 // Feedback provisioning deploys a Worker + KV, which the base publishing scopes
 // don't permit. These elevate the grant only when the user opts into feedback,
@@ -70,6 +76,13 @@ export function appError(message, statusCode = 400) {
   error.statusCode = statusCode;
   error.expose = true;
   return error;
+}
+
+function isProvisionablePagesError(error) {
+  const message = stripAnsi(error?.message || "");
+  return /project.*not.*found|could not find.*project|does not exist|no such project|account|select an account/i.test(
+    message
+  );
 }
 
 function contentTypeFor(filePath) {
@@ -202,6 +215,14 @@ function normalizePagesProjectName(value) {
   return projectName;
 }
 
+function normalizePagesProjectNameSafe(value) {
+  try {
+    return normalizePagesProjectName(value || "");
+  } catch {
+    return "";
+  }
+}
+
 function normalizeAccountId(value) {
   const accountId = String(value || "").trim();
   if (!accountId) {
@@ -240,6 +261,60 @@ function normalizeAccountName(value) {
 
 function pagesBaseUrl(projectName) {
   return `https://${projectName}.pages.dev`;
+}
+
+function pagesProjectNameFromPublicUrl(publicUrl) {
+  try {
+    const hostname = new URL(publicUrl).hostname.toLowerCase();
+    if (!hostname.endsWith(".pages.dev")) {
+      return "";
+    }
+    return normalizePagesProjectNameSafe(hostname.slice(0, -".pages.dev".length));
+  } catch {
+    return "";
+  }
+}
+
+function publicUrlOrigin(publicUrl) {
+  try {
+    return stripTrailingSlash(new URL(publicUrl).origin);
+  } catch {
+    return "";
+  }
+}
+
+function pagesConfigForPublication(publication, currentPages) {
+  const currentProjectName = normalizePagesProjectNameSafe(currentPages?.projectName) || DEFAULT_PAGES_PROJECT_NAME;
+  const currentBaseUrl = stripTrailingSlash(currentPages?.baseUrl || pagesBaseUrl(currentProjectName));
+  const storedProjectName = normalizePagesProjectNameSafe(publication.pagesProjectName);
+  const inferredProjectName = pagesProjectNameFromPublicUrl(publication.publicUrl);
+  const projectName = storedProjectName || inferredProjectName || currentProjectName;
+  const storedBaseUrl = publication.pagesBaseUrl ? stripTrailingSlash(publication.pagesBaseUrl) : "";
+  const inferredBaseUrl = inferredProjectName ? pagesBaseUrl(inferredProjectName) : "";
+  const publicOrigin = publicUrlOrigin(publication.publicUrl);
+
+  if (!storedProjectName && !inferredProjectName && publicOrigin && publicOrigin !== currentBaseUrl) {
+    throw appError(
+      `This published link belongs to ${publicOrigin}, but Pagecast is connected to ${currentBaseUrl}. Click Publish URL to publish it to the current Pages project, or switch back to the original project before syncing.`,
+      409
+    );
+  }
+
+  return {
+    ...currentPages,
+    projectName,
+    accountId: normalizeAccountIdSafe(publication.pagesAccountId || currentPages?.accountId),
+    accountName: publication.pagesAccountName || currentPages?.accountName || "",
+    branch: DEFAULT_PAGES_BRANCH,
+    baseUrl: storedBaseUrl || inferredBaseUrl || currentBaseUrl || pagesBaseUrl(projectName)
+  };
+}
+
+function rememberPublicationPagesTarget(publication, pagesConfig) {
+  publication.pagesProjectName = pagesConfig.projectName;
+  publication.pagesAccountId = normalizeAccountIdSafe(pagesConfig.accountId);
+  publication.pagesAccountName = normalizeAccountName(pagesConfig.accountName || "");
+  publication.pagesBaseUrl = stripTrailingSlash(pagesConfig.baseUrl || pagesBaseUrl(pagesConfig.projectName));
 }
 
 // Derive the REAL production base URL from a `wrangler pages deploy` output.
@@ -395,6 +470,31 @@ function normalizeDefaultExpiry(value) {
   }
 }
 
+function normalizeLocalPort(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
+}
+
+function normalizeRuntimePort(value, fallback) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 0 && port <= 65535 ? port : fallback;
+}
+
+function normalizeLocalHostname(value) {
+  const hostname = String(value || "").trim().toLowerCase();
+  return /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/.test(hostname)
+    ? hostname
+    : DEFAULT_LOCAL_HOSTNAME;
+}
+
+function normalizeLocalConfig(local = {}) {
+  return {
+    hostname: normalizeLocalHostname(local.hostname || DEFAULT_LOCAL_HOSTNAME),
+    adminPort: normalizeLocalPort(local.adminPort, DEFAULT_ADMIN_PORT),
+    publicPort: normalizeLocalPort(local.publicPort, DEFAULT_PUBLIC_PORT)
+  };
+}
+
 function normalizeConfig(config = {}) {
   const projectName = normalizePagesProjectName(
     config.pages?.projectName || DEFAULT_PAGES_PROJECT_NAME
@@ -419,12 +519,25 @@ function normalizeConfig(config = {}) {
     // Default link lifetime for new publishes ("30d" out of the box, "never" =
     // permanent). Configurable; a per-publish --expires overrides it.
     defaultExpiry: normalizeDefaultExpiry(config.defaultExpiry),
+    // Keep the local dashboard reconciled with Pagecast's Cloudflare Pages
+    // manifest by default. The UI can turn this off for workspaces where the
+    // operator wants manual-only imports.
+    cloudflareSyncEnabled: config.cloudflareSyncEnabled !== false,
+    // Friendly local dashboard identity. These are advisory runtime defaults:
+    // explicit CLI args / env vars still win, and fallback ports are persisted.
+    local: normalizeLocalConfig(config.local),
     // HMAC secret for signing edge password-gate session cookies. Generated once
     // (see createConfigStore.init) and kept stable so cookies survive redeploys;
     // preserved here so partial config rebuilds don't drop it.
     authCookieSecret:
       typeof config.authCookieSecret === "string" && config.authCookieSecret
         ? config.authCookieSecret
+        : null,
+    // Independent token for the public sync-manifest endpoint. It must not reuse
+    // the cookie-signing secret because it travels as a query parameter.
+    syncSecret:
+      typeof config.syncSecret === "string" && config.syncSecret
+        ? config.syncSecret
         : null,
     // Anonymous usage telemetry (which commands run, version, OS). On by default;
     // opt out via `pagecast telemetry disable`, PAGECAST_TELEMETRY=0, or DO_NOT_TRACK=1.
@@ -911,6 +1024,87 @@ async function copyPublicTree(sourceRoot, destinationRoot) {
   await copyDirectory(sourceRoot);
 }
 
+async function listPublicTreeFiles(rootDir) {
+  const files = [];
+
+  async function walk(currentSource, currentRelative = "") {
+    const entries = await fs.readdir(currentSource, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) {
+        continue;
+      }
+      const sourcePath = path.join(currentSource, entry.name);
+      const relativePath = path.join(currentRelative, entry.name);
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+      if (entry.isDirectory()) {
+        await walk(sourcePath, relativePath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      files.push(relativePath.split(path.sep).join("/"));
+    }
+  }
+
+  try {
+    await walk(rootDir);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  return files.sort((a, b) => a.localeCompare(b));
+}
+
+function firstUsableIso(...values) {
+  for (const value of values) {
+    const text = String(value || "");
+    if (text && !Number.isNaN(Date.parse(text))) {
+      return new Date(text).toISOString();
+    }
+  }
+  return nowIso();
+}
+
+function normalizeSyncRecord(record, { baseUrl = "", source = "" } = {}) {
+  let slug;
+  try {
+    slug = normalizeCustomSlug(record?.slug);
+  } catch {
+    return null;
+  }
+  const files = Array.isArray(record?.files)
+    ? record.files
+        .map((file) => (typeof file === "string" ? file : file?.path))
+        .filter((file) => typeof file === "string" && file.trim())
+    : [];
+  return {
+    slug,
+    source,
+    files,
+    title: String(record?.title || record?.name || "").trim(),
+    label: String(record?.label || "imported").trim(),
+    token: String(record?.token || slug).trim(),
+    publicUrl: String(record?.publicUrl || record?.url || "").trim(),
+    baseUrl: String(record?.baseUrl || baseUrl || "").trim(),
+    createdAt: firstUsableIso(record?.createdAt, record?.created_on),
+    updatedAt: firstUsableIso(record?.updatedAt, record?.modified_on, record?.createdAt, record?.created_on)
+  };
+}
+
+async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs = SYNC_MANIFEST_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchImpl(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function runSpawnCommand({
   spawnImpl,
   command,
@@ -1223,24 +1417,26 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
     await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   }
 
-  // Generate the cookie-signing secret once and keep it; only deploys that gate
-  // a protected page ever use it, but it must be stable across redeploys.
-  function ensureAuthCookieSecret() {
+  // Generate local secrets once and keep them stable across redeploys.
+  function ensureSecrets() {
     if (!config.authCookieSecret) {
       config = { ...config, authCookieSecret: randomBytes(32).toString("hex") };
+    }
+    if (!config.syncSecret) {
+      config = { ...config, syncSecret: randomBytes(32).toString("hex") };
     }
   }
 
   async function init() {
     if (!(await pathExists(configPath))) {
-      ensureAuthCookieSecret();
+      ensureSecrets();
       await save();
       return;
     }
 
     const parsed = safeJsonParse(await fs.readFile(configPath, "utf8"), {});
     config = normalizeConfig(parsed);
-    ensureAuthCookieSecret();
+    ensureSecrets();
     await save();
   }
 
@@ -1248,14 +1444,12 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
     return structuredClone(config);
   }
 
-  // Client-safe view of the config. `authCookieSecret` is the HMAC key that
-  // signs edge password-gate session cookies — it must never reach the browser
-  // (it's served by /api/status and /api/config), or forged auth cookies become
-  // possible. Strip it from anything client- or CLI-output-facing.
+  // Client-safe view of the config. Secrets must never reach the browser
+  // (it's served by /api/status and /api/config), or auth/sync tokens leak.
   function getPublicConfig() {
-    // telemetryId is an internal anonymous id; like authCookieSecret it must never
-    // reach the browser or CLI JSON output. The `telemetry` boolean stays visible.
-    const { authCookieSecret, telemetryId, ...rest } = config;
+    // telemetryId is an internal anonymous id; like secrets it must never reach
+    // the browser or CLI JSON output. The `telemetry` boolean stays visible.
+    const { authCookieSecret, syncSecret, telemetryId, ...rest } = config;
     return structuredClone(rest);
   }
 
@@ -1277,7 +1471,10 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
       badge: config.badge,
       goal: config.goal,
       defaultExpiry: config.defaultExpiry,
+      cloudflareSyncEnabled: config.cloudflareSyncEnabled,
+      local: config.local,
       authCookieSecret: config.authCookieSecret,
+      syncSecret: config.syncSecret,
       telemetry: config.telemetry,
       telemetryId: config.telemetryId,
       telemetryNotified: config.telemetryNotified
@@ -1294,6 +1491,18 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
 
   async function setDefaultExpiry(value) {
     config = normalizeConfig({ ...config, defaultExpiry: value });
+    await save();
+    return get();
+  }
+
+  async function setCloudflareSyncEnabled(enabled) {
+    config = normalizeConfig({ ...config, cloudflareSyncEnabled: enabled !== false });
+    await save();
+    return get();
+  }
+
+  async function setLocalRuntime(local) {
+    config = normalizeConfig({ ...config, local: { ...config.local, ...local } });
     await save();
     return get();
   }
@@ -1334,7 +1543,10 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
       badge: config.badge,
       goal: config.goal,
       defaultExpiry: config.defaultExpiry,
+      cloudflareSyncEnabled: config.cloudflareSyncEnabled,
+      local: config.local,
       authCookieSecret: config.authCookieSecret,
+      syncSecret: config.syncSecret,
       telemetry: config.telemetry,
       telemetryId: config.telemetryId,
       telemetryNotified: config.telemetryNotified,
@@ -1349,6 +1561,8 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
     setBadge,
     setGoal,
     setDefaultExpiry,
+    setCloudflareSyncEnabled,
+    setLocalRuntime,
     setTelemetry,
     ensureTelemetryId,
     markTelemetryNotified,
@@ -1531,12 +1745,14 @@ export function injectSocialMeta(html, { title, description, url, image, siteNam
 export function createCloudflarePagesPublisher({
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   spawnImpl = spawn,
+  fetchImpl = fetch,
   timeoutMs = 180000,
   getRedirects = () => [],
   getFeedback = () => null,
   getBadge = () => true,
   getProtectedPublications = () => [],
-  getAuthCookieSecret = () => null
+  getAuthCookieSecret = () => null,
+  getSyncToken = () => ""
 } = {}) {
   const siteRoot = path.join(dataDir, "pages-site");
   const deployRoot = path.join(dataDir, "pages-deploy");
@@ -1552,7 +1768,61 @@ export function createCloudflarePagesPublisher({
     return report.workingDir || report.buildOutputRoot || report.rootDir;
   }
 
-  async function ensureSiteRoot() {
+  async function buildSyncManifest(pagesConfig = {}) {
+    const baseUrl = pagesConfig?.baseUrl || pagesBaseUrl(pagesConfig?.projectName || DEFAULT_PAGES_PROJECT_NAME);
+    const pRoot = path.join(siteRoot, "p");
+    const publications = [];
+    let entries = [];
+    try {
+      entries = await fs.readdir(pRoot, { withFileTypes: true });
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      let slug;
+      try {
+        slug = normalizeCustomSlug(entry.name);
+      } catch {
+        continue;
+      }
+      const root = publicationDir(slug);
+      const files = await listPublicTreeFiles(root);
+      if (!files.includes("index.html") && !files.includes("index.htm")) {
+        continue;
+      }
+      let title = slug;
+      try {
+        const indexName = files.includes("index.html") ? "index.html" : "index.htm";
+        const html = await fs.readFile(path.join(root, indexName), "utf8");
+        title = extractTitle(html, slug) || slug;
+      } catch {
+        title = slug;
+      }
+      publications.push({
+        slug,
+        title,
+        files,
+        publicUrl: baseUrl ? joinUrl(baseUrl, `/p/${encodeURIComponent(slug)}/`) : "",
+        updatedAt: nowIso()
+      });
+    }
+
+    publications.sort((a, b) => a.slug.localeCompare(b.slug));
+    return {
+      version: 1,
+      generatedAt: nowIso(),
+      baseUrl,
+      publications
+    };
+  }
+
+  async function ensureSiteRoot(pagesConfig = {}) {
     await fs.mkdir(siteRoot, { recursive: true });
     await fs.rm(path.join(siteRoot, "index.html"), { force: true });
     await fs.writeFile(path.join(siteRoot, "404.html"), "<!doctype html><title>Not found</title>", "utf8");
@@ -1573,14 +1843,14 @@ export function createCloudflarePagesPublisher({
       await fs.rm(redirectsPath, { force: true });
     }
 
-    await writeAuthAssets();
+    await writeAuthAssets(pagesConfig);
   }
 
   // (Re)generate the edge gate on every deploy. When any publication needs one —
   // password-protected and/or expiring — write functions/_middleware.js (the
   // gate + baked manifest) and a _routes.json scoping the Function to those
   // prefixes only. When none need it, remove both so the site stays pure-static.
-  async function writeAuthAssets() {
+  async function writeAuthAssets(pagesConfig = {}) {
     const manifest = (getProtectedPublications() || []).filter(
       (entry) =>
         entry &&
@@ -1590,8 +1860,11 @@ export function createCloudflarePagesPublisher({
     const functionsDir = path.join(siteRoot, "functions");
     const middlewarePath = path.join(functionsDir, "_middleware.js");
     const routesPath = path.join(siteRoot, "_routes.json");
+    const syncToken = String(getSyncToken() || "");
+    const syncManifest = syncToken ? await buildSyncManifest(pagesConfig) : null;
+    const includeSyncEndpoint = Boolean(syncToken && syncManifest?.publications?.length);
 
-    if (manifest.length === 0) {
+    if (manifest.length === 0 && !includeSyncEndpoint) {
       await fs.rm(functionsDir, { recursive: true, force: true });
       await fs.rm(routesPath, { force: true });
       return;
@@ -1600,10 +1873,19 @@ export function createCloudflarePagesPublisher({
     await fs.mkdir(functionsDir, { recursive: true });
     await fs.writeFile(
       middlewarePath,
-      renderAuthMiddleware(manifest, { cookieSecret: getAuthCookieSecret() || "", badge: getBadge() }),
+      renderAuthMiddleware(manifest, {
+        cookieSecret: getAuthCookieSecret() || "",
+        badge: getBadge(),
+        syncToken,
+        syncManifest
+      }),
       "utf8"
     );
-    await fs.writeFile(routesPath, renderRoutesJson(manifest.map((entry) => entry.slug)), "utf8");
+    await fs.writeFile(
+      routesPath,
+      renderRoutesJson(manifest.map((entry) => entry.slug), { includeSyncEndpoint }),
+      "utf8"
+    );
   }
 
   async function stagePublication(report, publication, { pagesBaseUrl = "" } = {}) {
@@ -1702,7 +1984,7 @@ export function createCloudflarePagesPublisher({
   }
 
   async function deploy(pagesConfig) {
-    await ensureSiteRoot();
+    await ensureSiteRoot(pagesConfig);
     const result = await runPagesDeploy(siteRoot, pagesConfig, DEFAULT_PAGES_BRANCH);
     return result.baseUrl;
   }
@@ -1727,7 +2009,7 @@ export function createCloudflarePagesPublisher({
 
   async function publish({ report, publication, pagesConfig }) {
     const slug = publication.slug || publication.token;
-    await ensureSiteRoot();
+    await ensureSiteRoot(pagesConfig);
     await stagePublication(report, publication, { pagesBaseUrl: pagesConfig?.baseUrl });
     try {
       const baseUrl = await deploy(pagesConfig);
@@ -1743,7 +2025,7 @@ export function createCloudflarePagesPublisher({
   // the last known-good content stays live.
   async function syncPublication({ report, publication, pagesConfig }) {
     const slug = publication.slug || publication.token;
-    await ensureSiteRoot();
+    await ensureSiteRoot(pagesConfig);
     await stagePublication(report, publication, { pagesBaseUrl: pagesConfig?.baseUrl });
     const baseUrl = await deploy(pagesConfig);
     return joinUrl(baseUrl, `/p/${encodeURIComponent(slug)}/`);
@@ -1752,33 +2034,111 @@ export function createCloudflarePagesPublisher({
   // Move a publication's staged content from oldSlug to newSlug and redeploy,
   // returning the new public URL.
   async function renamePublication({ oldSlug, newSlug, report, publication, pagesConfig }) {
-    await ensureSiteRoot();
+    await ensureSiteRoot(pagesConfig);
     await stagePublication(report, { ...publication, slug: newSlug }, { pagesBaseUrl: pagesConfig?.baseUrl });
     if (oldSlug && oldSlug !== newSlug) {
       await removePublication(oldSlug);
     }
-    const baseUrl = await deploy(pagesConfig);
-    return joinUrl(baseUrl, `/p/${encodeURIComponent(newSlug)}/`);
+    try {
+      const baseUrl = await deploy(pagesConfig);
+      return joinUrl(baseUrl, `/p/${encodeURIComponent(newSlug)}/`);
+    } catch (error) {
+      if (oldSlug && oldSlug !== newSlug) {
+        await removePublication(newSlug).catch(() => {});
+        await stagePublication(report, { ...publication, slug: oldSlug }, { pagesBaseUrl: pagesConfig?.baseUrl })
+          .catch(() => {});
+      }
+      throw error;
+    }
   }
 
   async function revoke(slugs, pagesConfig) {
-    await ensureSiteRoot();
+    await ensureSiteRoot(pagesConfig);
     for (const slug of slugs) {
       await removePublication(slug);
     }
     return deploy(pagesConfig);
   }
 
+  async function discoverPublishedPages({ pagesConfig = {}, syncToken = "" } = {}) {
+    const baseUrl = pagesConfig?.baseUrl || pagesBaseUrl(pagesConfig?.projectName || DEFAULT_PAGES_PROJECT_NAME);
+    const records = new Map();
+    const warnings = [];
+    let remoteManifestFound = false;
+
+    if (baseUrl && syncToken) {
+      const manifestUrl = joinUrl(
+        baseUrl,
+        `${PAGECAST_SYNC_MANIFEST_PATH}?token=${encodeURIComponent(syncToken)}`
+      );
+      try {
+        const response = await fetchWithTimeout(
+          fetchImpl,
+          manifestUrl,
+          { headers: { Accept: "application/json" } }
+        );
+        if (response.ok) {
+          const contentType = response.headers.get("content-type") || "";
+          if (!contentType.includes("application/json")) {
+            remoteManifestFound = false;
+          } else {
+            const manifest = await response.json();
+            const remoteBaseUrl = String(manifest?.baseUrl || baseUrl);
+            for (const item of manifest?.publications || []) {
+              const record = normalizeSyncRecord(item, {
+                baseUrl: remoteBaseUrl,
+                source: "cloudflare"
+              });
+              if (record) {
+                records.set(record.slug, record);
+              }
+            }
+            remoteManifestFound = true;
+          }
+        } else if (response.status !== 404) {
+          warnings.push(`Cloudflare sync manifest returned ${response.status}.`);
+        }
+      } catch (error) {
+        warnings.push(`Cloudflare sync manifest could not be read: ${error.message || error}.`);
+      }
+    }
+
+    const localManifest = await buildSyncManifest(pagesConfig);
+    for (const item of localManifest.publications) {
+      const record = normalizeSyncRecord(item, {
+        baseUrl: localManifest.baseUrl,
+        source: "local-staged"
+      });
+      if (record) {
+        records.set(record.slug, {
+          ...records.get(record.slug),
+          ...record,
+          sourceRoot: publicationDir(record.slug),
+          source: records.has(record.slug) ? "cloudflare+local-staged" : "local-staged"
+        });
+      }
+    }
+
+    return {
+      publications: [...records.values()].sort((a, b) => a.slug.localeCompare(b.slug)),
+      warnings,
+      remoteManifestFound
+    };
+  }
+
   return {
     siteRoot,
     deployRoot,
+    fetchImpl,
     publish,
     syncPublication,
     renamePublication,
     revoke,
     deploySite,
     publicationDir,
-    publishSourceFor
+    publishSourceFor,
+    discoverPublishedPages,
+    buildSyncManifest
   };
 }
 
@@ -1816,10 +2176,12 @@ export function createWatchManager({
     }
     for (const publication of snapshots) {
       try {
+        const pagesConfig = pagesConfigForPublication(publication, configStore.get().pages);
+        rememberPublicationPagesTarget(publication, pagesConfig);
         await pagesPublisher.syncPublication({
           report,
           publication,
-          pagesConfig: configStore.get().pages
+          pagesConfig
         });
         await store.syncSnapshot(publication.token);
       } catch (error) {
@@ -2228,6 +2590,7 @@ export function createReportStore({
 } = {}) {
   const statePath = path.join(dataDir, "reports.json");
   const uploadRoot = path.join(dataDir, "uploads");
+  const importRoot = path.join(dataDir, "imports");
   const workingRoot = path.join(dataDir, "working");
   const reports = new Map();
   let redirects = [];
@@ -2245,6 +2608,10 @@ export function createReportStore({
       // slug). Legacy publications default to false (treated as private).
       drop: publication.drop === true,
       publicUrl: kind === "snapshot" ? publication.publicUrl || null : null,
+      pagesProjectName: normalizePagesProjectNameSafe(publication.pagesProjectName),
+      pagesAccountId: normalizeAccountIdSafe(publication.pagesAccountId),
+      pagesAccountName: normalizeAccountName(publication.pagesAccountName || ""),
+      pagesBaseUrl: publication.pagesBaseUrl ? stripTrailingSlash(publication.pagesBaseUrl) : "",
       revokedAt: publication.revokedAt || null,
       updatedAt: publication.updatedAt || publication.createdAt
     };
@@ -2278,6 +2645,7 @@ export function createReportStore({
       // unprotected rather than deploying a broken gate.
       passwordProtected: report.passwordProtected === true && isValidPasswordHash(report.passwordHash),
       passwordHash: isValidPasswordHash(report.passwordHash) ? report.passwordHash : null,
+      importedFromCloudflare: report.importedFromCloudflare === true,
       publications: Array.isArray(report.publications)
         ? report.publications.map(normalizePublication)
         : []
@@ -2300,6 +2668,7 @@ export function createReportStore({
 
   async function init() {
     await fs.mkdir(uploadRoot, { recursive: true });
+    await fs.mkdir(importRoot, { recursive: true });
     await fs.mkdir(workingRoot, { recursive: true });
     if (!(await pathExists(statePath))) {
       await save();
@@ -2431,6 +2800,7 @@ export function createReportStore({
       // Only the boolean is exposed; report.passwordHash (salt + hash) is a
       // server-side secret and is intentionally never serialized to the API.
       passwordProtected: report.passwordProtected === true,
+      importedFromCloudflare: report.importedFromCloudflare === true,
       createdAt: report.createdAt,
       updatedAt: report.updatedAt,
       localUrl: adminBaseUrl ? joinUrl(adminBaseUrl, previewSuffix) : null,
@@ -2710,7 +3080,10 @@ export function createReportStore({
     }
 
     reports.delete(id);
-    if (report.kind === "upload" || (report.kind === "folder" && isPathInside(uploadRoot, report.rootDir))) {
+    if (
+      report.kind === "upload" ||
+      (report.kind === "folder" && (isPathInside(uploadRoot, report.rootDir) || isPathInside(importRoot, report.rootDir)))
+    ) {
       await fs.rm(report.rootDir, { recursive: true, force: true });
     }
     if (report.workingDir && isPathInside(workingRoot, report.workingDir)) {
@@ -2798,6 +3171,172 @@ export function createReportStore({
 
   function get(id) {
     return reports.get(id) || null;
+  }
+
+  async function copyRemotePublicationFiles({ slug, files, destinationRoot, baseUrl, fetchImpl = fetch } = {}) {
+    if (!baseUrl) {
+      throw appError("Cloudflare Pages base URL is required to import this link.", 400);
+    }
+    const fileList = Array.isArray(files) && files.length > 0 ? files : ["index.html"];
+    if (fileList.length > MAX_SYNC_IMPORT_FILES) {
+      throw appError(`Synced page includes more than ${MAX_SYNC_IMPORT_FILES} files.`, 413);
+    }
+
+    await fs.rm(destinationRoot, { recursive: true, force: true });
+    await fs.mkdir(destinationRoot, { recursive: true });
+    let totalBytes = 0;
+    for (const file of fileList) {
+      const relativePath = normalizeAssetRequestPath(file);
+      if (!relativePath) {
+        throw appError("Synced page includes an unsafe file path.", 400);
+      }
+      const urlPath = relativePath
+        .split(path.sep)
+        .map((segment) => encodeURIComponent(segment))
+        .join("/");
+      const assetUrl = joinUrl(baseUrl, `/p/${encodeURIComponent(slug)}/${urlPath}`);
+      const response = await fetchWithTimeout(fetchImpl, assetUrl);
+      if (!response.ok) {
+        throw appError(`Could not import ${relativePath} from Cloudflare (${response.status}).`, 502);
+      }
+      const lengthHeader = response.headers.get("content-length");
+      const contentLength = /^\d+$/.test(lengthHeader || "") ? Number(lengthHeader) : null;
+      if (contentLength !== null && contentLength > MAX_SYNC_IMPORT_FILE_BYTES) {
+        throw appError("Synced page includes a file that is too large.", 413);
+      }
+      if (contentLength !== null && totalBytes + contentLength > MAX_SYNC_IMPORT_BYTES) {
+        throw appError("Synced page is too large.", 413);
+      }
+      const content = Buffer.from(await response.arrayBuffer());
+      if (content.length > MAX_SYNC_IMPORT_FILE_BYTES) {
+        throw appError("Synced page includes a file that is too large.", 413);
+      }
+      totalBytes += content.length;
+      if (totalBytes > MAX_SYNC_IMPORT_BYTES) {
+        throw appError("Synced page is too large.", 413);
+      }
+      const destinationPath = path.resolve(destinationRoot, relativePath);
+      if (!isPathInside(destinationRoot, destinationPath)) {
+        throw appError("Synced page includes an unsafe file path.", 400);
+      }
+      await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+      await fs.writeFile(destinationPath, content);
+    }
+  }
+
+  async function importPublishedPage(record, { pagesBaseUrl = "", fetchImpl = fetch } = {}) {
+    const normalized = normalizeSyncRecord(record, {
+      baseUrl: pagesBaseUrl,
+      source: record?.source || "cloudflare"
+    });
+    if (!normalized) {
+      throw appError("Synced page record is invalid.", 400);
+    }
+    if (findActivePublicationBySlug(normalized.slug)) {
+      return { imported: false, slug: normalized.slug, reason: "already-present" };
+    }
+
+    const reportDir = path.join(importRoot, normalized.slug);
+    if (record?.sourceRoot) {
+      await copyPublicTree(record.sourceRoot, reportDir);
+    } else {
+      await copyRemotePublicationFiles({
+        slug: normalized.slug,
+        files: normalized.files,
+        destinationRoot: reportDir,
+        baseUrl: normalized.baseUrl || pagesBaseUrl,
+        fetchImpl
+      });
+    }
+
+    const entryFile = await findFolderEntry(reportDir);
+    const createdAt = normalized.createdAt;
+    const updatedAt = normalized.updatedAt || createdAt;
+    let title = normalized.title || normalized.slug;
+    try {
+      const html = await fs.readFile(path.join(reportDir, entryFile), "utf8");
+      title = extractTitle(html, title) || title;
+    } catch {
+      // Keep the manifest title if the entry is not readable as text.
+    }
+
+    const id = createReportId(`cloudflare-${normalized.slug}`);
+    let token = normalized.token || normalized.slug;
+    if (findPublication(token)) {
+      token = `import-${normalized.slug}-${randomBytes(4).toString("hex")}`;
+    }
+    const publicUrl =
+      normalized.publicUrl ||
+      joinUrl(normalized.baseUrl || pagesBaseUrl, `/p/${encodeURIComponent(normalized.slug)}/`);
+    const pagesProjectName = pagesProjectNameFromPublicUrl(publicUrl);
+    const publication = {
+      token,
+      slug: normalized.slug,
+      label: normalized.label || "imported",
+      kind: "snapshot",
+      drop: false,
+      publicUrl,
+      pagesProjectName,
+      pagesAccountId: "",
+      pagesAccountName: "",
+      pagesBaseUrl: pagesProjectName
+        ? `https://${pagesProjectName}.pages.dev`
+        : publicUrlOrigin(publicUrl),
+      createdAt,
+      updatedAt,
+      revokedAt: null,
+      expiresAt: null
+    };
+    const report = {
+      id,
+      kind: "folder",
+      name: title,
+      sourcePath: null,
+      rootDir: reportDir,
+      entryFile,
+      order: reports.size,
+      autoSync: false,
+      workingDir: null,
+      sourceMode: "edited-in-pagecast",
+      importedFromCloudflare: true,
+      buildCommand: "",
+      buildOutputDir: "",
+      buildOutputRoot: null,
+      buildStatus: "ready",
+      buildError: "",
+      lastBuildAt: null,
+      passwordProtected: false,
+      passwordHash: null,
+      createdAt,
+      updatedAt,
+      publications: [publication]
+    };
+
+    reports.set(report.id, report);
+    await save();
+    return { imported: true, slug: normalized.slug, reason: "imported", report };
+  }
+
+  async function importPublishedPages(records, options = {}) {
+    const imported = [];
+    const skipped = [];
+    const failed = [];
+    for (const record of records || []) {
+      try {
+        const result = await importPublishedPage(record, options);
+        if (result.imported) {
+          imported.push(formatReport(result.report, options));
+        } else {
+          skipped.push({ slug: result.slug, reason: result.reason });
+        }
+      } catch (error) {
+        failed.push({
+          slug: String(record?.slug || ""),
+          error: error.message || String(error)
+        });
+      }
+    }
+    return { imported, skipped, failed };
   }
 
   function findPublication(token) {
@@ -2986,6 +3525,30 @@ export function createReportStore({
     addRedirect(`/p/${oldSlug}/`, `/p/${newSlug}/`);
     await save();
     return { ...match, oldSlug, newSlug };
+  }
+
+  async function restorePublicationSlug(token, previous) {
+    const match = findPublication(token);
+    if (!match) {
+      return null;
+    }
+    const oldSlug = previous?.slug || match.publication.token;
+    const failedSlug = match.publication.slug || match.publication.token;
+    match.publication.slug = oldSlug;
+    match.publication.publicUrl =
+      previous && Object.hasOwn(previous, "publicUrl") ? previous.publicUrl : match.publication.publicUrl;
+    match.publication.updatedAt = previous?.publicationUpdatedAt || match.publication.updatedAt;
+    match.report.updatedAt = previous?.reportUpdatedAt || match.report.updatedAt;
+    redirects = redirects.filter((entry) => {
+      const from = `/p/${oldSlug}/`;
+      const to = `/p/${failedSlug}/`;
+      return !(entry.from === from && entry.to === to);
+    });
+    if (Array.isArray(previous?.redirects)) {
+      redirects = previous.redirects.map((entry) => ({ from: entry.from, to: entry.to }));
+    }
+    await save();
+    return match;
   }
 
   async function resolveAsset(id, rawAssetPath = "") {
@@ -3286,6 +3849,8 @@ export function createReportStore({
     draftPublication,
     commitPublication,
     publish,
+    importPublishedPage,
+    importPublishedPages,
     findPublication,
     findActivePublication,
     findActivePublicationBySlug,
@@ -3296,6 +3861,7 @@ export function createReportStore({
     revokeAll,
     syncSnapshot,
     renameSlug,
+    restorePublicationSlug,
     detachToWorkingCopy,
     readContent,
     writeContent,
@@ -3815,12 +4381,6 @@ function reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl }) {
   };
 }
 
-function activeSnapshotSlugs(report) {
-  return (report.publications || [])
-    .filter((publication) => !publication.revokedAt && publication.kind === "snapshot")
-    .map((publication) => publication.slug || publication.token);
-}
-
 async function detectAndPersistCloudflareProjects({ cloudflareAuth, configStore }) {
   const currentConfig = configStore.getPublicConfig();
   const projects = await cloudflareAuth.listProjects({
@@ -4046,7 +4606,7 @@ export function isLoopbackHostHeader(hostHeader, bindHost) {
     }
   }
   hostname = hostname.toLowerCase();
-  if (hostname === "localhost" || hostname === "::1") {
+  if (hostname === "localhost" || hostname === DEFAULT_LOCAL_HOSTNAME || hostname === "::1") {
     return true;
   }
   // The entire 127.0.0.0/8 block is loopback.
@@ -4188,6 +4748,52 @@ async function handleApi(
 ) {
   const options = reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl });
 
+  async function syncSnapshotPublication({ report, publication }) {
+    await deployQueue.enqueue(async () => {
+      const currentPages = configStore.get().pages;
+      let pagesConfig = pagesConfigForPublication(publication, currentPages);
+      rememberPublicationPagesTarget(publication, pagesConfig);
+      try {
+        publication.publicUrl = await pagesPublisher.syncPublication({
+          report,
+          publication,
+          pagesConfig
+        });
+      } catch (error) {
+        const stillCurrentProject =
+          pagesConfig.projectName === currentPages.projectName &&
+          stripTrailingSlash(pagesConfig.baseUrl) === stripTrailingSlash(currentPages.baseUrl);
+        if (!stillCurrentProject || !isProvisionablePagesError(error)) {
+          throw error;
+        }
+        await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
+        pagesConfig = pagesConfigForPublication(publication, configStore.get().pages);
+        rememberPublicationPagesTarget(publication, pagesConfig);
+        publication.publicUrl = await pagesPublisher.syncPublication({
+          report,
+          publication,
+          pagesConfig
+        });
+      }
+    });
+    return store.syncSnapshot(publication.token);
+  }
+
+  async function revokeSnapshotPublications(publications) {
+    for (const publication of publications) {
+      if (publication.revokedAt || publication.kind !== "snapshot") {
+        continue;
+      }
+      const slug = publication.slug || publication.token;
+      try {
+        const pagesConfig = pagesConfigForPublication(publication, configStore.get().pages);
+        await deployQueue.enqueue(() => pagesPublisher.revoke([slug], pagesConfig));
+      } catch (error) {
+        console.warn(`Pagecast could not revoke ${slug} from Cloudflare: ${error?.message || error}`);
+      }
+    }
+  }
+
   if (url.pathname === "/api/status" && req.method === "GET") {
     const credential = cloudflareCredentialStatus();
     let session;
@@ -4258,6 +4864,13 @@ async function handleApi(
       parseDuration(value);
     }
     await configStore.setDefaultExpiry(value);
+    sendJson(res, 200, { config: configStore.getPublicConfig() });
+    return;
+  }
+
+  if (url.pathname === "/api/config/cloudflare-sync" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    await configStore.setCloudflareSyncEnabled(body.enabled !== false);
     sendJson(res, 200, { config: configStore.getPublicConfig() });
     return;
   }
@@ -4488,6 +5101,38 @@ async function handleApi(
     return;
   }
 
+  if (url.pathname === "/api/cloudflare/sync" && req.method === "POST") {
+    await readJsonBody(req);
+    const pages = configStore.get().pages;
+    if (!pages.projectName || !pages.baseUrl) {
+      throw appError("No Cloudflare Pages project is configured.", 400);
+    }
+    const { discovery, result } = await deployQueue.enqueue(async () => {
+      const currentConfig = configStore.get();
+      const discovery = await pagesPublisher.discoverPublishedPages({
+        pagesConfig: pages,
+        syncToken: currentConfig.syncSecret || ""
+      });
+      const result = await store.importPublishedPages(discovery.publications, {
+        ...options,
+        pagesBaseUrl: pages.baseUrl,
+        fetchImpl: pagesPublisher.fetchImpl
+      });
+      return { discovery, result };
+    });
+    sendJson(res, 200, {
+      imported: result.imported,
+      importedCount: result.imported.length,
+      skipped: result.skipped,
+      skippedCount: result.skipped.length,
+      failed: result.failed,
+      warnings: discovery.warnings,
+      remoteManifestFound: discovery.remoteManifestFound,
+      reports: store.list(options)
+    });
+    return;
+  }
+
   if (url.pathname === "/api/reports" && req.method === "GET") {
     sendJson(res, 200, { reports: store.list(options) });
     return;
@@ -4567,12 +5212,15 @@ async function handleApi(
     if (gated) {
       await store.commitPublication(id, draft.publication);
     }
-    const deployOnce = () =>
-      (gated ? pagesPublisher.syncPublication : pagesPublisher.publish)({
+    const deployOnce = () => {
+      const pagesConfig = configStore.get().pages;
+      rememberPublicationPagesTarget(draft.publication, pagesConfig);
+      return (gated ? pagesPublisher.syncPublication : pagesPublisher.publish)({
         report: store.get(id),
         publication: draft.publication,
-        pagesConfig: configStore.get().pages
+        pagesConfig
       });
+    };
     try {
       await deployQueue.enqueue(async () => {
         try {
@@ -4581,12 +5229,7 @@ async function handleApi(
           // Self-provision and retry once when the failure is a missing Pages
           // project or account, so a snapshot can publish without first visiting
           // the Cloudflare panel.
-          const message = stripAnsi(error.message || "");
-          const provisionable =
-            /project.*not.*found|could not find.*project|does not exist|no such project|account|select an account/i.test(
-              message
-            );
-          if (!provisionable) {
+          if (!isProvisionablePagesError(error)) {
             throw error;
           }
           await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
@@ -4625,12 +5268,7 @@ async function handleApi(
         try {
           await run();
         } catch (error) {
-          const message = stripAnsi(error.message || "");
-          const provisionable =
-            /project.*not.*found|could not find.*project|does not exist|no such project|account|select an account/i.test(
-              message
-            );
-          if (!provisionable) {
+          if (!isProvisionablePagesError(error)) {
             throw error;
           }
           await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
@@ -4649,14 +5287,7 @@ async function handleApi(
     let publication;
     if (latest) {
       const match = store.findActivePublication(latest.token);
-      await deployWith(() =>
-        pagesPublisher.syncPublication({
-          report: match.report,
-          publication: match.publication,
-          pagesConfig: configStore.get().pages
-        })
-      );
-      publication = (await store.syncSnapshot(latest.token)).publication;
+      publication = (await syncSnapshotPublication(match)).publication;
     } else {
       const expiresAt = resolveExpiresAt({ expires: body.expires, defaultExpiry: configStore.get().defaultExpiry });
       const draft = store.draftPublication(report.id, { kind: "snapshot", expiresAt });
@@ -4670,12 +5301,14 @@ async function handleApi(
       }
       try {
         await deployWith(async () => {
+          const pagesConfig = configStore.get().pages;
+          rememberPublicationPagesTarget(draft.publication, pagesConfig);
           draft.publication.publicUrl = await (gated
             ? pagesPublisher.syncPublication
             : pagesPublisher.publish)({
             report: store.get(report.id),
             publication: draft.publication,
-            pagesConfig: configStore.get().pages
+            pagesConfig
           });
         });
       } catch (error) {
@@ -4714,31 +5347,7 @@ async function handleApi(
     if (existing.report.kind === "folder" && existing.report.buildCommand) {
       await store.buildReport(existing.report.id);
     }
-    await deployQueue.enqueue(async () => {
-      try {
-        await pagesPublisher.syncPublication({
-          report: existing.report,
-          publication: existing.publication,
-          pagesConfig: configStore.get().pages
-        });
-      } catch (error) {
-        const message = stripAnsi(error.message || "");
-        const provisionable =
-          /project.*not.*found|could not find.*project|does not exist|no such project|account|select an account/i.test(
-            message
-          );
-        if (!provisionable) {
-          throw error;
-        }
-        await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
-        await pagesPublisher.syncPublication({
-          report: existing.report,
-          publication: existing.publication,
-          pagesConfig: configStore.get().pages
-        });
-      }
-    });
-    const { report, publication } = await store.syncSnapshot(token);
+    const { report, publication } = await syncSnapshotPublication(existing);
     sendJson(res, 200, {
       report: store.formatReport(report, options),
       publication: store.formatPublication(publication, options)
@@ -4768,30 +5377,7 @@ async function handleApi(
     await store.setPublicationExpiry(token, expiresAt);
     // Redeploy so the edge middleware manifest reflects the new expiry.
     try {
-      await deployQueue.enqueue(async () => {
-        try {
-          await pagesPublisher.syncPublication({
-            report: existing.report,
-            publication: existing.publication,
-            pagesConfig: configStore.get().pages
-          });
-        } catch (error) {
-          const message = stripAnsi(error.message || "");
-          const provisionable =
-            /project.*not.*found|could not find.*project|does not exist|no such project|account|select an account/i.test(
-              message
-            );
-          if (!provisionable) {
-            throw error;
-          }
-          await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
-          await pagesPublisher.syncPublication({
-            report: existing.report,
-            publication: existing.publication,
-            pagesConfig: configStore.get().pages
-          });
-        }
-      });
+      await syncSnapshotPublication(existing);
     } catch (error) {
       await store.setPublicationExpiry(token, previousExpiresAt).catch(() => {});
       throw error;
@@ -4812,18 +5398,32 @@ async function handleApi(
     if (!existing) {
       throw appError("Published link was not found.", 404);
     }
+    const previous = {
+      slug: existing.publication.slug || existing.publication.token,
+      publicUrl: existing.publication.publicUrl,
+      publicationUpdatedAt: existing.publication.updatedAt,
+      reportUpdatedAt: existing.report.updatedAt,
+      redirects: store.listRedirects()
+    };
     // Validate + reserve the slug (throws 400/409) before any deploy work.
     const { oldSlug, newSlug } = await store.renameSlug(token, body.slug);
-    if (oldSlug !== newSlug && existing.publication.kind === "snapshot") {
-      await deployQueue.enqueue(() =>
-        pagesPublisher.renamePublication({
-          oldSlug,
-          newSlug,
-          report: existing.report,
-          publication: existing.publication,
-          pagesConfig: configStore.get().pages
-        })
-      );
+    try {
+      if (oldSlug !== newSlug && existing.publication.kind === "snapshot") {
+        await deployQueue.enqueue(() => {
+          const pagesConfig = pagesConfigForPublication(existing.publication, configStore.get().pages);
+          rememberPublicationPagesTarget(existing.publication, pagesConfig);
+          return pagesPublisher.renamePublication({
+            oldSlug,
+            newSlug,
+            report: existing.report,
+            publication: existing.publication,
+            pagesConfig
+          });
+        });
+      }
+    } catch (error) {
+      await store.restorePublicationSlug(token, previous).catch(() => {});
+      throw error;
     }
     const refreshed = store.findPublication(token);
     sendJson(res, 200, {
@@ -4840,12 +5440,7 @@ async function handleApi(
     if (!reportBeforeRevoke) {
       throw appError("Report was not found.", 404);
     }
-    const snapshotSlugs = activeSnapshotSlugs(reportBeforeRevoke);
-    if (snapshotSlugs.length > 0) {
-      await deployQueue.enqueue(() =>
-        pagesPublisher.revoke(snapshotSlugs, configStore.get().pages)
-      );
-    }
+    await revokeSnapshotPublications(reportBeforeRevoke.publications || []);
     const { report, revokedCount } = await store.revokeAll(id);
     sendJson(res, 200, {
       revokedCount,
@@ -4862,12 +5457,7 @@ async function handleApi(
       if (watchManager) {
         watchManager.unregister(id);
       }
-      const snapshotSlugs = activeSnapshotSlugs(reportBeforeDelete);
-      if (snapshotSlugs.length > 0) {
-        await deployQueue.enqueue(() =>
-          pagesPublisher.revoke(snapshotSlugs, configStore.get().pages)
-        );
-      }
+      await revokeSnapshotPublications(reportBeforeDelete.publications || []);
     }
     const removed = await store.remove(id);
     sendJson(res, removed ? 200 : 404, { removed });
@@ -4882,10 +5472,7 @@ async function handleApi(
       throw appError("Published link was not found.", 404);
     }
     if (!existing.publication.revokedAt && existing.publication.kind === "snapshot") {
-      const slug = existing.publication.slug || existing.publication.token;
-      await deployQueue.enqueue(() =>
-        pagesPublisher.revoke([slug], configStore.get().pages)
-      );
+      await revokeSnapshotPublications([existing.publication]);
     }
     const { report, publication } = await store.revokePublication(token);
     sendJson(res, 200, {
@@ -4917,14 +5504,7 @@ async function handleApi(
     // Push the edit live to every active snapshot of this report (same URL).
     const snapshots = store.activeSnapshotPublications(report);
     for (const publication of snapshots) {
-      await deployQueue.enqueue(async () => {
-        await pagesPublisher.syncPublication({
-          report,
-          publication,
-          pagesConfig: configStore.get().pages
-        });
-        await store.syncSnapshot(publication.token);
-      });
+      await syncSnapshotPublication({ report, publication });
     }
     sendJson(res, 200, { report: store.formatReport(store.get(id), options) });
     return;
@@ -4965,31 +5545,7 @@ async function handleApi(
     const snapshots = store.activeSnapshotPublications(report);
     try {
       for (const publication of snapshots) {
-        await deployQueue.enqueue(async () => {
-          try {
-            await pagesPublisher.syncPublication({
-              report,
-              publication,
-              pagesConfig: configStore.get().pages
-            });
-          } catch (error) {
-            const message = stripAnsi(error.message || "");
-            const provisionable =
-              /project.*not.*found|could not find.*project|does not exist|no such project|account|select an account/i.test(
-                message
-              );
-            if (!provisionable) {
-              throw error;
-            }
-            await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
-            await pagesPublisher.syncPublication({
-              report,
-              publication,
-              pagesConfig: configStore.get().pages
-            });
-          }
-          await store.syncSnapshot(publication.token);
-        });
+        await syncSnapshotPublication({ report, publication });
       }
     } catch (error) {
       if (prevPasswordState) {
@@ -5046,14 +5602,31 @@ function closeServer(server) {
   });
 }
 
+function isPortInUse(error) {
+  return error && error.code === "EADDRINUSE";
+}
+
+function localPortCandidates(adminPort, publicPort) {
+  const candidates = [[adminPort, publicPort]];
+  for (let admin = DEFAULT_ADMIN_PORT; admin <= DEFAULT_ADMIN_PORT + 18; admin += 2) {
+    const pair = [admin, admin + 1];
+    if (!candidates.some(([a, p]) => a === pair[0] && p === pair[1])) {
+      candidates.push(pair);
+    }
+  }
+  return candidates;
+}
+
 export async function startServers({
   host = process.env.HOST || DEFAULT_HOST,
-  adminPort = Number(process.env.PORT || DEFAULT_ADMIN_PORT),
-  publicPort = Number(process.env.PUBLIC_PORT || DEFAULT_PUBLIC_PORT),
+  adminPort,
+  publicPort,
+  displayHost,
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   staticDir = path.join(PROJECT_ROOT, "public"),
   spawnImpl = spawn,
   tunnelTimeoutMs = 30000,
+  fetchImpl = fetch,
   cloudflareAuthSpawnImpl = spawn,
   cloudflareLoginTimeoutMs = DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS,
   cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
@@ -5064,6 +5637,19 @@ export async function startServers({
   await store.init();
   const configStore = createConfigStore({ dataDir });
   await configStore.init();
+  const localConfig = configStore.get().local;
+  const explicitAdminPort = adminPort !== undefined || process.env.PORT;
+  const explicitPublicPort = publicPort !== undefined || process.env.PUBLIC_PORT;
+  const resolvedAdminPort = normalizeRuntimePort(
+    adminPort !== undefined ? adminPort : process.env.PORT || localConfig.adminPort,
+    DEFAULT_ADMIN_PORT
+  );
+  const resolvedPublicPort = normalizeRuntimePort(
+    publicPort !== undefined ? publicPort : process.env.PUBLIC_PORT || localConfig.publicPort,
+    DEFAULT_PUBLIC_PORT
+  );
+  const fallbackAllowed = !explicitAdminPort && !explicitPublicPort;
+  const displayHostname = normalizeLocalHostname(displayHost || localConfig.hostname);
   const cloudflareAuth = createCloudflareAuthManager({
     spawnImpl: cloudflareAuthSpawnImpl,
     loginTimeoutMs: cloudflareLoginTimeoutMs,
@@ -5072,12 +5658,14 @@ export async function startServers({
   const pagesPublisher = createCloudflarePagesPublisher({
     dataDir,
     spawnImpl: pagesDeploySpawnImpl,
+    fetchImpl,
     timeoutMs: pagesDeployTimeoutMs,
     getRedirects: () => store.listRedirects(),
     getFeedback: () => configStore.get().feedback,
     getBadge: () => configStore.get().badge,
     getProtectedPublications: () => store.protectedPublicationManifest(),
-    getAuthCookieSecret: () => configStore.get().authCookieSecret
+    getAuthCookieSecret: () => configStore.get().authCookieSecret,
+    getSyncToken: () => configStore.get().syncSecret
   });
   const deployQueue = createDeployQueue();
   const watchManager = createWatchManager({
@@ -5104,69 +5692,99 @@ export async function startServers({
   // `hostForUrl` brackets IPv6 literals (e.g. ::1) so URLs stay well-formed:
   // http://[::1]:4173, not http://::1:4173.
   const urlHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-  const hostForUrl = urlHost.includes(":") ? `[${urlHost}]` : urlHost;
+  const externalUrlHost =
+    urlHost === "127.0.0.1" || urlHost === "::1" ? displayHostname : urlHost;
+  const hostForUrl = externalUrlHost.includes(":") ? `[${externalUrlHost}]` : externalUrlHost;
 
-  const publicServer = createServer(createPublicHandler({ store }));
-  await listen(publicServer, { host, port: publicPort });
-  const actualPublicPort = publicServer.address().port;
-  const localPublicBaseUrl = `http://${hostForUrl}:${actualPublicPort}`;
-  let adminBaseUrl = null;
-  const tunnelManager = new TunnelManager({
-    localUrl: localPublicBaseUrl,
-    spawnImpl,
-    timeoutMs: tunnelTimeoutMs
-  });
+  let lastPortError = null;
+  for (const [candidateAdminPort, candidatePublicPort] of localPortCandidates(resolvedAdminPort, resolvedPublicPort)) {
+    const publicServer = createServer(createPublicHandler({ store }));
+    let actualPublicPort = candidatePublicPort;
+    try {
+      await listen(publicServer, { host, port: candidatePublicPort });
+      actualPublicPort = publicServer.address().port;
+    } catch (error) {
+      await closeServer(publicServer).catch(() => {});
+      if (fallbackAllowed && isPortInUse(error)) {
+        lastPortError = error;
+        continue;
+      }
+      throw error;
+    }
 
-  const adminServer = createServer(
-    createAdminHandler({
+    const localPublicBaseUrl = `http://${hostForUrl}:${actualPublicPort}`;
+    let adminBaseUrl = null;
+    const tunnelManager = new TunnelManager({
+      localUrl: localPublicBaseUrl,
+      spawnImpl,
+      timeoutMs: tunnelTimeoutMs
+    });
+
+    const adminServer = createServer(
+      createAdminHandler({
+        store,
+        configStore,
+        cloudflareAuth,
+        pagesPublisher,
+        staticDir,
+        getAdminBaseUrl: () => adminBaseUrl,
+        getLocalPublicBaseUrl: () => localPublicBaseUrl,
+        tunnelManager,
+        deployQueue,
+        watchManager,
+        bindHost: urlHost
+      })
+    );
+
+    try {
+      await listen(adminServer, { host, port: candidateAdminPort });
+    } catch (error) {
+      await closeServer(publicServer).catch(() => {});
+      if (fallbackAllowed && isPortInUse(error)) {
+        lastPortError = error;
+        continue;
+      }
+      throw error;
+    }
+
+    const actualAdminPort = adminServer.address().port;
+    const adminUrl = `http://${hostForUrl}:${actualAdminPort}`;
+    adminBaseUrl = adminUrl;
+    if (fallbackAllowed) {
+      await configStore.setLocalRuntime({
+        hostname: displayHostname,
+        adminPort: actualAdminPort,
+        publicPort: actualPublicPort
+      });
+    }
+
+    return {
+      adminServer,
+      publicServer,
       store,
       configStore,
       cloudflareAuth,
       pagesPublisher,
-      staticDir,
-      getAdminBaseUrl: () => adminBaseUrl,
-      getLocalPublicBaseUrl: () => localPublicBaseUrl,
       tunnelManager,
       deployQueue,
       watchManager,
-      bindHost: urlHost
-    })
-  );
-
-  try {
-    await listen(adminServer, { host, port: adminPort });
-  } catch (error) {
-    await closeServer(publicServer);
-    throw error;
+      adminUrl,
+      publicUrl: localPublicBaseUrl,
+      async close() {
+        watchManager.closeAll();
+        await tunnelManager.stop();
+        await Promise.all([closeServer(adminServer), closeServer(publicServer)]);
+      }
+    };
   }
 
-  const actualAdminPort = adminServer.address().port;
-  const adminUrl = `http://${hostForUrl}:${actualAdminPort}`;
-  adminBaseUrl = adminUrl;
-
-  return {
-    adminServer,
-    publicServer,
-    store,
-    configStore,
-    cloudflareAuth,
-    pagesPublisher,
-    tunnelManager,
-    deployQueue,
-    watchManager,
-    adminUrl,
-    publicUrl: localPublicBaseUrl,
-    async close() {
-      watchManager.closeAll();
-      await tunnelManager.stop();
-      await Promise.all([closeServer(adminServer), closeServer(publicServer)]);
-    }
-  };
+  throw lastPortError || appError("Could not find an available local Pagecast port.", 500);
 }
 
 async function createHeadlessCloudflareContext({
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   store = null,
+  fetchImpl = fetch,
   cloudflareAuthSpawnImpl = spawn,
   pagesDeploySpawnImpl = spawn,
   cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
@@ -5181,6 +5799,7 @@ async function createHeadlessCloudflareContext({
   const pagesPublisher = createCloudflarePagesPublisher({
     dataDir,
     spawnImpl: pagesDeploySpawnImpl,
+    fetchImpl,
     timeoutMs: pagesDeployTimeoutMs,
     // Headless/CLI publishes (incl. the agent skill's `npx pagecast publish`)
     // must inject the feedback widget too, not just the running app.
@@ -5190,7 +5809,8 @@ async function createHeadlessCloudflareContext({
     // re-deploy regenerates (rather than wipes) the edge gate for protected
     // reports. Site-only deploys (deploySite) pass none and never touch it.
     getProtectedPublications: store ? () => store.protectedPublicationManifest() : () => [],
-    getAuthCookieSecret: () => configStore.get().authCookieSecret
+    getAuthCookieSecret: () => configStore.get().authCookieSecret,
+    getSyncToken: () => configStore.get().syncSecret
   });
   return { configStore, cloudflareAuth, pagesPublisher };
 }
@@ -5669,6 +6289,7 @@ export async function publishReportSnapshot({
   if (store.get(report.id).passwordProtected || draft.publication.expiresAt) {
     await store.commitPublication(report.id, draft.publication);
     try {
+      rememberPublicationPagesTarget(draft.publication, configStore.get().pages);
       draft.publication.publicUrl = await pagesPublisher.syncPublication({
         report: store.get(report.id),
         publication: draft.publication,
@@ -5680,6 +6301,7 @@ export async function publishReportSnapshot({
     }
     await store.syncSnapshot(draft.publication.token);
   } else {
+    rememberPublicationPagesTarget(draft.publication, configStore.get().pages);
     draft.publication.publicUrl = await pagesPublisher.publish({
       report: draft.report,
       publication: draft.publication,

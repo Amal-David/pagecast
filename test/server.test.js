@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1179,7 +1180,7 @@ test("draft reports preview locally and only published versions are public", asy
     assert.equal(addResponse.status, 201);
 
     const addData = await addResponse.json();
-    assert.match(addData.report.localUrl, /^http:\/\/127\.0\.0\.1:\d+\/preview\/.+\/$/);
+    assert.match(addData.report.localUrl, /^http:\/\/pagecast\.localhost:\d+\/preview\/.+\/$/);
     assert.equal(addData.report.publications.length, 0);
 
     const reportResponse = await fetch(addData.report.localUrl);
@@ -2059,6 +2060,197 @@ test("snapshot sync updates the same URL in place without a new publication", as
   }
 });
 
+test("Cloudflare sync imports missing staged Pages links into the dashboard", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    fetchImpl: async (url) => {
+      if (String(url).includes("/__pagecast/manifest.json")) {
+        return new Response("<!doctype html><h1>Pagecast</h1>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" }
+        });
+      }
+      return new Response("Not found.", { status: 404 });
+    }
+  });
+
+  try {
+    await configurePages(runtime.adminUrl);
+    const stagedRoot = path.join(dataDir, "pages-site", "p", "claude-page");
+    await fs.mkdir(stagedRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(stagedRoot, "index.html"),
+      "<!doctype html><title>Claude Page</title><h1>Published elsewhere</h1>",
+      "utf8"
+    );
+    await fs.writeFile(path.join(stagedRoot, "style.css"), "body { color: teal; }", "utf8");
+
+    const response = await fetch(`${runtime.adminUrl}/api/cloudflare/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.importedCount, 1);
+    assert.equal(data.skippedCount, 0);
+    assert.equal(data.remoteManifestFound, false);
+    assert.deepEqual(data.warnings, []);
+    const report = data.reports.find((item) =>
+      item.publications.some((publication) => publication.slug === "claude-page")
+    );
+    assert.ok(report, "synced staged link should appear in reports");
+    assert.equal(report.importedFromCloudflare, true);
+    assert.equal(report.name, "Claude Page");
+    assert.equal(report.publicUrl, "https://team-reports.pages.dev/p/claude-page/");
+    assert.match(await fs.readFile(path.join(dataDir, "imports", "claude-page", "index.html"), "utf8"), /Published elsewhere/);
+
+    const duplicate = await fetch(`${runtime.adminUrl}/api/cloudflare/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    assert.equal(duplicate.status, 200);
+    const duplicateData = await duplicate.json();
+    assert.equal(duplicateData.importedCount, 0);
+    assert.equal(duplicateData.skippedCount, 1);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("Cloudflare sync imports remote manifest links and downloads listed assets", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const fetched = [];
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    fetchImpl: async (url) => {
+      const href = String(url);
+      fetched.push(href);
+      if (href.includes("/__pagecast/manifest.json")) {
+        return new Response(
+          JSON.stringify({
+            version: 1,
+            baseUrl: "https://team-reports.pages.dev",
+            publications: [
+              {
+                slug: "remote-only",
+                title: "Remote Only",
+                files: ["index.html", "style.css"],
+                publicUrl: "https://team-reports.pages.dev/p/remote-only/"
+              }
+            ]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (href.endsWith("/p/remote-only/index.html")) {
+        return new Response("<!doctype html><title>Remote Only</title><h1>Remote</h1>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" }
+        });
+      }
+      if (href.endsWith("/p/remote-only/style.css")) {
+        return new Response("body { color: purple; }", {
+          status: 200,
+          headers: { "Content-Type": "text/css" }
+        });
+      }
+      return new Response("Not found.", { status: 404 });
+    }
+  });
+
+  try {
+    await configurePages(runtime.adminUrl);
+    const response = await fetch(`${runtime.adminUrl}/api/cloudflare/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.remoteManifestFound, true);
+    assert.equal(data.importedCount, 1);
+    assert.ok(fetched.some((href) => href.includes("/__pagecast/manifest.json?token=")));
+    assert.ok(fetched.some((href) => href.endsWith("/p/remote-only/style.css")));
+    const report = data.imported[0];
+    assert.equal(report.importedFromCloudflare, true);
+    assert.equal(report.publicUrl, "https://team-reports.pages.dev/p/remote-only/");
+    assert.match(await fs.readFile(path.join(dataDir, "imports", "remote-only", "style.css"), "utf8"), /purple/);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("Cloudflare sync rejects oversized remote assets before buffering", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  let oversizedBuffered = false;
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    fetchImpl: async (url) => {
+      const href = String(url);
+      if (href.includes("/__pagecast/manifest.json")) {
+        return new Response(
+          JSON.stringify({
+            version: 1,
+            baseUrl: "https://team-reports.pages.dev",
+            publications: [
+              {
+                slug: "oversized-remote",
+                title: "Oversized Remote",
+                files: ["index.html"],
+                publicUrl: "https://team-reports.pages.dev/p/oversized-remote/"
+              }
+            ]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (href.endsWith("/p/oversized-remote/index.html")) {
+        const response = new Response("<!doctype html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html", "Content-Length": `${25 * 1024 * 1024 + 1}` }
+        });
+        response.arrayBuffer = async () => {
+          oversizedBuffered = true;
+          return new ArrayBuffer(0);
+        };
+        return response;
+      }
+      return new Response("Not found.", { status: 404 });
+    }
+  });
+
+  try {
+    await configurePages(runtime.adminUrl);
+    const response = await fetch(`${runtime.adminUrl}/api/cloudflare/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.importedCount, 0);
+    assert.equal(data.failed.length, 1);
+    assert.equal(oversizedBuffered, false);
+  } finally {
+    await runtime.close();
+  }
+});
+
 // --- 1e: custom slug + 301 redirect ---------------------------------------
 
 test("custom slug rename moves the folder, writes a 301 redirect, and validates", async () => {
@@ -2159,6 +2351,164 @@ test("custom slug rename moves the folder, writes a 301 redirect, and validates"
   }
 });
 
+test("custom slug rename rolls back when the publish deploy fails", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportDir = path.join(tempDir, "report");
+  await fs.mkdir(reportDir, { recursive: true });
+  const reportPath = path.join(reportDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>Rename rollback</h1>");
+
+  let deployCount = 0;
+  function fakeDeploy() {
+    deployCount += 1;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.kill = (signal = "SIGTERM") => {
+      child.signalCode = signal;
+      child.emit("exit", null, signal);
+    };
+    setTimeout(() => {
+      if (deployCount === 1) {
+        child.stdout.emit("data", Buffer.from("Cloudflare Pages deploy complete"));
+        child.exitCode = 0;
+        child.emit("exit", 0, null);
+      } else {
+        child.stderr.emit("data", Buffer.from("rename deploy failed"));
+        child.exitCode = 1;
+        child.emit("exit", 1, null);
+      }
+    }, 5);
+    return child;
+  }
+
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    pagesDeploySpawnImpl: fakeDeploy,
+    pagesDeployTimeoutMs: 1000
+  });
+
+  try {
+    await configurePages(runtime.adminUrl);
+    const report = await addPathReport(runtime.adminUrl, reportPath);
+    const publication = await publishSnapshot(runtime.adminUrl, report.id);
+    const oldSlug = publication.slug;
+
+    const renameResponse = await fetch(
+      `${runtime.adminUrl}/api/publications/${publication.token}/slug`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: "should-not-stick" })
+      }
+    );
+    assert.equal(renameResponse.status, 502);
+
+    const reportsResponse = await fetch(`${runtime.adminUrl}/api/reports`);
+    assert.equal(reportsResponse.status, 200);
+    const reportsData = await reportsResponse.json();
+    const refreshed = reportsData.reports.find((item) => item.id === report.id);
+    const refreshedPublication = refreshed.publications.find(
+      (item) => item.token === publication.token
+    );
+    assert.equal(refreshedPublication.slug, oldSlug);
+    assert.equal(refreshedPublication.publicUrl, publication.publicUrl);
+
+    const oldUrlResponse = await fetch(`${runtime.publicUrl}/p/${oldSlug}/`);
+    assert.equal(oldUrlResponse.status, 200);
+    assert.match(await oldUrlResponse.text(), /Rename rollback/);
+    const newUrlResponse = await fetch(`${runtime.publicUrl}/p/should-not-stick/`);
+    assert.equal(newUrlResponse.status, 404);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("custom slug rename rollback restores redirect-chain rewrites", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportDir = path.join(tempDir, "report");
+  await fs.mkdir(reportDir, { recursive: true });
+  const reportPath = path.join(reportDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>Redirect rollback</h1>");
+
+  let deployCount = 0;
+  function fakeDeploy() {
+    deployCount += 1;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.kill = (signal = "SIGTERM") => {
+      child.signalCode = signal;
+      child.emit("exit", null, signal);
+    };
+    setTimeout(() => {
+      if (deployCount <= 2) {
+        child.stdout.emit("data", Buffer.from("Cloudflare Pages deploy complete"));
+        child.exitCode = 0;
+        child.emit("exit", 0, null);
+      } else {
+        child.stderr.emit("data", Buffer.from("rename deploy failed"));
+        child.exitCode = 1;
+        child.emit("exit", 1, null);
+      }
+    }, 5);
+    return child;
+  }
+
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    pagesDeploySpawnImpl: fakeDeploy,
+    pagesDeployTimeoutMs: 1000
+  });
+
+  try {
+    await configurePages(runtime.adminUrl);
+    const report = await addPathReport(runtime.adminUrl, reportPath);
+    const publication = await publishSnapshot(runtime.adminUrl, report.id);
+    const oldSlug = publication.slug;
+
+    const firstRename = await fetch(
+      `${runtime.adminUrl}/api/publications/${publication.token}/slug`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: "stable-slug" })
+      }
+    );
+    assert.equal(firstRename.status, 200);
+    assert.deepEqual(runtime.store.listRedirects(), [
+      { from: `/p/${oldSlug}/`, to: "/p/stable-slug/" }
+    ]);
+
+    const secondRename = await fetch(
+      `${runtime.adminUrl}/api/publications/${publication.token}/slug`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: "failed-slug" })
+      }
+    );
+    assert.equal(secondRename.status, 502);
+    assert.deepEqual(runtime.store.listRedirects(), [
+      { from: `/p/${oldSlug}/`, to: "/p/stable-slug/" }
+    ]);
+  } finally {
+    await runtime.close();
+  }
+});
+
 // --- 1f: working copy editor ----------------------------------------------
 
 test("editing a path report writes a working copy and leaves the source untouched", async () => {
@@ -2251,6 +2601,63 @@ test("editing content with an active snapshot pushes the edit live via the same 
 
     const stagedIndex = path.join(dataDir, "pages-site", "p", publication.slug, "index.html");
     assert.match(await fs.readFile(stagedIndex, "utf8"), /v1 edited/);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("editing content syncs older pages.dev links to their own Pages project", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportDir = path.join(tempDir, "report");
+  await fs.mkdir(reportDir, { recursive: true });
+  const reportPath = path.join(reportDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>mixed-0</h1>");
+
+  const { fakeDeploy, state } = makeInstrumentedDeploy();
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    pagesDeploySpawnImpl: fakeDeploy,
+    pagesDeployTimeoutMs: 1000
+  });
+
+  try {
+    await configurePages(runtime.adminUrl, "current-project");
+    const report = await addPathReport(runtime.adminUrl, reportPath);
+    const publication = await publishSnapshot(runtime.adminUrl, report.id);
+    await runtime.store.commitPublication(report.id, {
+      ...publication,
+      token: "legacy-token",
+      slug: "legacy-page",
+      label: "legacy",
+      publicUrl: "https://legacy-project.pages.dev/p/legacy-page/",
+      pagesProjectName: "",
+      pagesBaseUrl: "",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      revokedAt: null,
+      expiresAt: null
+    });
+
+    const putResponse = await fetch(`${runtime.adminUrl}/api/reports/${report.id}/content`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html: "<h1>mixed-1</h1>" })
+    });
+    assert.equal(putResponse.status, 200);
+
+    const deployedProjects = state.args.map((args) => args[args.indexOf("--project-name") + 1]);
+    assert.ok(deployedProjects.includes("current-project"));
+    assert.ok(deployedProjects.includes("legacy-project"));
+
+    const reportsResponse = await fetch(`${runtime.adminUrl}/api/reports`);
+    const reportsData = await reportsResponse.json();
+    const refreshed = reportsData.reports.find((item) => item.id === report.id);
+    const legacy = refreshed.publications.find((item) => item.token === "legacy-token");
+    assert.equal(legacy.publicUrl, "https://legacy-project.pages.dev/p/legacy-page/");
   } finally {
     await runtime.close();
   }
@@ -2718,6 +3125,8 @@ test("isLoopbackHostHeader allows loopback and rejects rebound foreign hosts", (
     "127.0.0.1",
     "localhost:4173",
     "localhost",
+    "pagecast.localhost:4173",
+    "pagecast.localhost",
     "[::1]:4173",
     "::1",
     "127.5.5.5:80",
@@ -2738,6 +3147,45 @@ test("isLoopbackHostHeader allows loopback and rejects rebound foreign hosts", (
   }
   // An explicitly configured bind host is trusted.
   assert.equal(isLoopbackHostHeader("0.0.0.0:4173", "0.0.0.0"), true);
+});
+
+test("startServers falls back from an occupied persisted port and saves the working pair", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-local-ports-"));
+  const blocker = createHttpServer((req, res) => {
+    res.writeHead(200).end("busy");
+  });
+  await new Promise((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+  const blockedPort = blocker.address().port;
+  const configStore = createConfigStore({ dataDir });
+  await configStore.init();
+  await configStore.setLocalRuntime({
+    adminPort: blockedPort,
+    publicPort: blockedPort + 1
+  });
+
+  let runtime;
+  try {
+    runtime = await startServers({
+      dataDir,
+      staticDir: path.resolve("public")
+    });
+    const adminPort = Number(new URL(runtime.adminUrl).port);
+    const publicPort = Number(new URL(runtime.publicUrl).port);
+    assert.notEqual(adminPort, blockedPort);
+    assert.equal(runtime.adminUrl, `http://pagecast.localhost:${adminPort}`);
+    assert.equal(runtime.publicUrl, `http://pagecast.localhost:${publicPort}`);
+
+    const persistedStore = createConfigStore({ dataDir });
+    await persistedStore.init();
+    assert.equal(persistedStore.get().local.adminPort, adminPort);
+    assert.equal(persistedStore.get().local.publicPort, publicPort);
+  } finally {
+    if (runtime) {
+      await runtime.close();
+    }
+    await new Promise((resolve) => blocker.close(resolve));
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
 });
 
 test("admin server rejects requests with a non-loopback Host header (DNS rebinding)", async () => {
@@ -2775,7 +3223,7 @@ test("admin server rejects requests with a non-loopback Host header (DNS rebindi
   }
 });
 
-test("a wildcard bind host (0.0.0.0, e.g. in Docker) yields loopback URLs and does not trust Host: 0.0.0.0", async () => {
+test("a wildcard bind host (0.0.0.0, e.g. in Docker) yields friendly loopback URLs and does not trust Host: 0.0.0.0", async () => {
   const { request } = await import("node:http");
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-wildcard-"));
   const runtime = await startServers({
@@ -2803,8 +3251,8 @@ test("a wildcard bind host (0.0.0.0, e.g. in Docker) yields loopback URLs and do
   try {
     // Client-facing URLs must use a loopback host, never the wildcard bind
     // address (browsers, incl. Chrome 128+, refuse to connect to 0.0.0.0).
-    assert.match(runtime.adminUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
-    assert.match(runtime.publicUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.match(runtime.adminUrl, /^http:\/\/pagecast\.localhost:\d+$/);
+    assert.match(runtime.publicUrl, /^http:\/\/pagecast\.localhost:\d+$/);
     // The wildcard bind must NOT make `Host: 0.0.0.0` a trusted loopback host.
     assert.equal(await callWithHost("0.0.0.0"), 403);
     // Real loopback Hosts still pass.
@@ -2875,6 +3323,72 @@ test("config store persists and clears feedback settings", async () => {
   assert.equal(bad.feedback, null);
 
   await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("Cloudflare auto-sync config defaults on, persists, and survives pages updates", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-sync-cfg-"));
+  const store = createConfigStore({ dataDir: dir });
+  await store.init();
+
+  const fullConfig = store.get();
+  assert.ok(fullConfig.authCookieSecret);
+  assert.ok(fullConfig.syncSecret);
+  assert.notEqual(fullConfig.syncSecret, fullConfig.authCookieSecret);
+  assert.equal(Object.hasOwn(store.getPublicConfig(), "authCookieSecret"), false);
+  assert.equal(Object.hasOwn(store.getPublicConfig(), "syncSecret"), false);
+  assert.equal(store.getPublicConfig().cloudflareSyncEnabled, true);
+
+  await store.setCloudflareSyncEnabled(false);
+  assert.equal(store.getPublicConfig().cloudflareSyncEnabled, false);
+
+  const afterPagesUpdate = await store.updatePages({ projectName: "team-reports" });
+  assert.equal(afterPagesUpdate.cloudflareSyncEnabled, false);
+
+  const reopened = createConfigStore({ dataDir: dir });
+  await reopened.init();
+  assert.equal(reopened.getPublicConfig().cloudflareSyncEnabled, false);
+
+  await reopened.setCloudflareSyncEnabled(true);
+  assert.equal(reopened.getPublicConfig().cloudflareSyncEnabled, true);
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("config API toggles Cloudflare auto-sync for dashboard settings", async () => {
+  const tempDir = await makeTempDir();
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir: path.join(tempDir, "data"),
+    staticDir: path.resolve("public")
+  });
+
+  try {
+    const before = await (await fetch(`${runtime.adminUrl}/api/config`)).json();
+    assert.equal(before.config.cloudflareSyncEnabled, true);
+
+    const offResponse = await fetch(`${runtime.adminUrl}/api/config/cloudflare-sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: false })
+    });
+    assert.equal(offResponse.status, 200);
+    assert.equal((await offResponse.json()).config.cloudflareSyncEnabled, false);
+
+    const persisted = await (await fetch(`${runtime.adminUrl}/api/config`)).json();
+    assert.equal(persisted.config.cloudflareSyncEnabled, false);
+
+    const onResponse = await fetch(`${runtime.adminUrl}/api/config/cloudflare-sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: true })
+    });
+    assert.equal(onResponse.status, 200);
+    assert.equal((await onResponse.json()).config.cloudflareSyncEnabled, true);
+  } finally {
+    await runtime.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("feedback wrangler-output parsers extract ids and urls", () => {

@@ -33,9 +33,39 @@ npx pagecast
 
 This starts the local app and opens the admin UI:
 
-- Admin UI — `http://127.0.0.1:4173`
-- Local published-page preview — `http://127.0.0.1:4174` (same `/p/<slug>/` shape it deploys)
+- Admin UI — `http://pagecast.localhost:4173`
+- Local published-page preview — `http://pagecast.localhost:4174` (same `/p/<slug>/` shape it deploys)
 - Local data/config — `.pagecast/` in the current directory
+
+Want Pagecast waiting in the background instead of keeping a terminal tab open?
+
+```sh
+npx pagecast background start
+npx pagecast open
+```
+
+On macOS, you can also make Pagecast feel like a tiny local app that survives
+login/restart and opens without a visible port:
+
+```sh
+npx pagecast setup-local-url
+```
+
+That installs a local-only `pf` redirect for `http://pagecast.localhost` and a
+user LaunchAgent that keeps the Pagecast server running after login. Pagecast
+still runs internally on its normal port; it does not run the app as root or
+occupy port 80 with a server process. Manage the pieces separately with:
+
+```sh
+npx pagecast local-url status
+npx pagecast local-url remove
+npx pagecast background service status
+npx pagecast background service uninstall
+```
+
+Pagecast remembers the local ports in `.pagecast/config.json`. If 4173/4174 are
+busy the first time it starts, it falls forward to the next available pair and
+keeps using that pair on future launches.
 
 In the admin UI, click **Connect Cloudflare**. Pagecast uses scoped Wrangler
 OAuth (`account:read`, `user:read`, `pages:write`), detects your account, and

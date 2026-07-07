@@ -1,47 +1,29 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
-import {
-  DndContext,
-  KeyboardSensor,
-  PointerSensor,
-  closestCenter,
-  useSensor,
-  useSensors,
-  type DragEndEvent
-} from "@dnd-kit/core";
-import {
-  SortableContext,
-  arrayMove,
-  sortableKeyboardCoordinates,
-  useSortable,
-  verticalListSortingStrategy
-} from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
 import { toast } from "sonner";
 import {
   Activity,
   AlertCircle,
   Check,
   CheckCircle2,
-  ChevronDown,
   Cloud,
+  CloudDownload,
   Copy,
   ExternalLink,
   FileText,
-  GripVertical,
   Link2,
   Loader2,
-  Lock,
+  Monitor,
   MoreHorizontal,
   PanelLeft,
   Pencil,
+  Plus,
   RefreshCw,
+  Search,
   Settings,
-  Settings2,
+  Smartphone,
   Trash2,
-  Upload,
   WifiOff,
-  Zap
 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
@@ -81,9 +63,10 @@ import {
   useDeleteReport,
   usePasswordProtection,
   usePublishSnapshot,
-  useReorder,
   useReports,
   useRevokeAll,
+  useSetCloudflareSyncEnabled,
+  useSyncCloudflarePages,
   useStatus
 } from "@/hooks/use-pagecast";
 import {
@@ -126,6 +109,44 @@ function displayAccountName(cloudflare: CloudflareStatus | undefined) {
   return cloudflare?.loggedIn || cloudflare?.accountId ? "Cloudflare account" : "";
 }
 
+function newestActivePublication(report: Report) {
+  return report.publications
+    .filter((publication) => publication.active)
+    .reduce<Report["publications"][number] | null>((latest, publication) => {
+      if (!latest) return publication;
+      return new Date(publication.updatedAt).getTime() > new Date(latest.updatedAt).getTime()
+        ? publication
+        : latest;
+    }, null);
+}
+
+function publishedSortTime(report: Report) {
+  const publication = newestActivePublication(report);
+  if (!publication) return 0;
+  const time = new Date(publication.updatedAt).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function reportUpdatedSortTime(report: Report) {
+  const time = new Date(report.updatedAt).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function compareSidebarReports(a: Report, b: Report) {
+  const publishedDiff = publishedSortTime(b) - publishedSortTime(a);
+  if (publishedDiff !== 0) return publishedDiff;
+
+  const activeDiff =
+    Number(b.publications.some((publication) => publication.active)) -
+    Number(a.publications.some((publication) => publication.active));
+  if (activeDiff !== 0) return activeDiff;
+
+  const updatedDiff = reportUpdatedSortTime(b) - reportUpdatedSortTime(a);
+  if (updatedDiff !== 0) return updatedDiff;
+
+  return a.name.localeCompare(b.name);
+}
+
 function useElapsed(startedAt: number | null) {
   const [now, setNow] = useState(() => Date.now());
 
@@ -148,6 +169,8 @@ export function App() {
   const build = useBuildReport();
   const deleteReport = useDeleteReport();
   const revokeAll = useRevokeAll();
+  const syncCloudflare = useSyncCloudflarePages();
+  const setCloudflareSyncEnabled = useSetCloudflareSyncEnabled();
 
   const reportItems = useMemo(() => reports.data ?? [], [reports.data]);
   const [activeView, setActiveView] = useState<ActiveView>("pages");
@@ -162,6 +185,7 @@ export function App() {
   const [publishSummary, setPublishSummary] = useState<PublishSummary | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Report | null>(null);
   const [pendingRevoke, setPendingRevoke] = useState<Report | null>(null);
+  const syncPendingRef = useRef(false);
   const elapsedMs = useElapsed(publishStartedAt);
 
   useEffect(() => {
@@ -171,7 +195,7 @@ export function App() {
       return;
     }
     if (!selectedReportId || !reportItems.some((report) => report.id === selectedReportId)) {
-      setSelectedReportId(reportItems[0].id);
+      setSelectedReportId([...reportItems].sort(compareSidebarReports)[0].id);
     }
   }, [reportItems, reports.isLoading, selectedReportId]);
 
@@ -257,19 +281,42 @@ export function App() {
   const cloudflareReady = !status.isLoading && status.data !== undefined;
   const feedback = status.data?.config?.feedback ?? null;
   const feedbackEnabled = Boolean(feedback?.url);
+  const cloudflareSyncEnabled = status.data?.config?.cloudflareSyncEnabled !== false;
+
+  useEffect(() => {
+    syncPendingRef.current = syncCloudflare.isPending;
+  }, [syncCloudflare.isPending]);
+
+  useEffect(() => {
+    if (!connected || !cloudflareSyncEnabled) {
+      return;
+    }
+    const run = () => {
+      if (!syncPendingRef.current) {
+        syncCloudflare.mutate({ automatic: true });
+      }
+    };
+    run();
+    const timer = window.setInterval(run, 120_000);
+    return () => window.clearInterval(timer);
+  }, [cloudflareSyncEnabled, connected, projectName]);
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div className="flex min-h-screen flex-col bg-background">
+      <div className="flex h-screen flex-col overflow-hidden bg-background">
         <TopBar
           connected={connected}
           accountName={accountName}
           projectName={projectName}
           isRefreshing={status.isFetching || reports.isFetching}
+          syncPending={syncCloudflare.isPending}
+          syncDisabled={!connected}
           onRefresh={() => {
             void status.refetch();
             void reports.refetch();
           }}
+          onSync={() => syncCloudflare.mutate({})}
+          onOpenSettings={goToSettings}
         />
 
         {status.isError ? (
@@ -286,19 +333,24 @@ export function App() {
           </div>
         ) : null}
 
-        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)]">
-          <PageSidebar
-            reports={reportItems}
-            selectedReportId={selectedReportId}
-            activeView={activeView}
-            isLoading={reports.isLoading}
-            onSelectReport={selectReport}
-            onOpenSettings={() => setActiveView("settings")}
-            onRequestDelete={setPendingDelete}
-            onRequestRevokeAll={setPendingRevoke}
-          />
+        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[52px_320px_minmax(0,1fr)]">
+          <AppRail activeView={activeView} onPages={() => setActiveView("pages")} onSettings={goToSettings} />
+          {activeView === "settings" ? (
+            <SettingsSidebar />
+          ) : (
+            <PageSidebar
+              reports={reportItems}
+              selectedReportId={selectedReportId}
+              activeView={activeView}
+              isLoading={reports.isLoading}
+              onSelectReport={selectReport}
+              onOpenSettings={() => setActiveView("settings")}
+              onRequestDelete={setPendingDelete}
+              onRequestRevokeAll={setPendingRevoke}
+            />
+          )}
 
-          <main className="min-w-0 bg-muted/20">
+          <main className="min-w-0 overflow-hidden bg-muted/20">
             {activeView === "settings" ? (
                 <motion.div
                   key="settings"
@@ -309,10 +361,14 @@ export function App() {
                 >
                   <SettingsView
                     cloudflare={cloudflare}
-                    activities={activities}
                     connected={connected}
                     feedback={feedback}
                     defaultExpiry={status.data?.config?.defaultExpiry}
+                    cloudflareSyncEnabled={cloudflareSyncEnabled}
+                    cloudflareSyncPending={setCloudflareSyncEnabled.isPending}
+                    onToggleCloudflareSync={(enabled) =>
+                      setCloudflareSyncEnabled.mutate(enabled)
+                    }
                   />
                 </motion.div>
               ) : (
@@ -321,7 +377,7 @@ export function App() {
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.18 }}
-                  className="mx-auto flex max-w-6xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8"
+                  className="mx-auto flex max-w-[1180px] flex-col gap-5 px-4 py-4 sm:px-5 lg:px-6"
                 >
                   <PageWorkspace
                     report={selectedReport}
@@ -333,7 +389,6 @@ export function App() {
                     publishingReportId={publishingReportId}
                     publishElapsedMs={elapsedMs}
                     publishSummary={publishSummary}
-                    activities={activities}
                     feedbackEnabled={feedbackEnabled}
                     autoSyncPending={autoSync.isPending}
                     passwordProtectionPending={passwordProtection.isPending}
@@ -361,6 +416,7 @@ export function App() {
               )}
           </main>
         </div>
+        <ActivityDock activities={activities} />
       </div>
 
       <PreviewDialog
@@ -455,19 +511,27 @@ function TopBar({
   accountName,
   projectName,
   isRefreshing,
-  onRefresh
+  syncPending,
+  syncDisabled,
+  onRefresh,
+  onSync,
+  onOpenSettings
 }: {
   connected: boolean;
   accountName: string;
   projectName: string;
   isRefreshing: boolean;
+  syncPending: boolean;
+  syncDisabled: boolean;
   onRefresh: () => void;
+  onSync: () => void;
+  onOpenSettings: () => void;
 }) {
   return (
-    <header className="sticky top-0 z-30 border-b bg-background/90 backdrop-blur">
-      <div className="flex h-14 items-center justify-between gap-4 px-4 sm:px-6">
+    <header className="z-30 border-b bg-background/95 backdrop-blur">
+      <div className="flex h-14 items-center justify-between gap-4 px-4 sm:px-5">
         <div className="flex min-w-0 items-center gap-3">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
             <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden="true">
               <circle cx="6.5" cy="17.5" r="2.5" fill="currentColor" />
               <path
@@ -480,31 +544,136 @@ function TopBar({
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h1 className="truncate text-sm font-semibold tracking-tight">
+              <h1 className="truncate text-base font-semibold tracking-tight">
                 Pagecast
               </h1>
-              <Badge variant={connected ? "secondary" : "outline"} className="hidden sm:inline-flex">
+              <Badge variant={connected ? "secondary" : "outline"} className="hidden gap-1 sm:inline-flex">
+                {connected ? <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> : null}
                 {connected ? "Connected" : "Not connected"}
               </Badge>
             </div>
-            <p className="truncate text-xs text-muted-foreground">
+            <p className="truncate text-[11px] text-muted-foreground">
               {connected
                 ? `${accountName} / ${projectName}`
                 : "Share pages without setting up hosting"}
             </p>
           </div>
         </div>
-        <Button
-          size="icon"
-          variant="ghost"
-          className="h-8 w-8"
-          onClick={onRefresh}
-          aria-label="Refresh"
-        >
-          <RefreshCw className={cn("h-4 w-4", isRefreshing && "animate-spin")} />
-        </Button>
+        <div className="flex items-center gap-2">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={onSync}
+                disabled={syncDisabled || syncPending}
+                aria-label="Sync published links from Cloudflare"
+              >
+                {syncPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <CloudDownload className="h-4 w-4" />
+                )}
+                Sync
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {syncDisabled ? "Connect Cloudflare first" : "Sync published links from Cloudflare"}
+            </TooltipContent>
+          </Tooltip>
+          <Button
+            size="icon"
+            variant="outline"
+            className="h-9 w-9"
+            onClick={onRefresh}
+            aria-label="Refresh"
+          >
+            <RefreshCw className={cn("h-4 w-4", isRefreshing && "animate-spin")} />
+          </Button>
+          <Button size="sm" variant="outline" onClick={onOpenSettings}>
+            <Settings className="h-4 w-4" />
+            Settings
+          </Button>
+        </div>
       </div>
     </header>
+  );
+}
+
+function AppRail({
+  activeView,
+  onPages,
+  onSettings
+}: {
+  activeView: ActiveView;
+  onPages: () => void;
+  onSettings: () => void;
+}) {
+  return (
+    <aside className="hidden border-r bg-background lg:flex lg:flex-col lg:items-center lg:justify-between lg:py-4">
+      <div className="flex flex-col gap-2">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="icon"
+              variant={activeView === "pages" ? "secondary" : "ghost"}
+              className="h-9 w-9"
+              onClick={onPages}
+              aria-label="Pages"
+            >
+              <FileText className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="right">Pages</TooltipContent>
+        </Tooltip>
+      </div>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            size="icon"
+            variant={activeView === "settings" ? "secondary" : "ghost"}
+            className="h-9 w-9"
+            onClick={onSettings}
+            aria-label="Settings"
+          >
+            <Settings className="h-4 w-4" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="right">Settings</TooltipContent>
+      </Tooltip>
+    </aside>
+  );
+}
+
+function SettingsSidebar() {
+  return (
+    <aside className="hidden min-h-0 border-r bg-background lg:block">
+      <div className="border-b p-4">
+        <div className="flex items-center gap-2">
+          <Settings className="h-4 w-4 text-muted-foreground" />
+          <h2 className="text-sm font-semibold">Settings</h2>
+        </div>
+      </div>
+      <nav className="space-y-1 p-2" aria-label="Settings sections">
+        {[
+          ["Publishing", Cloud],
+          ["Deploy history", RefreshCw],
+          ["Link defaults", Link2],
+          ["Feedback", Activity]
+        ].map(([label, Icon]) => (
+          <div
+            key={label as string}
+            className={cn(
+              "flex items-center gap-2 rounded-md px-3 py-2 text-sm",
+              label === "Publishing" ? "bg-accent font-medium" : "text-muted-foreground"
+            )}
+          >
+            <Icon className="h-4 w-4" />
+            <span>{label as string}</span>
+          </div>
+        ))}
+      </nav>
+    </aside>
   );
 }
 
@@ -527,33 +696,28 @@ function PageSidebar({
   onRequestDelete: (report: Report) => void;
   onRequestRevokeAll: (report: Report) => void;
 }) {
-  // Local mirror for instant drag feedback; react-query is the source of truth
-  // and the optimistic reorder mutation reconciles it.
   const [items, setItems] = useState<Report[]>(reports);
-  const reorder = useReorder();
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<"all" | "published" | "draft" | "mini" | "recovered">("all");
 
   useEffect(() => {
     setItems(reports);
   }, [reports]);
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
-  );
-
-  const handleDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-    if (!over || active.id === over.id) return;
-    const oldIndex = items.findIndex((item) => item.id === active.id);
-    const newIndex = items.findIndex((item) => item.id === over.id);
-    if (oldIndex === -1 || newIndex === -1) return;
-    const next = arrayMove(items, oldIndex, newIndex);
-    setItems(next);
-    reorder.mutate(next.map((item) => item.id));
-  };
+  const displayedItems = items.filter((report) => {
+    const activeCount = report.publications.filter((publication) => publication.active).length;
+    const matchesQuery = report.name.toLowerCase().includes(query.trim().toLowerCase());
+    const matchesFilter =
+      filter === "all" ||
+      (filter === "published" && activeCount > 0) ||
+      (filter === "draft" && activeCount === 0) ||
+      (filter === "mini" && report.kind === "folder") ||
+      (filter === "recovered" && report.importedFromCloudflare);
+    return matchesQuery && matchesFilter;
+  }).sort(compareSidebarReports);
 
   return (
-    <aside className="border-b bg-background lg:border-b-0 lg:border-r">
+    <aside className="min-h-0 border-b bg-background lg:border-b-0 lg:border-r">
       <div className="flex h-full flex-col">
         <div className="border-b p-4">
           <div className="mb-3 flex items-center justify-between">
@@ -563,7 +727,46 @@ function PageSidebar({
             </div>
             <Badge variant="muted">{reports.length}</Badge>
           </div>
-          <AddReport />
+          <div>
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                className="h-9 pl-8"
+                placeholder="Search pages..."
+                aria-label="Search pages"
+              />
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {[
+              ["all", "All"],
+              ["published", "Live"],
+              ["draft", "Draft"],
+              ["mini", "Apps"],
+              ["recovered", "Recovered"]
+            ].map(([value, label]) => (
+              <Button
+                key={value}
+                size="sm"
+                variant={filter === value ? "secondary" : "outline"}
+                className="h-7 rounded-full px-3 text-xs"
+                onClick={() => setFilter(value as typeof filter)}
+              >
+                {label}
+              </Button>
+            ))}
+          </div>
+          <details className="mt-3">
+            <summary className="flex cursor-pointer list-none items-center justify-center gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-900 hover:bg-emerald-100">
+              <Plus className="h-3.5 w-3.5" />
+              Add page
+            </summary>
+            <div className="mt-3">
+              <AddReport />
+            </div>
+          </details>
         </div>
 
         <nav className="max-h-64 min-h-0 flex-1 space-y-1 overflow-y-auto p-2 lg:max-h-none" aria-label="Pages">
@@ -572,42 +775,35 @@ function PageSidebar({
               <Loader2 className="h-4 w-4 animate-spin" />
               Loading pages...
             </div>
-          ) : items.length === 0 ? (
+          ) : displayedItems.length === 0 ? (
             <div className="mx-2 my-6 rounded-lg border border-dashed px-3 py-6 text-center">
               <FileText className="mx-auto h-5 w-5 text-muted-foreground" />
-              <p className="mt-2 text-sm font-medium">No pages yet</p>
+              <p className="mt-2 text-sm font-medium">
+                {items.length === 0 ? "No pages yet" : "No matching pages"}
+              </p>
               <p className="mt-1 text-xs text-muted-foreground">
-                Add an HTML or Markdown file to start.
+                {items.length === 0
+                  ? "Add an HTML or Markdown file to start."
+                  : "Try another search or filter."}
               </p>
             </div>
           ) : (
-            <DndContext
-              sensors={sensors}
-              collisionDetection={closestCenter}
-              onDragEnd={handleDragEnd}
-            >
-              <SortableContext
-                items={items.map((item) => item.id)}
-                strategy={verticalListSortingStrategy}
-              >
-                {items.map((report) => (
-                  <SortablePageRow
-                    key={report.id}
-                    report={report}
-                    isSelected={
-                      activeView === "pages" && selectedReportId === report.id
-                    }
-                    onSelect={onSelectReport}
-                    onRequestDelete={onRequestDelete}
-                    onRequestRevokeAll={onRequestRevokeAll}
-                  />
-                ))}
-              </SortableContext>
-            </DndContext>
+            displayedItems.map((report) => (
+              <PageRow
+                key={report.id}
+                report={report}
+                isSelected={
+                  activeView === "pages" && selectedReportId === report.id
+                }
+                onSelect={onSelectReport}
+                onRequestDelete={onRequestDelete}
+                onRequestRevokeAll={onRequestRevokeAll}
+              />
+            ))
           )}
         </nav>
 
-        <div className="border-t p-2">
+        <div className="border-t p-2 lg:hidden">
           <button
             type="button"
             onClick={onOpenSettings}
@@ -625,7 +821,7 @@ function PageSidebar({
   );
 }
 
-function SortablePageRow({
+function PageRow({
   report,
   isSelected,
   onSelect,
@@ -638,53 +834,50 @@ function SortablePageRow({
   onRequestDelete: (report: Report) => void;
   onRequestRevokeAll: (report: Report) => void;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: report.id });
-  const hasActiveLinks = report.publications.some((p) => p.active);
+  const activeLinkCount = report.publications.filter((publication) => publication.active).length;
+  const hasActiveLinks = activeLinkCount > 0;
+  const stateLabel = hasActiveLinks ? "Live" : "Draft";
+  const detailLabels = [
+    report.importedFromCloudflare ? "Recovered" : "",
+    report.kind === "folder" ? "Mini app" : "",
+    report.kind === "upload" ? "Upload" : "",
+    report.passwordProtected ? "Protected" : ""
+  ].filter(Boolean);
+  const secondaryText = detailLabels.length > 0
+    ? `${stateLabel} · ${detailLabels.join(" · ")}`
+    : stateLabel;
 
   return (
     <div
-      ref={setNodeRef}
-      style={{ transform: CSS.Transform.toString(transform), transition }}
       className={cn(
         "group relative mb-1 flex items-center rounded-md transition-colors hover:bg-accent",
-        isSelected && "bg-accent",
-        isDragging && "z-10 bg-background opacity-80 shadow-md"
+        isSelected && "bg-emerald-50 ring-1 ring-emerald-100"
       )}
     >
       {isSelected ? (
         <motion.span
           layoutId="selected-page-pill"
-          className="absolute left-0 top-2 h-8 w-0.5 rounded-full bg-primary"
+          className="absolute left-0 top-2 h-8 w-0.5 rounded-full bg-emerald-600"
         />
       ) : null}
       <button
         type="button"
-        {...attributes}
-        {...listeners}
-        aria-label={`Reorder ${report.name}`}
-        className="flex h-8 w-5 shrink-0 cursor-grab touch-none items-center justify-center text-muted-foreground/50 opacity-0 transition-opacity hover:text-muted-foreground focus-visible:opacity-100 active:cursor-grabbing group-hover:opacity-100"
-      >
-        <GripVertical className="h-4 w-4" />
-      </button>
-      <button
-        type="button"
         onClick={() => onSelect(report)}
-        className="flex min-w-0 flex-1 items-start gap-2.5 rounded-md py-2 pr-1 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md py-2 pl-6 pr-1 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
-        <FileText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+        <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">{report.name}</span>
           <span className="mt-0.5 flex items-center gap-2 text-[11px] text-muted-foreground">
-            {hasActiveLinks ? "Published" : "Draft"}
-            {report.kind === "upload" ? (
-              <span className="inline-flex items-center gap-1">
-                <Upload className="h-3 w-3" />
-                upload
-              </span>
-            ) : null}
+            <span className="truncate">{secondaryText}</span>
           </span>
         </span>
+        {hasActiveLinks ? (
+          <span className="ml-2 inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+            <Link2 className="h-3 w-3" />
+            {activeLinkCount}
+          </span>
+        ) : null}
       </button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -730,7 +923,6 @@ function PageWorkspace({
   publishingReportId,
   publishElapsedMs,
   publishSummary,
-  activities,
   feedbackEnabled,
   autoSyncPending,
   passwordProtectionPending,
@@ -754,7 +946,6 @@ function PageWorkspace({
   publishingReportId: string | null;
   publishElapsedMs: number;
   publishSummary: PublishSummary | null;
-  activities: ActivityItem[];
   feedbackEnabled: boolean;
   autoSyncPending: boolean;
   passwordProtectionPending: boolean;
@@ -771,7 +962,6 @@ function PageWorkspace({
 }) {
   const [passwordDraftOpen, setPasswordDraftOpen] = useState(false);
   const [passwordDraft, setPasswordDraft] = useState("");
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   // Publish-time choice: a "drop" gets a short, shareable (guessable) link;
   // otherwise the link is long and hard to guess. Default off = private.
   const [publishAsDrop, setPublishAsDrop] = useState(false);
@@ -782,18 +972,17 @@ function PageWorkspace({
   // Collapse the draft whenever the selected report or its protection changes.
   // Also reset the publish-time choices: PageWorkspace is a single persistent
   // instance (not keyed by report id), so without this `publishAsDrop` would
-  // leak across report switches and a later "Publish drop" could mark the wrong
-  // report as a guessable drop.
+  // leak across report switches and a later short-link publish could mark the
+  // wrong report as a guessable drop.
   useEffect(() => {
     setPasswordDraftOpen(false);
     setPasswordDraft("");
     setPublishAsDrop(false);
-    setAdvancedOpen(false);
   }, [reportId, isProtected]);
 
   if (isLoading) {
     return (
-      <div className="flex min-h-[420px] items-center justify-center rounded-lg border bg-background text-sm text-muted-foreground">
+      <div className="flex h-full items-center justify-center bg-background text-sm text-muted-foreground">
         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
         Loading workspace...
       </div>
@@ -802,7 +991,7 @@ function PageWorkspace({
 
   if (!report) {
     return (
-      <div className="flex min-h-[520px] flex-col items-center justify-center rounded-lg border border-dashed bg-background px-6 text-center">
+      <div className="flex h-full flex-col items-center justify-center bg-background px-6 text-center">
         <div className="flex h-11 w-11 items-center justify-center rounded-md bg-muted">
           <FileText className="h-5 w-5 text-muted-foreground" />
         </div>
@@ -826,290 +1015,190 @@ function PageWorkspace({
   const publishBlocked = cloudflareReady && !connected;
 
   return (
-    <>
-      {publishBlocked ? (
-        <div className="flex flex-col gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-start gap-2.5">
-            <Cloud className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-            <p className="text-amber-900">
-              Connect a free Cloudflare account once to turn your pages into public links.
-            </p>
-          </div>
-          <Button size="sm" onClick={onConnect} className="shrink-0">
-            Connect Cloudflare
-          </Button>
-        </div>
-      ) : null}
+    <div className="h-full min-h-0 overflow-y-auto bg-muted/20">
+      <div className="mx-auto flex min-h-full max-w-[1480px] flex-col gap-4 p-5">
+        <PreviewPane
+          report={report}
+          publication={latestSnapshot || activePublications[0] || null}
+          hasActiveLinks={hasActiveLinks}
+          isPublishing={isPublishingThisReport}
+          publishAsDrop={publishAsDrop}
+          publishPending={publishPending}
+          buildPending={buildPending}
+          publishBlocked={publishBlocked}
+          onConnect={onConnect}
+          onEdit={onEdit}
+          onPreview={onPreview}
+          onPublish={onPublish}
+          onRequestDelete={onRequestDelete}
+          onRequestRevokeAll={onRequestRevokeAll}
+        />
 
-      <section className="rounded-lg border bg-background">
-        <div className="flex flex-col gap-4 border-b p-4 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="truncate text-2xl font-semibold tracking-tight">
-                {report.name}
-              </h2>
-              <Badge variant={report.publicUrl ? "secondary" : "outline"}>
-                {hasActiveLinks ? "Published" : "Draft"}
-              </Badge>
-              {report.kind === "upload" ? (
-                <Badge variant="muted" className="gap-1">
-                  <Upload className="h-3 w-3" />
-                  upload
-                </Badge>
-              ) : null}
-              {report.kind === "folder" ? (
-                <Badge variant="muted" className="gap-1">
-                  <FileText className="h-3 w-3" />
-                  mini app
-                </Badge>
-              ) : null}
+        <div className="space-y-4">
+          {publishBlocked ? (
+            <div className="flex flex-col gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-start gap-2.5">
+                <Cloud className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                <p className="text-amber-900">
+                  Connect a free Cloudflare account once to turn your pages into public links.
+                </p>
+              </div>
+              <Button size="sm" onClick={onConnect} className="shrink-0">
+                Connect Cloudflare
+              </Button>
             </div>
-            <p className="mt-1 truncate text-sm text-muted-foreground">
-              {report.sourcePath || "Stored in Pagecast"}
-            </p>
-          </div>
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
-            <Button variant="outline" size="sm" onClick={() => onPreview(report)}>
-              <ExternalLink className="h-4 w-4" />
-              Preview
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => onEdit(report)}>
-              <Pencil className="h-4 w-4" />
-              Edit
-            </Button>
-            {report.kind === "folder" && report.buildCommand ? (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => onBuild(report)}
-                disabled={buildPending}
-              >
-                {buildPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-4 w-4" />
-                )}
-                Build
-              </Button>
-            ) : null}
-            {publishBlocked ? (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button size="sm" onClick={onConnect} variant="secondary">
-                    <Cloud className="h-4 w-4" />
-                    Publish URL
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Connect Cloudflare first</TooltipContent>
-              </Tooltip>
-            ) : (
-              <Button
-                size="sm"
-                onClick={() => onPublish(report, publishAsDrop)}
-                disabled={publishPending || buildPending}
-              >
-                {isPublishingThisReport ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Cloud className="h-4 w-4" />
-                )}
-                {publishAsDrop ? "Publish drop" : "Publish URL"}
-              </Button>
-            )}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button size="icon" variant="outline" className="h-8 w-8" aria-label="More actions">
-                  <MoreHorizontal className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                {hasActiveLinks ? (
-                  <>
-                    <DropdownMenuItem onSelect={() => onRequestRevokeAll(report)}>
-                      <WifiOff className="h-4 w-4" />
-                      Take links offline
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                  </>
-                ) : null}
-                <DropdownMenuItem
-                  onSelect={() => onRequestDelete(report)}
-                  className="text-destructive focus:text-destructive"
+          ) : null}
+
+          <PublishProgress
+            active={isPublishingThisReport}
+            elapsedMs={publishElapsedMs}
+            summary={publishSummary}
+          />
+
+          <section className="rounded-lg border bg-background">
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <h3 className="text-sm font-semibold">Published links</h3>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground">
+                  {activePublications.length} {activePublications.length === 1 ? "link" : "links"}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onPublish(report, publishAsDrop)}
+                  disabled={publishBlocked || publishPending || buildPending}
                 >
-                  <Trash2 className="h-4 w-4" />
-                  Delete page
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </div>
-
-        <div className="grid gap-5 p-4 lg:grid-cols-[minmax(0,1fr)_300px]">
-          <div className="space-y-5">
-            <div className="grid gap-3 md:grid-cols-2">
-              <UrlRow
-                label="Preview URL"
-                value={report.localUrl}
-                icon={ExternalLink}
-              />
-              <UrlRow
-                label="Published URL"
-                value={latestSnapshot?.publicUrl || report.publicUrl}
-                icon={Link2}
-                empty="Not published"
-              />
+                  <Plus className="h-4 w-4" />
+                  New link
+                </Button>
+              </div>
             </div>
+            {activePublications.length > 0 ? (
+              <div className="divide-y">
+                {activePublications.map((publication) => (
+                  <PublicationRow
+                    key={publication.token}
+                    publication={publication}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="px-4 py-10 text-center text-sm text-muted-foreground">
+                No public links yet.
+              </div>
+            )}
+          </section>
 
-            {report.kind === "path" ? (
-              <div className="flex items-center justify-between rounded-lg border bg-muted/20 px-3 py-3">
+          <section className="rounded-lg border bg-background">
+            <div className="border-b px-4 py-3">
+              <h3 className="text-sm font-semibold">Settings</h3>
+            </div>
+            <div className="divide-y">
+              {report.kind === "path" ? (
+                <SettingsRow
+                  label="Auto-sync"
+                  value={report.autoSync ? "Source save" : "Manual"}
+                  control={
+                    <Switch
+                      checked={report.autoSync}
+                      disabled={autoSyncPending}
+                      onCheckedChange={(enabled) => onToggleAutoSync(report, enabled)}
+                      aria-label="Toggle page auto-sync"
+                    />
+                  }
+                />
+              ) : null}
+              <SettingsRow
+                label="Short public link"
+                value={publishAsDrop ? "Easy to share" : "Hard to guess"}
+                control={
+                  <Switch
+                    checked={publishAsDrop}
+                    onCheckedChange={setPublishAsDrop}
+                    aria-label="Use a short public link"
+                  />
+                }
+              />
+              <SettingsRow
+                label="Password protection"
+                value={report.passwordProtected ? "On" : "Off"}
+                control={
+                  <Switch
+                    checked={report.passwordProtected || passwordDraftOpen}
+                    disabled={passwordProtectionPending}
+                    onCheckedChange={(enabled) => {
+                      if (enabled) {
+                        setPasswordDraft("");
+                        setPasswordDraftOpen(true);
+                        return;
+                      }
+                      setPasswordDraftOpen(false);
+                      onDisablePassword(report);
+                    }}
+                    aria-label="Toggle password protection"
+                  />
+                }
+              />
+              {passwordDraftOpen ? (
+                <div className="flex items-center gap-2 px-4 py-3">
+                  <Input
+                    autoFocus
+                    type="password"
+                    value={passwordDraft}
+                    onChange={(event) => setPasswordDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && passwordDraft.trim()) {
+                        onSetPassword(report, passwordDraft.trim(), () => {
+                          setPasswordDraft("");
+                          setPasswordDraftOpen(false);
+                        });
+                      }
+                      if (event.key === "Escape") {
+                        setPasswordDraftOpen(false);
+                        setPasswordDraft("");
+                      }
+                    }}
+                    className="h-8"
+                    placeholder="Set a password"
+                    disabled={passwordProtectionPending}
+                    aria-label="Password"
+                  />
+                  <Button
+                    size="sm"
+                    onClick={() =>
+                      onSetPassword(report, passwordDraft.trim(), () => {
+                        setPasswordDraft("");
+                        setPasswordDraftOpen(false);
+                      })
+                    }
+                    disabled={passwordProtectionPending || !passwordDraft.trim()}
+                  >
+                    {passwordProtectionPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Check className="h-4 w-4" />
+                    )}
+                    Set
+                  </Button>
+                </div>
+              ) : null}
+              <SettingsRow label="Expires" value={latestSnapshot?.expiresAt ? "Custom" : "Never"} />
+              <SettingsRow label="Custom domain" value="Not set" />
+            </div>
+          </section>
+
+          {report.kind === "folder" ? (
+            <section className="rounded-lg border bg-background">
+              <div className="flex items-center justify-between gap-3 px-4 py-3">
                 <div>
-                  <p className="text-sm font-medium">Auto-sync</p>
+                  <p className="text-sm font-medium">Mini-app build</p>
                   <p className="text-xs text-muted-foreground">
-                    {report.autoSync
-                      ? "Every source save republishes active snapshots."
-                      : "Cloudflare publishes only when you choose."}
+                    {report.buildCommand
+                      ? report.buildCommand
+                      : "Static folder publishes as-is."}
                   </p>
                 </div>
-                <Switch
-                  checked={report.autoSync}
-                  disabled={autoSyncPending}
-                  onCheckedChange={(enabled) => onToggleAutoSync(report, enabled)}
-                  aria-label="Toggle auto-sync"
-                />
-              </div>
-            ) : null}
-
-            <div className="space-y-3 rounded-lg border bg-muted/20 px-3 py-3">
-              <button
-                type="button"
-                onClick={() => setAdvancedOpen((open) => !open)}
-                className="flex w-full items-center justify-between"
-                aria-expanded={advancedOpen}
-              >
-                <span className="flex items-center gap-1.5 text-sm font-medium">
-                  <Settings2 className="h-4 w-4 text-muted-foreground" />
-                  Advanced
-                  {report.passwordProtected ? (
-                    <Lock className="h-3.5 w-3.5 text-muted-foreground" />
-                  ) : null}
-                </span>
-                <ChevronDown
-                  className={`h-4 w-4 text-muted-foreground transition-transform ${
-                    advancedOpen ? "rotate-180" : ""
-                  }`}
-                />
-              </button>
-
-              {advancedOpen ? (
-                <div className="space-y-4 pt-1">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="flex items-center gap-1.5 text-sm font-medium">
-                        <Zap className="h-3.5 w-3.5 text-muted-foreground" />
-                        Publish as a drop
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {publishAsDrop
-                          ? "Short, shareable link (e.g. /p/hollow-paperclip/) — easy to guess"
-                          : "Private: a long, hard-to-guess link"}
-                      </p>
-                    </div>
-                    <Switch
-                      checked={publishAsDrop}
-                      onCheckedChange={setPublishAsDrop}
-                      aria-label="Publish as a drop"
-                    />
-                  </div>
-
-                  <div className="space-y-3 border-t pt-3">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="flex items-center gap-1.5 text-sm font-medium">
-                          Password protection
-                          {report.passwordProtected ? (
-                            <Lock className="h-3.5 w-3.5 text-muted-foreground" />
-                          ) : null}
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          {report.passwordProtected
-                            ? "Visitors must enter a password"
-                            : "Anyone with the link can view"}
-                        </p>
-                      </div>
-                      <Switch
-                        checked={report.passwordProtected || passwordDraftOpen}
-                        disabled={passwordProtectionPending}
-                        onCheckedChange={(enabled) => {
-                          if (enabled) {
-                            setPasswordDraft("");
-                            setPasswordDraftOpen(true);
-                            return;
-                          }
-                          setPasswordDraftOpen(false);
-                          onDisablePassword(report);
-                        }}
-                        aria-label="Toggle password protection"
-                      />
-                    </div>
-                    {passwordDraftOpen ? (
-                      <div className="flex items-center gap-2">
-                        <Input
-                          autoFocus
-                          type="password"
-                          value={passwordDraft}
-                          onChange={(event) => setPasswordDraft(event.target.value)}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter" && passwordDraft.trim()) {
-                              onSetPassword(report, passwordDraft.trim(), () => {
-                                setPasswordDraft("");
-                                setPasswordDraftOpen(false);
-                              });
-                            }
-                            if (event.key === "Escape") {
-                              setPasswordDraftOpen(false);
-                              setPasswordDraft("");
-                            }
-                          }}
-                          className="h-8"
-                          placeholder="Set a password"
-                          disabled={passwordProtectionPending}
-                          aria-label="Password"
-                        />
-                        <Button
-                          size="sm"
-                          onClick={() =>
-                            onSetPassword(report, passwordDraft.trim(), () => {
-                              setPasswordDraft("");
-                              setPasswordDraftOpen(false);
-                            })
-                          }
-                          disabled={passwordProtectionPending || !passwordDraft.trim()}
-                        >
-                          {passwordProtectionPending ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Check className="h-4 w-4" />
-                          )}
-                          Set
-                        </Button>
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-
-            {report.kind === "folder" ? (
-              <div className="rounded-lg border bg-muted/20 px-3 py-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-medium">Mini-app build</p>
-                    <p className="text-xs text-muted-foreground">
-                      {report.buildCommand
-                        ? report.buildCommand
-                        : "Static folder publishes as-is."}
-                    </p>
-                  </div>
+                <div className="flex items-center gap-2">
                   <Badge
                     variant={
                       report.buildStatus === "failed"
@@ -1121,125 +1210,324 @@ function PageWorkspace({
                   >
                     {buildStatusLabels[report.buildStatus] ?? report.buildStatus}
                   </Badge>
+                  {report.buildCommand ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => onBuild(report)}
+                      disabled={buildPending}
+                    >
+                      {buildPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-4 w-4" />
+                      )}
+                      Build
+                    </Button>
+                  ) : null}
                 </div>
-                {report.buildOutputDir ? (
-                  <p className="mt-2 font-mono text-xs text-muted-foreground">
-                    output: {report.buildOutputDir}
-                  </p>
-                ) : null}
-                {needsBuild ? (
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    Build this folder before previewing or publish will build it first.
-                  </p>
-                ) : null}
-                {report.buildError ? (
-                  <p className="mt-2 whitespace-pre-wrap text-xs text-destructive">
-                    {report.buildError}
-                  </p>
-                ) : null}
               </div>
-            ) : null}
-
-            <PublishProgress
-              active={isPublishingThisReport}
-              elapsedMs={publishElapsedMs}
-              summary={publishSummary}
-            />
-
-            <section className="space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold">Published links</h3>
-                <span className="text-xs text-muted-foreground">
-                  {activePublications.length} active
-                </span>
-              </div>
-              {activePublications.length > 0 ? (
-                <div className="space-y-2">
-                  {activePublications.map((publication) => (
-                    <PublicationRow
-                      key={publication.token}
-                      publication={publication}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <div className="rounded-lg border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">
-                  No public links yet.
-                </div>
-              )}
+              {report.buildOutputDir ? (
+                <p className="border-t px-4 py-2 font-mono text-xs text-muted-foreground">
+                  output: {report.buildOutputDir}
+                </p>
+              ) : null}
+              {needsBuild ? (
+                <p className="border-t px-4 py-2 text-xs text-muted-foreground">
+                  Build this folder before previewing or publish will build it first.
+                </p>
+              ) : null}
+              {report.buildError ? (
+                <p className="whitespace-pre-wrap border-t px-4 py-2 text-xs text-destructive">
+                  {report.buildError}
+                </p>
+              ) : null}
             </section>
-          </div>
+          ) : null}
 
-          <ActivityPanel activities={activities} />
+          {feedbackEnabled && hasActiveLinks ? (
+            <FeedbackStatsPanel
+              slug={latestSnapshot?.slug || activePublications[0]?.slug || null}
+              enabled={feedbackEnabled}
+            />
+          ) : null}
         </div>
-      </section>
-
-      {feedbackEnabled && hasActiveLinks ? (
-        <FeedbackStatsPanel
-          slug={latestSnapshot?.slug || activePublications[0]?.slug || null}
-          enabled={feedbackEnabled}
-        />
-      ) : null}
-    </>
+      </div>
+    </div>
   );
 }
 
-function UrlRow({
+function SettingsRow({
   label,
   value,
-  icon: Icon,
-  empty = "Unavailable"
+  control
 }: {
   label: string;
-  value: string | null | undefined;
-  icon: typeof Link2;
-  empty?: string;
+  value: string;
+  control?: ReactNode;
 }) {
-  const copy = async () => {
-    if (!value) return;
-    const ok = await copyToClipboard(value);
-    toast[ok ? "success" : "error"](ok ? `${label} copied.` : `Could not copy ${label}.`);
+  return (
+    <div className="flex min-h-11 items-center justify-between gap-4 px-4 py-3">
+      <span className="text-sm text-muted-foreground">{label}</span>
+      <div className="flex items-center gap-3">
+        <span className="text-sm">{value}</span>
+        {control}
+      </div>
+    </div>
+  );
+}
+
+function PreviewPane({
+  report,
+  publication,
+  hasActiveLinks,
+  isPublishing,
+  publishAsDrop,
+  publishPending,
+  buildPending,
+  publishBlocked,
+  onConnect,
+  onEdit,
+  onPreview,
+  onPublish,
+  onRequestDelete,
+  onRequestRevokeAll
+}: {
+  report: Report;
+  publication: Report["publications"][number] | null;
+  hasActiveLinks: boolean;
+  isPublishing: boolean;
+  publishAsDrop: boolean;
+  publishPending: boolean;
+  buildPending: boolean;
+  publishBlocked: boolean;
+  onConnect: () => void;
+  onEdit: (report: Report) => void;
+  onPreview: (report: Report) => void;
+  onPublish: (report: Report, drop: boolean) => void;
+  onRequestDelete: (report: Report) => void;
+  onRequestRevokeAll: (report: Report) => void;
+}) {
+  const [device, setDevice] = useState<"desktop" | "mobile">("desktop");
+  const frameShellRef = useRef<HTMLDivElement>(null);
+  const [frameScale, setFrameScale] = useState(1);
+  const src = report.localUrl || "";
+  const displayUrl = publication?.publicUrl || report.localUrl || "";
+  const activePublicationCount = report.publications.filter((item) => item.active).length;
+  const viewport = device === "desktop"
+    ? { width: 1280, height: 900, label: "Desktop" }
+    : { width: 390, height: 780, label: "Mobile" };
+
+  const copySelectedLink = async () => {
+    const url = publication?.publicUrl || report.localUrl || "";
+    const ok = url ? await copyToClipboard(url) : false;
+    toast[ok ? "success" : "error"](ok ? "Link copied." : "No link to copy.");
   };
 
-  const open = () => {
-    if (!value) return;
-    window.open(value, "_blank", "noopener,noreferrer");
-  };
+  useEffect(() => {
+    const shell = frameShellRef.current;
+    if (!shell) return;
+
+    const updateScale = () => {
+      const availableWidth = shell.clientWidth;
+      const nextScale = Math.min(1, Math.max(0.35, availableWidth / viewport.width));
+      setFrameScale(Number(nextScale.toFixed(3)));
+    };
+
+    updateScale();
+    const observer = new ResizeObserver(updateScale);
+    observer.observe(shell);
+    return () => observer.disconnect();
+  }, [viewport.width]);
 
   return (
-    <div className="min-w-0 rounded-lg border bg-background p-3">
-      <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-        <Icon className="h-3.5 w-3.5" />
-        {label}
-      </div>
-      {value ? (
-        <div className="mt-2 flex min-w-0 items-center gap-1">
-          <span className="min-w-0 flex-1 truncate font-mono text-xs">
-            {value}
-          </span>
-          <Button
-            size="icon"
-            variant="ghost"
-            className="h-7 w-7 shrink-0"
-            onClick={copy}
-            aria-label={`Copy ${label}`}
-          >
-            <Copy className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            size="icon"
-            variant="ghost"
-            className="h-7 w-7 shrink-0"
-            onClick={open}
-            aria-label={`Open ${label}`}
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-          </Button>
+    <section className="overflow-hidden rounded-lg border bg-background shadow-sm">
+      <div className="flex flex-col gap-3 border-b px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+            <span>Pages</span>
+            <span>/</span>
+            <span className="truncate font-medium text-foreground">{report.name}</span>
+          </div>
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
+            <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
+            <h2 className="min-w-0 truncate text-xl font-semibold tracking-tight">
+              {report.name}
+            </h2>
+            <Badge variant={hasActiveLinks ? "secondary" : "outline"}>
+              {hasActiveLinks ? "Live" : "Draft"}
+            </Badge>
+            {hasActiveLinks ? (
+              <span className="text-xs text-muted-foreground">
+                {activePublicationCount} active {activePublicationCount === 1 ? "link" : "links"}
+              </span>
+            ) : null}
+            {report.importedFromCloudflare ? (
+              <Badge variant="muted" className="gap-1">
+                <CloudDownload className="h-3 w-3" />
+                Recovered
+              </Badge>
+            ) : null}
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {hasActiveLinks
+              ? `Updated ${relativeTime(publication?.updatedAt || report.updatedAt)}`
+              : "Not published yet"}
+          </p>
         </div>
-      ) : (
-        <p className="mt-2 truncate text-xs text-muted-foreground">{empty}</p>
-      )}
-    </div>
+
+        <div className="flex max-w-full flex-wrap items-center gap-2">
+          {publishBlocked ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button size="sm" onClick={onConnect} variant="secondary">
+                  <Cloud className="h-4 w-4" />
+                  Publish URL
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Connect Cloudflare first</TooltipContent>
+            </Tooltip>
+          ) : (
+            <Button
+              size="sm"
+              onClick={() => onPublish(report, publishAsDrop)}
+              disabled={publishPending || buildPending}
+            >
+              {isPublishing ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Cloud className="h-4 w-4" />
+              )}
+              {publishAsDrop ? "Publish short link" : "Publish URL"}
+            </Button>
+          )}
+          {publication?.publicUrl ? (
+            <>
+              <Button asChild size="sm" variant="outline">
+                <a href={publication.publicUrl} target="_blank" rel="noreferrer">
+                  <ExternalLink className="h-4 w-4" />
+                  Open
+                </a>
+              </Button>
+              <Button variant="outline" size="sm" onClick={copySelectedLink}>
+                <Copy className="h-4 w-4" />
+                Copy
+              </Button>
+            </>
+          ) : null}
+          <Button variant="outline" size="sm" onClick={() => onEdit(report)}>
+            <Pencil className="h-4 w-4" />
+            Edit
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="icon" variant="outline" className="h-9 w-9" aria-label="More actions">
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => onPreview(report)}>
+                <Monitor className="h-4 w-4" />
+                Open full preview
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {hasActiveLinks ? (
+                <>
+                  <DropdownMenuItem onSelect={() => onRequestRevokeAll(report)}>
+                    <WifiOff className="h-4 w-4" />
+                    Take links offline
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              ) : null}
+              <DropdownMenuItem
+                onSelect={() => onRequestDelete(report)}
+                className="text-destructive focus:text-destructive"
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete page
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+
+      <div ref={frameShellRef} className="min-h-[620px] overflow-auto bg-muted/30 p-4">
+        <div
+          className={cn(
+            "mx-auto overflow-hidden rounded-lg border bg-background shadow-sm",
+            device === "mobile" ? "w-fit" : "max-w-full"
+          )}
+          style={{
+            width: viewport.width * frameScale,
+            minHeight: viewport.height * frameScale + 40
+          }}
+        >
+          <div className="flex h-10 shrink-0 items-center gap-2 border-b bg-muted/20 px-3">
+            <div className="min-w-0 flex-1 truncate rounded-md border bg-background px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
+              {displayUrl || "Preview URL"}
+            </div>
+            <div className="flex shrink-0 items-center gap-1 rounded-md border bg-background p-0.5">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant={device === "desktop" ? "secondary" : "ghost"}
+                    className="h-7 w-7"
+                    onClick={() => setDevice("desktop")}
+                    aria-label="Desktop preview"
+                  >
+                    <Monitor className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Desktop preview</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant={device === "mobile" ? "secondary" : "ghost"}
+                    className="h-7 w-7"
+                    onClick={() => setDevice("mobile")}
+                    aria-label="Mobile preview"
+                  >
+                    <Smartphone className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Mobile preview</TooltipContent>
+              </Tooltip>
+            </div>
+            <Badge variant="outline" className="shrink-0 text-[11px]">
+              {viewport.label}
+            </Badge>
+            <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
+          </div>
+          {src ? (
+            <div
+              style={{
+                width: viewport.width * frameScale,
+                height: viewport.height * frameScale
+              }}
+            >
+              <iframe
+                src={src}
+                title={`Preview of ${report.name}`}
+                className="origin-top-left border-0 bg-background"
+                style={{
+                  width: viewport.width,
+                  height: viewport.height,
+                  transform: `scale(${frameScale})`
+                }}
+              />
+            </div>
+          ) : (
+            <div className="flex h-80 items-center justify-center text-sm text-muted-foreground">
+              Nothing to preview yet.
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1339,51 +1627,37 @@ function PublishProgress({
   );
 }
 
-function ActivityPanel({ activities }: { activities: ActivityItem[] }) {
-  return (
-    <aside className="rounded-lg border bg-background">
-      <div className="flex items-center justify-between border-b px-4 py-3">
-        <div className="flex items-center gap-2">
-          <Activity className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-sm font-semibold">Activity</h3>
-        </div>
-      </div>
-      <div className="max-h-[420px] space-y-2 overflow-y-auto p-3">
-        {activities.length === 0 ? (
-          <p className="px-1 py-8 text-center text-sm text-muted-foreground">
-            No activity yet.
-          </p>
-        ) : (
-          activities.map((item) => (
-            <ActivityItemRow key={item.id} item={item} />
-          ))
-        )}
-      </div>
-    </aside>
-  );
-}
+function ActivityDock({ activities }: { activities: ActivityItem[] }) {
+  const visible = activities.slice(0, 3);
+  if (visible.length === 0) return null;
 
-function ActivityItemRow({ item }: { item: ActivityItem }) {
-  const Icon = activityIcon(item.status);
   return (
-    <div className="rounded-md border bg-muted/20 px-3 py-2">
-      <div className="flex items-start gap-2">
-        <Icon className={cn("mt-0.5 h-3.5 w-3.5 shrink-0", activityColor(item.status))} />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center justify-between gap-2">
-            <p className="truncate text-xs font-medium">{item.title}</p>
-            <span className="shrink-0 text-[10px] text-muted-foreground">
-              {relativeTime(item.createdAt)}
-            </span>
-          </div>
-          {item.message ? (
-            <p className="mt-1 break-words text-[11px] text-muted-foreground">
-              {item.message}
-            </p>
-          ) : null}
-        </div>
+    <footer className="hidden h-14 shrink-0 items-center gap-4 border-t bg-background px-6 lg:flex">
+      <div className="flex items-center gap-3">
+        <span className="text-sm font-semibold">Activity</span>
+        <Badge variant="secondary" className="gap-1">
+          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+          Live
+        </Badge>
+        <Badge variant="muted">{activities.length}</Badge>
       </div>
-    </div>
+      <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
+        {visible.map((item) => {
+          const Icon = activityIcon(item.status);
+          return (
+            <div
+              key={item.id}
+              className="flex min-w-[240px] items-center gap-2 rounded-full bg-muted/40 px-3 py-1.5 text-xs"
+            >
+              <Icon className={cn("h-3.5 w-3.5 shrink-0", activityColor(item.status))} />
+              <span className="truncate">{item.title}</span>
+              <span className="ml-auto shrink-0 text-muted-foreground">{relativeTime(item.createdAt)}</span>
+            </div>
+          );
+        })}
+      </div>
+      <span className="shrink-0 text-sm text-muted-foreground">Recent</span>
+    </footer>
   );
 }
 
@@ -1401,32 +1675,40 @@ function activityColor(status: ActivityStatus) {
 
 function SettingsView({
   cloudflare,
-  activities,
   connected,
   feedback,
-  defaultExpiry
+  defaultExpiry,
+  cloudflareSyncEnabled,
+  cloudflareSyncPending,
+  onToggleCloudflareSync
 }: {
   cloudflare: CloudflareStatus | undefined;
-  activities: ActivityItem[];
   connected: boolean;
   feedback: FeedbackConfig | null;
   defaultExpiry: string | undefined;
+  cloudflareSyncEnabled: boolean;
+  cloudflareSyncPending: boolean;
+  onToggleCloudflareSync: (enabled: boolean) => void;
 }) {
   return (
-    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
-      <section className="space-y-5">
+    <div className="min-h-full overflow-y-auto bg-background">
+      <section className="mx-auto max-w-4xl space-y-5 px-5 py-6">
         <div>
           <h2 className="text-xl font-semibold tracking-tight">Settings</h2>
           <p className="mt-1 text-sm text-muted-foreground">
             Publishing account, project, link expiry, and audience feedback.
           </p>
         </div>
-        <CloudflareConnect cloudflare={cloudflare} />
+        <CloudflareConnect
+          cloudflare={cloudflare}
+          autoSyncEnabled={cloudflareSyncEnabled}
+          autoSyncPending={cloudflareSyncPending}
+          onToggleAutoSync={onToggleCloudflareSync}
+        />
         <DeployHistory connected={connected} />
         <DefaultExpiryCard defaultExpiry={defaultExpiry} />
         <FeedbackCard connected={connected} feedback={feedback} />
       </section>
-      <ActivityPanel activities={activities} />
     </div>
   );
 }

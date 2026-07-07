@@ -196,7 +196,7 @@ export function ReportCard({ report, onPreview, onEdit }: ReportCardProps) {
                   disabled={publish.isPending}
                 >
                   <RefreshCw className="h-4 w-4" />
-                  {publishAsDrop ? "Publish drop" : "Publish now"}
+                  {publishAsDrop ? "Publish short link" : "Publish now"}
                 </DropdownMenuItem>
                 {hasActive ? (
                   <DropdownMenuItem
@@ -268,18 +268,18 @@ export function ReportCard({ report, onPreview, onEdit }: ReportCardProps) {
                 <div className="flex flex-col pr-2">
                   <span className="flex items-center gap-1.5 text-xs font-medium">
                     <Zap className="h-3 w-3 text-muted-foreground" />
-                    Publish as a drop
+                    Short public link
                   </span>
                   <span className="text-[11px] text-muted-foreground">
                     {publishAsDrop
-                      ? "Short, shareable link (e.g. /p/hollow-paperclip/) — easy to guess"
-                      : "Private: a long, hard-to-guess link"}
+                      ? "Short memorable URL. Easier to share, easier to guess."
+                      : "Long private URL. Harder to guess."}
                   </span>
                 </div>
                 <Switch
                   checked={publishAsDrop}
                   onCheckedChange={setPublishAsDrop}
-                  aria-label="Publish as a drop"
+                  aria-label="Use a short public link"
                 />
               </div>
 

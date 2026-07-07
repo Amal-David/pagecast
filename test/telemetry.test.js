@@ -57,6 +57,14 @@ test("classifyCommand keeps only allowlisted subcommands", () => {
     command: "pages",
     subcommand: "deploy"
   });
+  assert.deepEqual(classifyCommand(["local-url", "install", "--yes"]), {
+    command: "local-url",
+    subcommand: "install"
+  });
+  assert.deepEqual(classifyCommand(["background", "service", "install"]), {
+    command: "background",
+    subcommand: "service"
+  });
   // A non-allowlisted second token is dropped, not echoed back.
   assert.deepEqual(classifyCommand(["pages", "/secret/dir"]), { command: "pages" });
 });

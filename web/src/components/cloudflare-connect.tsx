@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -25,6 +26,9 @@ import type { CloudflareStatus } from "@/lib/types";
 
 interface CloudflareConnectProps {
   cloudflare: CloudflareStatus | undefined;
+  autoSyncEnabled: boolean;
+  autoSyncPending: boolean;
+  onToggleAutoSync: (enabled: boolean) => void;
 }
 
 function displayAccountName(cloudflare: CloudflareStatus | undefined) {
@@ -43,7 +47,12 @@ function accountOptionLabel(account: { name?: string; id: string }, index: numbe
   return `Cloudflare account ${index + 1}`;
 }
 
-export function CloudflareConnect({ cloudflare }: CloudflareConnectProps) {
+export function CloudflareConnect({
+  cloudflare,
+  autoSyncEnabled,
+  autoSyncPending,
+  onToggleAutoSync
+}: CloudflareConnectProps) {
   const connect = useCloudflareConnect();
   const selectAccount = useCloudflareAccount();
   const logout = useCloudflareLogout();
@@ -98,6 +107,23 @@ export function CloudflareConnect({ cloudflare }: CloudflareConnectProps) {
                 </>
               ) : null}
             </dl>
+
+            <div className="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-3">
+              <div>
+                <p className="text-sm font-medium">Sync from Cloudflare</p>
+                <p className="text-xs text-muted-foreground">
+                  {autoSyncEnabled
+                    ? "Automatically imports missing published links."
+                    : "Manual sync only."}
+                </p>
+              </div>
+              <Switch
+                checked={autoSyncEnabled}
+                disabled={autoSyncPending}
+                onCheckedChange={onToggleAutoSync}
+                aria-label="Toggle Cloudflare auto-sync"
+              />
+            </div>
 
             {canChooseAccount ? (
               <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
