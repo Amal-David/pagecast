@@ -24,6 +24,18 @@ import {
   startServers,
   stopGoalProgress
 } from "./server.js";
+import {
+  PORTLESS_LOCAL_URL,
+  PF_LAUNCH_DAEMON_LABEL,
+  PF_LAUNCH_DAEMON_PATH,
+  PF_RULES_PATH,
+  backgroundLaunchAgentLabel,
+  backgroundLaunchAgentPath,
+  buildBackgroundLaunchAgentPlist,
+  buildLocalUrlInstallScript,
+  buildLocalUrlRemoveScript,
+  launchGuiDomain
+} from "./local-system.js";
 import { classifyCommand, createReporter, resolveTelemetry } from "./telemetry.js";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -179,6 +191,15 @@ async function removeBackgroundPid() {
   await fs.rm(backgroundPidPath, { force: true }).catch(() => {});
 }
 
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function configuredLocalUrls() {
   const store = createConfigStore({ dataDir });
   await store.init();
@@ -200,6 +221,88 @@ async function confirmPrompt(question) {
   } finally {
     rl.close();
   }
+}
+
+function requireMacos(feature) {
+  if (process.platform !== "darwin") {
+    throw new Error(`${feature} is currently available on macOS only.`);
+  }
+}
+
+function runInherited(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: "inherit" });
+    child.on("error", reject);
+    child.on("exit", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`${command} ${args.join(" ")} failed${signal ? ` (${signal})` : ` with exit ${code}`}.`));
+    });
+  });
+}
+
+async function runPrivilegedScript(script) {
+  await runInherited("sudo", ["/bin/sh", "-c", script]);
+}
+
+async function launchctl(args, { ignoreError = false } = {}) {
+  try {
+    return await execFileAsync("launchctl", args, { timeout: 5000 });
+  } catch (error) {
+    if (ignoreError) {
+      return { stdout: "", stderr: error.stderr || error.message || "" };
+    }
+    throw error;
+  }
+}
+
+function backgroundServiceConfig() {
+  const label = backgroundLaunchAgentLabel(process.cwd());
+  const plistPath = backgroundLaunchAgentPath({ label });
+  const domain = launchGuiDomain();
+  return {
+    label,
+    plistPath,
+    domain,
+    target: `${domain}/${label}`,
+    stdoutPath: path.join(dataDir, "pagecast.launchd.out.log"),
+    stderrPath: path.join(dataDir, "pagecast.launchd.err.log")
+  };
+}
+
+async function backgroundServiceState() {
+  const config = backgroundServiceConfig();
+  const installed = await fileExists(config.plistPath);
+  const loaded = await launchctl(["print", config.target], { ignoreError: true }).then(
+    (result) => Boolean(result.stdout),
+    () => false
+  );
+  return { ...config, installed, loaded };
+}
+
+async function stopManagedBackgroundProcess() {
+  const processInfo = await readBackgroundProcess();
+  if (processIsRunning(processInfo.pid) && (await backgroundProcessMatches(processInfo))) {
+    process.kill(processInfo.pid, "SIGTERM");
+    await sleep(250);
+    await removeBackgroundPid();
+    return true;
+  }
+  await removeBackgroundPid();
+  return false;
+}
+
+async function portlessLocalUrlInstalled() {
+  if (process.platform !== "darwin") {
+    return false;
+  }
+  return (await fileExists(PF_RULES_PATH)) && (await fileExists(PF_LAUNCH_DAEMON_PATH));
+}
+
+async function preferredAdminUrl(urls) {
+  return (await portlessLocalUrlInstalled()) ? PORTLESS_LOCAL_URL : urls.adminUrl;
 }
 
 // First-run notice (stderr, so it never pollutes --json stdout).
@@ -425,13 +528,17 @@ async function serve(args = []) {
     adminPort: port ? Number(port) : undefined,
     publicPort: publicPort ? Number(publicPort) : undefined
   });
-  console.log(`Pagecast admin: ${runtime.adminUrl}`);
+  const adminUrl = await preferredAdminUrl({ adminUrl: runtime.adminUrl });
+  console.log(`Pagecast admin: ${adminUrl}`);
+  if (adminUrl !== runtime.adminUrl) {
+    console.log(`Internal admin server: ${runtime.adminUrl}`);
+  }
   console.log(`Local published-page server: ${runtime.publicUrl}`);
   if (parsed.flags.has("no-open")) {
     console.log("Running quietly. Press Ctrl-C to stop.");
   } else {
     console.log("Opening the admin UI in your browser. Press Ctrl-C to stop.");
-    openBrowser(runtime.adminUrl);
+    openBrowser(adminUrl);
   }
 
   const shutdown = async () => {
@@ -443,12 +550,17 @@ async function serve(args = []) {
 }
 
 async function background(args = []) {
-  const [subcommand = "status"] = args;
+  const [subcommand = "status", ...rest] = args;
   const urls = await configuredLocalUrls();
+
+  if (subcommand === "service") {
+    await backgroundService(rest);
+    return;
+  }
 
   if (subcommand === "start") {
     if (await dashboardReady(urls.adminUrl)) {
-      console.log(`Pagecast is already running: ${urls.adminUrl}`);
+      console.log(`Pagecast is already running: ${await preferredAdminUrl(urls)}`);
       return;
     }
     const existingProcess = await readBackgroundProcess();
@@ -475,36 +587,37 @@ async function background(args = []) {
     );
     const ready = await waitForDashboard(urls.adminUrl);
     const refreshed = await configuredLocalUrls();
+    const adminUrl = await preferredAdminUrl(refreshed);
     console.log(
       ready
-        ? `Pagecast is running: ${refreshed.adminUrl}`
-        : `Pagecast background process started. Try ${refreshed.adminUrl} in a moment.`
+        ? `Pagecast is running: ${adminUrl}`
+        : `Pagecast background process started. Try ${adminUrl} in a moment.`
     );
     return;
   }
 
   if (subcommand === "stop") {
-    const processInfo = await readBackgroundProcess();
-    if (processIsRunning(processInfo.pid) && (await backgroundProcessMatches(processInfo))) {
-      process.kill(processInfo.pid, "SIGTERM");
-      await sleep(250);
+    if (await stopManagedBackgroundProcess()) {
       console.log("Pagecast background process stopped.");
     } else {
       console.log("Pagecast background process is not running.");
     }
-    await removeBackgroundPid();
     return;
   }
 
   if (subcommand === "status") {
     const processInfo = await readBackgroundProcess();
     const ready = await dashboardReady(urls.adminUrl);
+    const service = process.platform === "darwin" ? await backgroundServiceState() : null;
     if (ready) {
-      console.log(`Pagecast is running: ${urls.adminUrl}`);
+      console.log(`Pagecast is running: ${await preferredAdminUrl(urls)}`);
     } else if (processIsRunning(processInfo.pid) && (await backgroundProcessMatches(processInfo))) {
-      console.log(`Pagecast background process is starting: ${urls.adminUrl}`);
+      console.log(`Pagecast background process is starting: ${await preferredAdminUrl(urls)}`);
     } else {
       console.log(`Pagecast is stopped. Start it with: pagecast background start`);
+    }
+    if (service?.installed) {
+      console.log(`Persistent service: ${service.loaded ? "loaded" : "installed"} (${service.label})`);
     }
     return;
   }
@@ -514,14 +627,185 @@ async function background(args = []) {
   process.exit(1);
 }
 
+async function backgroundService(args = []) {
+  const parsed = parseFlags(args);
+  const [subcommand = "status"] = parsed.positionals;
+  requireMacos("Persistent Pagecast background service");
+
+  if (subcommand === "install") {
+    await installBackgroundService();
+    return;
+  }
+
+  if (subcommand === "uninstall" || subcommand === "remove") {
+    await uninstallBackgroundService();
+    return;
+  }
+
+  if (subcommand === "status") {
+    const state = await backgroundServiceState();
+    if (!state.installed) {
+      console.log("Persistent service is not installed.");
+      return;
+    }
+    console.log(`Persistent service: ${state.loaded ? "loaded" : "installed"} (${state.label})`);
+    console.log(`LaunchAgent: ${state.plistPath}`);
+    return;
+  }
+
+  console.error(`Unknown background service command: ${subcommand}\n`);
+  usage();
+  process.exit(1);
+}
+
+async function installBackgroundService() {
+  const urls = await configuredLocalUrls();
+  const state = await backgroundServiceState();
+  const wasLoaded = state.loaded;
+  await fs.mkdir(path.dirname(state.plistPath), { recursive: true });
+  await fs.mkdir(dataDir, { recursive: true });
+  const plist = buildBackgroundLaunchAgentPlist({
+    label: state.label,
+    nodePath: process.execPath,
+    cliPath,
+    workingDirectory: process.cwd(),
+    stdoutPath: state.stdoutPath,
+    stderrPath: state.stderrPath,
+    pathEnv: process.env.PATH
+  });
+  await fs.writeFile(state.plistPath, plist, "utf8");
+  await fs.chmod(state.plistPath, 0o644);
+  await launchctl(["bootout", state.target], { ignoreError: true });
+
+  const stoppedManagedProcess = await stopManagedBackgroundProcess();
+  const foregroundAlreadyRunning = (await dashboardReady(urls.adminUrl)) && !stoppedManagedProcess && !wasLoaded;
+  if (foregroundAlreadyRunning) {
+    console.log(`Persistent service installed: ${state.plistPath}`);
+    console.log("Pagecast is already running outside launchd, so the service will start on your next login/restart.");
+    return;
+  }
+
+  await launchctl(["bootstrap", state.domain, state.plistPath]);
+  await launchctl(["kickstart", "-k", state.target], { ignoreError: true });
+  const ready = await waitForDashboard(urls.adminUrl, { timeoutMs: 7000 });
+  console.log(`Persistent service installed: ${state.plistPath}`);
+  console.log(
+    ready
+      ? `Pagecast is running: ${await preferredAdminUrl(urls)}`
+      : `Pagecast service installed. Try ${await preferredAdminUrl(urls)} in a moment.`
+  );
+}
+
+async function uninstallBackgroundService() {
+  const state = await backgroundServiceState();
+  await launchctl(["bootout", state.target], { ignoreError: true });
+  await fs.rm(state.plistPath, { force: true }).catch(() => {});
+  await removeBackgroundPid();
+  console.log("Persistent Pagecast service removed.");
+}
+
+async function localUrl(args = []) {
+  const parsed = parseFlags(args);
+  const [subcommand = "status"] = parsed.positionals;
+  requireMacos("Portless local URL setup");
+
+  if (subcommand === "install" || subcommand === "setup") {
+    await installLocalUrl({ yes: parsed.flags.has("yes") });
+    return;
+  }
+
+  if (subcommand === "remove" || subcommand === "uninstall") {
+    await removeLocalUrl({ yes: parsed.flags.has("yes") });
+    return;
+  }
+
+  if (subcommand === "status") {
+    await printLocalUrlStatus();
+    return;
+  }
+
+  console.error(`Unknown local-url command: ${subcommand}\n`);
+  usage();
+  process.exit(1);
+}
+
+async function installLocalUrl({ yes = false } = {}) {
+  const store = createConfigStore({ dataDir });
+  await store.init();
+  const { local } = store.get();
+  if (!yes) {
+    const ok = await confirmPrompt(
+      `Install the macOS local redirect for ${PORTLESS_LOCAL_URL} -> 127.0.0.1:${local.adminPort}? This requires sudo. [y/N] `
+    );
+    if (!ok) {
+      console.log("Portless local URL setup cancelled.");
+      return false;
+    }
+  }
+  await runPrivilegedScript(buildLocalUrlInstallScript({ targetPort: local.adminPort }));
+  console.log(`${PORTLESS_LOCAL_URL} now forwards to the local Pagecast admin server on port ${local.adminPort}.`);
+  return true;
+}
+
+async function removeLocalUrl({ yes = false } = {}) {
+  if (!yes) {
+    const ok = await confirmPrompt(`Remove the macOS redirect for ${PORTLESS_LOCAL_URL}? This requires sudo. [y/N] `);
+    if (!ok) {
+      console.log("Portless local URL removal cancelled.");
+      return false;
+    }
+  }
+  await runPrivilegedScript(buildLocalUrlRemoveScript());
+  console.log(`Removed the ${PORTLESS_LOCAL_URL} redirect.`);
+  return true;
+}
+
+async function printLocalUrlStatus() {
+  const installed = await portlessLocalUrlInstalled();
+  const daemon = await launchctl(["print", `system/${PF_LAUNCH_DAEMON_LABEL}`], { ignoreError: true });
+  console.log(`Portless local URL: ${installed ? "installed" : "not installed"}`);
+  console.log(`URL: ${PORTLESS_LOCAL_URL}`);
+  if (installed) {
+    console.log(`Rules: ${PF_RULES_PATH}`);
+    console.log(`LaunchDaemon: ${PF_LAUNCH_DAEMON_PATH}`);
+    console.log(`Boot loader: ${daemon.stdout ? "loaded" : "not loaded"}`);
+  }
+}
+
+async function setupLocalUrl(args = []) {
+  const parsed = parseFlags(args);
+  requireMacos("Pagecast local URL setup");
+  const yes = parsed.flags.has("yes");
+  if (!yes) {
+    const ok = await confirmPrompt(
+      [
+        `Set up ${PORTLESS_LOCAL_URL} without a visible port and install Pagecast as a login service?`,
+        "This writes a local /etc/hosts entry, a pf redirect, a root LaunchDaemon for the redirect,",
+        "and a user LaunchAgent for Pagecast. The redirect step requires sudo. [y/N] "
+      ].join("\n")
+    );
+    if (!ok) {
+      console.log("Setup cancelled.");
+      return;
+    }
+  }
+  const installed = await installLocalUrl({ yes: true });
+  if (!installed) {
+    return;
+  }
+  await installBackgroundService();
+  console.log(`Open Pagecast at ${PORTLESS_LOCAL_URL}`);
+}
+
 async function openLocalDashboard() {
   let urls = await configuredLocalUrls();
   if (!(await dashboardReady(urls.adminUrl))) {
     await background(["start"]);
     urls = await configuredLocalUrls();
   }
-  openBrowser(urls.adminUrl);
-  console.log(`Opened Pagecast: ${urls.adminUrl}`);
+  const adminUrl = await preferredAdminUrl(urls);
+  openBrowser(adminUrl);
+  console.log(`Opened Pagecast: ${adminUrl}`);
 }
 
 async function publish(args) {
@@ -866,6 +1150,9 @@ function usage() {
       "                                                        Start the local app and open the admin UI",
       "  pagecast open                                        Open the local app, starting it in the background if needed",
       "  pagecast background start|stop|status                Keep the local app running without a terminal tab",
+      "  pagecast background service install|uninstall|status Keep Pagecast running after login/restart (macOS)",
+      "  pagecast setup-local-url [--yes]                     Use http://pagecast.localhost and install the login service (macOS)",
+      "  pagecast local-url install|remove|status [--yes]     Manage the no-port local URL redirect (macOS)",
       "  pagecast publish <path> [--password <pw>|--no-password] [--expires <7d|12h|never>] [--json]",
       "                                                        Publish an HTML/Markdown snapshot",
       "  pagecast publish site <dir> --project <name> [--json] Deploy a static folder to Pages",
@@ -931,6 +1218,16 @@ async function run() {
 
   if (command === "background") {
     await background(rest);
+    return;
+  }
+
+  if (command === "local-url") {
+    await localUrl(rest);
+    return;
+  }
+
+  if (command === "setup-local-url") {
+    await setupLocalUrl(rest);
     return;
   }
 

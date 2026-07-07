@@ -44,6 +44,25 @@ npx pagecast background start
 npx pagecast open
 ```
 
+On macOS, you can also make Pagecast feel like a tiny local app that survives
+login/restart and opens without a visible port:
+
+```sh
+npx pagecast setup-local-url
+```
+
+That installs a local-only `pf` redirect for `http://pagecast.localhost` and a
+user LaunchAgent that keeps the Pagecast server running after login. Pagecast
+still runs internally on its normal port; it does not run the app as root or
+occupy port 80 with a server process. Manage the pieces separately with:
+
+```sh
+npx pagecast local-url status
+npx pagecast local-url remove
+npx pagecast background service status
+npx pagecast background service uninstall
+```
+
 Pagecast remembers the local ports in `.pagecast/config.json`. If 4173/4174 are
 busy the first time it starts, it falls forward to the next available pair and
 keeps using that pair on future launches.

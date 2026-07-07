@@ -32,6 +32,8 @@ const COMMAND_ALLOWLIST = new Set([
   "feedback",
   "goal",
   "background",
+  "local-url",
+  "setup-local-url",
   "open",
   "telemetry",
   "help",
@@ -41,7 +43,8 @@ const SUBCOMMAND_ALLOWLIST = {
   pages: new Set(["setup", "status", "projects", "deploy", "deployments"]),
   feedback: new Set(["setup", "status"]),
   goal: new Set(["publish", "status", "stop"]),
-  background: new Set(["start", "stop", "status"]),
+  background: new Set(["start", "stop", "status", "service"]),
+  "local-url": new Set(["install", "remove", "status", "setup", "uninstall"]),
   telemetry: new Set(["status", "enable", "disable"])
 };
 
