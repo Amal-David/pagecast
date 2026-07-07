@@ -19,7 +19,7 @@ small, anonymous event when you run a command.
 | `command`   | `publish`, `pages`, `serve`          | Which feature is used |
 | `subcommand`| `deploy`, `status` (allowlisted only)| Which sub-feature is used |
 | `outcome`   | `started`                            | Reserved for success/error signal |
-| `version`   | `0.1.6`                              | Which release is in the field |
+| `version`   | `0.3.0`                              | Which release is in the field |
 | `os`/`arch` | `darwin` / `arm64`                   | Which platforms to support |
 | `node`      | `v22.22.3`                           | Which Node versions to support |
 | `anonId`    | random 32-char hex                   | Coarse "distinct installs" counting |

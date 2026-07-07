@@ -1,7 +1,8 @@
 "use strict";
 
-const BASE = "http://127.0.0.1:4173";
+const BASES = ["http://pagecast.localhost", "http://127.0.0.1:4173"];
 const PUBLISHABLE = /\.(html?|md|markdown)(?:[?#].*)?$/i;
+let activeBase = BASES[0];
 
 const $ = (id) => document.getElementById(id);
 const statusEl = $("status");
@@ -39,17 +40,22 @@ async function getActiveTab() {
 }
 
 async function getStatus() {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 2500);
-  try {
-    const res = await fetch(`${BASE}/api/status`, { signal: controller.signal });
-    if (!res.ok) return { up: false };
-    return { up: true, data: await res.json() };
-  } catch {
-    return { up: false };
-  } finally {
-    clearTimeout(timer);
+  for (const base of BASES) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    try {
+      const res = await fetch(`${base}/api/status`, { signal: controller.signal });
+      if (res.ok) {
+        activeBase = base;
+        return { up: true, data: await res.json() };
+      }
+    } catch {
+      // Try the next local endpoint.
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  return { up: false };
 }
 
 async function main() {
@@ -97,7 +103,7 @@ async function main() {
   const connected = cf && cf.loggedIn && cf.projectName;
   if (!connected) {
     setStatus("Cloudflare isn't connected yet.");
-    showHint('Open <a href="' + BASE + '" target="_blank" rel="noopener">Pagecast</a> and click Connect Cloudflare, then come back.');
+    showHint('Open <a href="' + activeBase + '" target="_blank" rel="noopener">Pagecast</a> and click Connect Cloudflare, then come back.');
     return;
   }
 
@@ -116,7 +122,7 @@ async function publish(fileUrl) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 60000);
   try {
-    const res = await fetch(`${BASE}/api/publish-local`, {
+    const res = await fetch(`${activeBase}/api/publish-local`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: fileUrl }),
@@ -151,10 +157,10 @@ function handleError(statusCode, data) {
   publishBtn.textContent = "Publish to Pagecast";
   if (statusCode === 401) {
     setStatus("Cloudflare isn't connected.");
-    showHint('Open <a href="' + BASE + '" target="_blank" rel="noopener">Pagecast</a> to sign in, then try again.');
+    showHint('Open <a href="' + activeBase + '" target="_blank" rel="noopener">Pagecast</a> to sign in, then try again.');
   } else if (statusCode === 409) {
     setStatus("Multiple Cloudflare accounts found.");
-    showHint('Open <a href="' + BASE + '" target="_blank" rel="noopener">Pagecast</a> and choose an account, then try again.');
+    showHint('Open <a href="' + activeBase + '" target="_blank" rel="noopener">Pagecast</a> and choose an account, then try again.');
   } else if (statusCode === 404) {
     setStatus("File not found.");
     showHint("Is the file still on disk at this path?");

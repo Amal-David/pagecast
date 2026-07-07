@@ -3,6 +3,27 @@
 All notable changes to Pagecast are documented here. This project follows
 [semantic versioning](https://semver.org/).
 
+## 0.3.0 — 2026-07-07
+
+### Added
+
+- **Cloudflare sync-back** — import existing published Pages links into the
+  dashboard, including pages created outside the current local workspace. (#15)
+- **Preview workbench** — selected pages now show an embedded desktop/mobile
+  preview with centered controls and a denser operator layout. (#15)
+- **Persistent local URL** — macOS users can install `http://pagecast.localhost`
+  and a login service so Pagecast can stay reachable after restart without a
+  visible port. (#15)
+- **Release automation** — GitHub releases now publish the npm package, push a
+  GHCR Docker image, and attach a packaged Chrome extension zip.
+
+### Fixed
+
+- **Saved edits publish in place** — editing an already-published page now syncs
+  the existing public URL instead of only saving a local draft. (#15)
+- **Portless URL safety** — Pagecast falls back to the actual admin URL when the
+  installed macOS redirect points at a different active port. (#15)
+
 ## 0.2.0 — 2026-06-26
 
 ### Added

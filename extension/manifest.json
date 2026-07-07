@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Pagecast — Local to Public",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Turn a local HTML or Markdown file open in your browser into a public link, via your running Pagecast server.",
   "action": {
     "default_title": "Publish to Pagecast",
@@ -23,5 +23,5 @@
     "service_worker": "background.js"
   },
   "permissions": ["activeTab", "tabs", "contextMenus", "notifications"],
-  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"]
+  "host_permissions": ["http://pagecast.localhost/*", "http://127.0.0.1/*", "http://localhost/*"]
 }

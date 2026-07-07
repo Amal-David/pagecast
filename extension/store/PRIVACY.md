@@ -13,9 +13,10 @@ third party.
 
 ## Where data goes
 - When you click Publish, the extension sends the **local file path** to the
-  Pagecast app **running on your own computer** at `http://127.0.0.1:4173` (your
-  loopback address). That local app reads the file and deploys it to **your own**
-  Cloudflare Pages account.
+  Pagecast app **running on your own computer** at `http://pagecast.localhost`
+  when configured, or `http://127.0.0.1:4173` (your loopback address) otherwise.
+  That local app reads the file and deploys it to **your own** Cloudflare Pages
+  account.
 - The extension makes **no requests to any Pagecast-operated server.** There is no
   Pagecast backend that receives your files, paths, or browsing data.
 - The published page itself lives on **your** Cloudflare account, under your
@@ -29,8 +30,8 @@ third party.
 
 ## Permissions, and why
 - `activeTab` / `tabs`: read the active tab's URL to detect a publishable local file.
-- `host_permissions` for `127.0.0.1` / `localhost`: talk to the Pagecast app
-  running on your own machine.
+- `host_permissions` for `pagecast.localhost` / `127.0.0.1` / `localhost`: talk
+  to the Pagecast app running on your own machine.
 - `contextMenus`: add the right-click "Publish to Pagecast" item.
 - `notifications`: show the resulting link / errors after a right-click publish.
 

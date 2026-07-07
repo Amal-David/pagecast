@@ -33,7 +33,8 @@ Re-publishing the same file **updates the same URL** in place.
 ## Notes
 - A browser extension can't start the local server for you. If Pagecast isn't
   running, the popup tells you to run `npx pagecast` (with a copy button).
-- The extension talks only to `http://127.0.0.1:4173`; the admin server reflects
-  CORS only for `chrome-extension://` origins.
+- The extension tries `http://pagecast.localhost` first, then falls back to
+  `http://127.0.0.1:4173`; the admin server reflects CORS only for
+  `chrome-extension://` origins.
 - Web Store submission assets (listing copy, privacy policy, screenshots, promo
   images, packaging steps) live in `store/`.

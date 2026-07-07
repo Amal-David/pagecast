@@ -168,6 +168,16 @@ A single image bundles the whole `pagecast` CLI, so it serves the admin dashboar
 docker compose up --build
 ```
 
+Release images are published to GHCR:
+
+```sh
+docker pull ghcr.io/amal-david/pagecast:latest
+docker run --rm \
+  -p 127.0.0.1:4173:4173 -p 127.0.0.1:4174:4174 \
+  -v "$PWD/.pagecast:/app/.pagecast" \
+  ghcr.io/amal-david/pagecast:latest serve
+```
+
 The local published-page preview is on `http://localhost:4174`, and your config +
 publish history persist in `./.pagecast` (mounted as a volume).
 
@@ -180,14 +190,19 @@ picks it up:
 cp .env.example .env   # fill in CLOUDFLARE_API_TOKEN (+ CLOUDFLARE_ACCOUNT_ID)
 ```
 
-Run any command headlessly (CI, servers) from the same image — mount your working
-directory and pass the token through:
+Run any command headlessly (CI, servers) from the published image — mount your
+working directory and pass the token through:
+
+```sh
+docker run --rm -v "$PWD:/work" -w /work \
+  -e CLOUDFLARE_API_TOKEN -e CLOUDFLARE_ACCOUNT_ID \
+  ghcr.io/amal-david/pagecast:latest publish ./report.html --json
+```
+
+Or build locally when you want to test an unreleased checkout:
 
 ```sh
 docker build -t pagecast .
-docker run --rm -v "$PWD:/work" -w /work \
-  -e CLOUDFLARE_API_TOKEN -e CLOUDFLARE_ACCOUNT_ID \
-  pagecast publish ./report.html --json
 ```
 
 Notes:

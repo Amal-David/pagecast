@@ -1,13 +1,11 @@
-# Publish pagecast to npm.
+# Publish Pagecast release artifacts.
 #
-# Trigger: publishes the version currently in package.json when you cut a GitHub
-# Release (or run the workflow manually). npm publishes whatever version is in
-# package.json — bump it and commit BEFORE creating the release/tag.
+# Trigger: publishes the version currently in package.json when you cut a
+# GitHub Release (or run the workflow manually for npm). npm publishes whatever
+# version is in package.json — bump it and commit BEFORE creating the release/tag.
 #
-# Requires one repo secret: NPM_TOKEN (an npm automation/granular token with
-# publish rights to `pagecast`). Add it under Settings → Secrets and variables →
-# Actions. The token is the only credential; `npm publish` reads it via
-# NODE_AUTH_TOKEN.
+# Requires one repo secret for npm: NPM_TOKEN (an npm automation/granular token
+# with publish rights to `pagecast`). Docker publishes to GHCR with GITHUB_TOKEN.
 #
 # Supply-chain hardening:
 #   - every action is pinned to a full commit SHA (not a moveable tag)
@@ -21,11 +19,13 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write # needed to upload the Chrome extension zip to the release
   id-token: write # required for npm --provenance
+  packages: write # required for GHCR Docker image publish
 
 jobs:
-  publish:
+  npm:
+    name: Publish npm package
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -49,3 +49,68 @@ jobs:
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  docker:
+    name: Publish Docker image
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Prepare image metadata
+        id: image
+        shell: bash
+        run: |
+          owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          image="ghcr.io/${owner_lc}/pagecast"
+          {
+            echo "image=${image}"
+            echo "tags<<EOF"
+            echo "${image}:${tag}"
+            echo "${image}:${version}"
+            echo "${image}:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  chrome-extension:
+    name: Attach Chrome extension zip
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Package extension
+        shell: bash
+        run: |
+          cd extension
+          zip -r "../pagecast-extension-${GITHUB_REF_NAME}.zip" . -x "store/*" ".*"
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" "pagecast-extension-${GITHUB_REF_NAME}.zip" --clobber

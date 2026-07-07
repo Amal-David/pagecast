@@ -29,8 +29,8 @@ This zips the extension WITHOUT the `store/` assets and dotfiles. Upload
 - **Permission justifications:**
   - `activeTab`/`tabs` — read the active tab URL to detect a publishable `file://`
     page.
-  - host permission `127.0.0.1`/`localhost` — send the file path to the Pagecast
-    app running on the user's own machine.
+  - host permission `pagecast.localhost`/`127.0.0.1`/`localhost` — send the file
+    path to the Pagecast app running on the user's own machine.
   - `contextMenus` — the right-click "Publish to Pagecast" entry.
   - `notifications` — show the resulting link / errors after a right-click publish.
 - **Data usage:** select **does NOT collect or use** user data. The extension only
