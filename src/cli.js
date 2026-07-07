@@ -35,6 +35,8 @@ const staticDir = path.join(packageRoot, "public");
 const cliPath = fileURLToPath(import.meta.url);
 const backgroundPidPath = path.join(dataDir, "pagecast.pid");
 const execFileAsync = promisify(execFile);
+const PROCESS_LOOKUP_TIMEOUT_MS = 1000;
+const WINDOWS_PROCESS_LOOKUP_TIMEOUT_MS = 5000;
 
 function openBrowser(url) {
   const platform = process.platform;
@@ -117,7 +119,9 @@ async function readProcessCommand(pid) {
     return readWindowsProcessCommand(pid);
   }
   try {
-    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], { timeout: 1000 });
+    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], {
+      timeout: PROCESS_LOOKUP_TIMEOUT_MS
+    });
     return stdout.trim();
   } catch {
     return "";
@@ -134,7 +138,7 @@ async function readWindowsProcessCommand(pid) {
     const { stdout } = await execFileAsync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-Command", powershellQuery],
-      { timeout: 1000, windowsHide: true }
+      { timeout: WINDOWS_PROCESS_LOOKUP_TIMEOUT_MS, windowsHide: true }
     );
     return stdout.trim();
   } catch {
@@ -142,7 +146,7 @@ async function readWindowsProcessCommand(pid) {
       const { stdout } = await execFileAsync(
         "wmic",
         ["process", "where", `ProcessId=${normalizedPid}`, "get", "CommandLine", "/value"],
-        { timeout: 1000, windowsHide: true }
+        { timeout: WINDOWS_PROCESS_LOOKUP_TIMEOUT_MS, windowsHide: true }
       );
       const line = stdout
         .split(/\r?\n/)
