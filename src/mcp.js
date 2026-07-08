@@ -495,12 +495,18 @@ export function createPagecastMcpServer({
 }
 
 export function startMcpStdioServer(options = {}) {
-  const server = createPagecastMcpServer(options);
+  const {
+    input = process.stdin,
+    output = process.stdout,
+    server: providedServer
+  } = options;
+  const server = providedServer || createPagecastMcpServer(options);
   let buffer = "";
+  let queue = Promise.resolve();
 
   return new Promise((resolve, reject) => {
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => {
+    input.setEncoding("utf8");
+    input.on("data", (chunk) => {
       buffer += chunk;
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() || "";
@@ -509,11 +515,14 @@ export function startMcpStdioServer(options = {}) {
         if (!trimmed) {
           continue;
         }
-        void handleLine(trimmed);
+        queue = queue.then(() => handleLine(trimmed), () => handleLine(trimmed));
+        void queue.catch(reject);
       }
     });
-    process.stdin.on("end", resolve);
-    process.stdin.on("error", reject);
+    input.on("end", () => {
+      queue.then(resolve, reject);
+    });
+    input.on("error", reject);
   });
 
   async function handleLine(line) {
@@ -521,7 +530,7 @@ export function startMcpStdioServer(options = {}) {
     try {
       message = JSON.parse(line);
     } catch (error) {
-      process.stdout.write(
+      output.write(
         `${JSON.stringify({
           jsonrpc: "2.0",
           id: null,
@@ -533,7 +542,7 @@ export function startMcpStdioServer(options = {}) {
 
     const response = await server.handleJsonRpc(message);
     if (response) {
-      process.stdout.write(`${JSON.stringify(response)}\n`);
+      output.write(`${JSON.stringify(response)}\n`);
     }
   }
 }

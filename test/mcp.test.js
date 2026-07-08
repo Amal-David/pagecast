@@ -3,10 +3,11 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { createPagecastMcpServer } from "../src/mcp.js";
+import { createPagecastMcpServer, startMcpStdioServer } from "../src/mcp.js";
 
 async function makeTempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "pagecast-mcp-"));
@@ -333,6 +334,37 @@ test("MCP resources/read returns Pagecast page state", async () => {
   assert.equal(response.result.contents[0].uri, "pagecast://pages");
   const payload = JSON.parse(response.result.contents[0].text);
   assert.deepEqual(payload.reports, []);
+});
+
+test("MCP stdio transport preserves response order for concurrent-looking input", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let stdout = "";
+  output.setEncoding("utf8");
+  output.on("data", (chunk) => {
+    stdout += chunk;
+  });
+
+  const server = {
+    async handleJsonRpc(message) {
+      if (message.id === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return { jsonrpc: "2.0", id: message.id, result: { ok: true } };
+    }
+  };
+
+  const done = startMcpStdioServer({ input, output, server });
+  input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "slow" })}\n`);
+  input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "fast" })}\n`);
+  input.end();
+  await done;
+
+  const ids = stdout
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => JSON.parse(line).id);
+  assert.deepEqual(ids, [1, 2]);
 });
 
 test("CLI mcp stdio emits only JSON-RPC on stdout", async () => {
