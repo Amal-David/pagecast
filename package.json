@@ -41,7 +41,7 @@
   "scripts": {
     "start": "node src/cli.js",
     "build": "pnpm -C web install --frozen-lockfile --ignore-scripts && pnpm -C web run build",
-    "check": "node --check src/server.js && node --check src/cli.js && node --check src/local-system.js && node --check src/markdown.js && node --check src/nameGenerator.js",
+    "check": "node --check src/server.js && node --check src/cli.js && node --check src/mcp.js && node --check src/local-system.js && node --check src/markdown.js && node --check src/nameGenerator.js",
     "test": "node --test",
     "prepack": "npm run build && npm run check && npm test",
     "prepublishOnly": "npm run check && npm test"

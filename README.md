@@ -158,6 +158,48 @@ cp plugin/skills/publish-report/SKILL.md /path/to/your-agent/skills/publish-repo
 
 More detail in [plugin/README.md](plugin/README.md).
 
+## Use Through MCP
+
+Pagecast can also run as a Model Context Protocol server, so MCP-capable agents
+can publish files or generated HTML/Markdown content without shelling out to the
+CLI themselves.
+
+For local agents, use the stdio server:
+
+```json
+{
+  "mcpServers": {
+    "pagecast": {
+      "command": "npx",
+      "args": ["pagecast", "mcp"]
+    }
+  }
+}
+```
+
+The MCP server exposes tools for status, listing known pages, publishing supplied
+HTML/Markdown content, publishing a local file, and revoking a publication token.
+It uses the same `.pagecast/` config, Cloudflare credentials, expiry, and
+password-protection behavior as `npx pagecast publish`.
+
+For safety, `publish_content` is the preferred MCP path: the supplied content is
+written into isolated Pagecast storage before publishing. `publish_file` also
+isolates the entry file by default; if you need sibling assets from the file's
+folder, pass `includeAssets: true` and `confirmAssets: true` because referenced
+files from that folder may become public.
+
+The MCP server is intentionally separate from the admin API. The admin API can
+run local publish/build work and should stay loopback-only. Do not expose the
+admin port to a VPN or shared network.
+
+Important: this first MCP surface is stdio-only. An org-hosted HTTP MCP endpoint
+or VPN-only publishing target should be added in a follow-up with a dedicated
+threat model, audit logging, and an access-control story. Putting a future MCP
+endpoint behind a VPN would control who can invoke Pagecast; it would not by
+itself make the returned published URL VPN-only. For private recipients today,
+use Pagecast password protection or protect the Pages/custom domain with your
+org's access layer.
+
 ## Run with Docker
 
 A single image bundles the whole `pagecast` CLI, so it serves the admin dashboard

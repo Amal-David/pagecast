@@ -6321,6 +6321,56 @@ export async function publishReportSnapshot({
   };
 }
 
+export async function revokeReportPublication({
+  token,
+  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
+  cloudflareAuthSpawnImpl = spawn,
+  pagesDeploySpawnImpl = spawn,
+  cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
+  pagesDeployTimeoutMs = 180000
+} = {}) {
+  const publicationToken = String(token || "").trim();
+  if (!publicationToken) {
+    throw appError("A publication token is required.", 400);
+  }
+
+  const store = createReportStore({ dataDir });
+  await store.init();
+  const existing = store.findPublication(publicationToken);
+  if (!existing) {
+    throw appError("Published link was not found.", 404);
+  }
+
+  if (!existing.publication.revokedAt && existing.publication.kind === "snapshot") {
+    const { configStore, cloudflareAuth, pagesPublisher } = await createHeadlessCloudflareContext({
+      dataDir,
+      store,
+      cloudflareAuthSpawnImpl,
+      pagesDeploySpawnImpl,
+      cloudflareListTimeoutMs,
+      pagesDeployTimeoutMs
+    });
+    const credential = cloudflareCredentialStatus();
+    if (!credential.tokenConfigured) {
+      const session = await cloudflareAuth.refreshSession();
+      if (!session.loggedIn) {
+        throw appError(cloudflareAuthRequiredMessage(), 401);
+      }
+    }
+    const pagesConfig = pagesConfigForPublication(existing.publication, configStore.get().pages);
+    await pagesPublisher.revoke(
+      [existing.publication.slug || existing.publication.token],
+      pagesConfig
+    );
+  }
+
+  const { report, publication } = await store.revokePublication(publicationToken);
+  return {
+    report: store.formatReport(report, {}),
+    publication: store.formatPublication(publication, {})
+  };
+}
+
 // Publish (or update in place) the live goal-progress page. Idempotent: the first
 // call publishes <file> and records it in config.goal; later calls re-sync the
 // SAME slug/URL with the file's new content (never minting a new link). Stop with
