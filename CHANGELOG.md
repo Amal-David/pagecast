@@ -3,6 +3,24 @@
 All notable changes to Pagecast are documented here. This project follows
 [semantic versioning](https://semver.org/).
 
+## 0.4.0 — 2026-07-08
+
+### Added
+
+- **MCP server support** — `pagecast mcp` now runs a local stdio Model Context
+  Protocol server with tools for status, page listing, content/file publishing,
+  and publication revocation. (#16)
+- **Agent-safe publishing defaults** — MCP `publish_content` writes supplied
+  HTML/Markdown into isolated Pagecast storage, while `publish_file` excludes
+  sibling assets unless both `includeAssets` and `confirmAssets` are set. (#16)
+- **MCP documentation** — README now includes MCP client configuration, tool
+  behavior, example arguments, and the current org/VPN deployment boundary.
+
+### Fixed
+
+- **Stdio response ordering** — MCP requests received together are handled
+  serially so clients see responses in request order. (#16)
+
 ## 0.3.0 — 2026-07-07
 
 ### Added

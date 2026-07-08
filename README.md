@@ -160,11 +160,11 @@ More detail in [plugin/README.md](plugin/README.md).
 
 ## Use Through MCP
 
-Pagecast can also run as a Model Context Protocol server, so MCP-capable agents
-can publish files or generated HTML/Markdown content without shelling out to the
-CLI themselves.
+Pagecast can run as a Model Context Protocol server, so MCP-capable agents can
+publish generated HTML/Markdown, inspect known pages, and revoke links through a
+bounded tool surface instead of shelling out to the CLI themselves.
 
-For local agents, use the stdio server:
+For local agents, configure the stdio server:
 
 ```json
 {
@@ -177,28 +177,59 @@ For local agents, use the stdio server:
 }
 ```
 
-The MCP server exposes tools for status, listing known pages, publishing supplied
-HTML/Markdown content, publishing a local file, and revoking a publication token.
-It uses the same `.pagecast/` config, Cloudflare credentials, expiry, and
-password-protection behavior as `npx pagecast publish`.
+That command shares the same `.pagecast/` config, Cloudflare credentials, expiry,
+and password-protection behavior as `npx pagecast publish`. Add
+`"--data-dir", "/path/to/.pagecast"` to the args only when you intentionally want
+the MCP server to use a different Pagecast workspace.
 
-For safety, `publish_content` is the preferred MCP path: the supplied content is
-written into isolated Pagecast storage before publishing. `publish_file` also
-isolates the entry file by default; if you need sibling assets from the file's
-folder, pass `includeAssets: true` and `confirmAssets: true` because referenced
-files from that folder may become public.
+### MCP tools
+
+| Tool | Purpose | Safety notes |
+| --- | --- | --- |
+| `status` | Show Cloudflare/Pagecast connection state. | Redacted by default; pass `verbose: true` only for trusted local clients. |
+| `list_pages` | List locally known reports and published links. | Redacted by default; pass `verbose: true` only when local paths/build settings are safe to reveal. |
+| `publish_content` | Publish supplied HTML or Markdown content. | Preferred for agents; writes content into isolated Pagecast storage first. |
+| `publish_file` | Publish a local `.html`, `.htm`, `.md`, or `.markdown` file. | Isolates the entry file by default. To include sibling assets, pass both `includeAssets: true` and `confirmAssets: true`. |
+| `revoke_publication` | Take a published token offline and redeploy the Pages site. | Requires `confirm: true` because it changes a live URL. |
+
+Example `publish_content` tool arguments:
+
+```json
+{
+  "content": "<h1>Quarterly report</h1>",
+  "filename": "quarterly-report.html",
+  "label": "Quarterly report",
+  "expires": "7d",
+  "password": "optional-page-password"
+}
+```
+
+Example `publish_file` with sibling assets intentionally included:
+
+```json
+{
+  "path": "/absolute/path/report.html",
+  "label": "Report with assets",
+  "includeAssets": true,
+  "confirmAssets": true
+}
+```
+
+### Organization and VPN deployments
 
 The MCP server is intentionally separate from the admin API. The admin API can
 run local publish/build work and should stay loopback-only. Do not expose the
 admin port to a VPN or shared network.
 
-Important: this first MCP surface is stdio-only. An org-hosted HTTP MCP endpoint
-or VPN-only publishing target should be added in a follow-up with a dedicated
-threat model, audit logging, and an access-control story. Putting a future MCP
-endpoint behind a VPN would control who can invoke Pagecast; it would not by
-itself make the returned published URL VPN-only. For private recipients today,
-use Pagecast password protection or protect the Pages/custom domain with your
-org's access layer.
+This release supports local stdio MCP. An org-hosted HTTP MCP endpoint or
+VPN-only publishing target should be a separate hardening pass with an explicit
+auth model, per-user authorization, audit logging, rate limits, and a threat
+model for what the server is allowed to read and publish.
+
+Putting a future MCP endpoint behind a VPN would control who can invoke
+Pagecast; it would not by itself make the returned published URL VPN-only. For
+private recipients today, use Pagecast password protection or protect the
+Pages/custom domain with your organization's access layer.
 
 ## Run with Docker
 
