@@ -37,6 +37,7 @@ import {
   launchGuiDomain,
   pfRulesTargetPortMatches
 } from "./local-system.js";
+import { startMcpStdioServer } from "./mcp.js";
 import { classifyCommand, createReporter, resolveTelemetry } from "./telemetry.js";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -367,6 +368,7 @@ const VALUE_FLAGS = new Set([
   "account",
   "account-id",
   "branch",
+  "data-dir",
   "expires",
   "host",
   "keep",
@@ -882,6 +884,23 @@ async function publish(args) {
   }
 }
 
+async function mcp(args) {
+  const explicitSubcommand = args[0] && !args[0].startsWith("--") ? args[0] : "stdio";
+  const rest = explicitSubcommand === "stdio" && args[0]?.startsWith("--") ? args : args.slice(1);
+  const subcommand = explicitSubcommand;
+  const parsed = parseFlags(rest);
+  const mcpDataDir = optionValue(parsed, "data-dir") || dataDir;
+
+  if (subcommand === "stdio") {
+    await startMcpStdioServer({ dataDir: mcpDataDir, version: packageVersion });
+    return;
+  }
+
+  console.error(`Unknown mcp command: ${subcommand || ""}\n`);
+  usage();
+  process.exit(1);
+}
+
 async function deploySite(args, parsed = parseFlags(args)) {
   const json = wantsJson(parsed);
   const sourceDir = parsed.positionals[0];
@@ -1189,6 +1208,7 @@ function usage() {
       "  pagecast goal publish <file> [--slug goal] [--json]   Publish/update a live goal-progress page",
       "  pagecast goal status [--json]                         Show the current goal page",
       "  pagecast goal stop [--json]                           Take the goal page offline",
+      "  pagecast mcp [stdio] [--data-dir <dir>]                Run a local stdio MCP server",
       "  pagecast telemetry status [--json]                    Show anonymous-usage-telemetry state",
       "  pagecast telemetry enable|disable                     Turn anonymous usage telemetry on/off",
       "  pagecast --help                                       Show this help"
@@ -1204,6 +1224,13 @@ async function run() {
   // (avoids phoning home on the very command used to opt out).
   if (command === "telemetry") {
     await telemetry(rest);
+    return;
+  }
+
+  // MCP uses stdout as a protocol stream, so start it before any telemetry setup
+  // or user-facing output that could corrupt JSON-RPC framing.
+  if (command === "mcp") {
+    await mcp(rest);
     return;
   }
 

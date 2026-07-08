@@ -41,6 +41,7 @@ import {
   parseWranglerWhoamiAccounts,
   parseMultipartUpload,
   publishReportSnapshot,
+  revokeReportPublication,
   setupCloudflarePages,
   startServers
 } from "../src/server.js";
@@ -1373,6 +1374,82 @@ test("Headless publishReportSnapshot auto-provisions and returns a public URL", 
   assert.match(result.url, /^https:\/\/pagecast\.pages\.dev\/p\/.+\/$/);
   assert.equal(result.projectName, "pagecast");
   assert.ok(deployCommands.length >= 1, "expected a Pages deploy");
+});
+
+test("Headless revoke uses the publication's remembered Pages target", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportDir = path.join(tempDir, "report");
+  await fs.mkdir(reportDir, { recursive: true });
+  const reportPath = path.join(reportDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>Revoke me</h1>");
+
+  const oldAccountId = "11111111111111111111111111111111";
+  const currentAccountId = "22222222222222222222222222222222";
+  const configStore = createConfigStore({ dataDir });
+  await configStore.init();
+  await configStore.updatePages({
+    projectName: "current-project",
+    accountId: currentAccountId,
+    baseUrl: "https://current-project.pages.dev"
+  });
+
+  const store = createReportStore({ dataDir });
+  await store.init();
+  const report = await store.addPath(reportPath);
+  const draft = store.draftPublication(report.id, { kind: "snapshot", label: "Old target" });
+  Object.assign(draft.publication, {
+    slug: "old-target",
+    publicUrl: "https://old-project.pages.dev/p/old-target/",
+    pagesProjectName: "old-project",
+    pagesAccountId: oldAccountId,
+    pagesBaseUrl: "https://old-project.pages.dev"
+  });
+  await store.commitPublication(report.id, draft.publication);
+
+  const previousToken = process.env.CLOUDFLARE_API_TOKEN;
+  const previousAccountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  process.env.CLOUDFLARE_API_TOKEN = "test-token";
+  process.env.CLOUDFLARE_ACCOUNT_ID = currentAccountId;
+  const deployCommands = [];
+  function fakeDeploy(command, args, options) {
+    deployCommands.push({ command, args, accountId: options.env.CLOUDFLARE_ACCOUNT_ID || "" });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => child.emit("exit", null, "SIGTERM");
+    setImmediate(() => {
+      child.stdout.emit("data", Buffer.from("https://abcdef123456.old-project.pages.dev/"));
+      child.emit("exit", 0, null);
+    });
+    return child;
+  }
+
+  try {
+    await revokeReportPublication({
+      token: draft.publication.token,
+      dataDir,
+      pagesDeploySpawnImpl: fakeDeploy,
+      pagesDeployTimeoutMs: 1000
+    });
+  } finally {
+    if (previousToken === undefined) {
+      delete process.env.CLOUDFLARE_API_TOKEN;
+    } else {
+      process.env.CLOUDFLARE_API_TOKEN = previousToken;
+    }
+    if (previousAccountId === undefined) {
+      delete process.env.CLOUDFLARE_ACCOUNT_ID;
+    } else {
+      process.env.CLOUDFLARE_ACCOUNT_ID = previousAccountId;
+    }
+  }
+
+  assert.ok(deployCommands.length >= 1, "expected revoke to redeploy the Pages site");
+  const deploy = deployCommands.at(-1);
+  assert.equal(deploy.accountId, oldAccountId);
+  assert.ok(deploy.args.includes("old-project"));
+  assert.equal(deploy.args.includes("current-project"), false);
 });
 
 test("Headless Pages site deploy wraps Wrangler with project, branch, and account env", async () => {

@@ -52,6 +52,27 @@ The portable `SKILL.md` is the Agent-Skills format. The detection hook is
 Claude-Code-specific; elsewhere the skill still triggers when a report is created
 or when you ask to publish one.
 
+### MCP-capable agents
+
+If your agent supports MCP, you can connect it directly to Pagecast instead of
+copying a skill file:
+
+```json
+{
+  "mcpServers": {
+    "pagecast": {
+      "command": "npx",
+      "args": ["pagecast", "mcp"]
+    }
+  }
+}
+```
+
+This first MCP integration is stdio-only. Keep the Pagecast admin API private;
+do not expose the admin port to a VPN or shared network. A hosted HTTP MCP
+endpoint should be a separate hardening pass with its own authentication and
+audit model.
+
 ### 2. Connect Cloudflare
 
 ```sh
