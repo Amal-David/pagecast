@@ -3,6 +3,70 @@
 All notable changes to Pagecast are documented here. This project follows
 [semantic versioning](https://semver.org/).
 
+## 0.5.0 — 2026-07-09
+
+### Added
+
+- **Separate preview trust boundary** — report HTML now comes from the local
+  public/preview origin, never the admin origin. Admin redirects old
+  `/preview/...` requests and embeds previews with a restrictive iframe sandbox.
+- **Authenticated local mutations** — browser writes require an allowed Origin
+  and current admin-session token; every no-Origin write uses the private
+  workspace capability; the Chrome extension is limited to its three adapter
+  routes. Non-loopback binds are rejected, with an explicit wildcard exception
+  only for the packaged loopback-mapped Docker proxy.
+- **Project-scoped publication state** — Cloudflare identity is the account ID
+  plus project name. Snapshots, redirects, protection manifests, and deployment
+  staging are isolated by that identity and carry a Pagecast ownership marker.
+- **Single-writer recovery** — a workspace lease, private runtime descriptor,
+  atomic local state writes, and durable cross-system operation journal prevent
+  concurrent CLI/MCP/server mutations from silently losing updates and keep
+  incomplete Cloudflare reconciliation visible and retryable.
+- **Stronger new unlisted URLs** — newly generated unlisted and protected slugs
+  combine a memorable prefix with 128 bits of opaque capability entropy. Short
+  drops and every existing word-only URL keep their previous behavior.
+- **Cross-platform and release proofs** — CI now covers Node 20/22 on Linux and
+  Windows, plus committed UI bundle, package, and Docker checks on Linux.
+
+### Changed
+
+- **Explicit target adoption** — unrelated existing Cloudflare projects are not
+  silently managed. Legacy links without a recorded account/project stay
+  readable and require **Attach selected project** before sync, rename, expiry,
+  or revoke.
+- **Direct deploy separation** — `pagecast pages deploy` uses target/branch-scoped
+  staging and never changes the managed `/p/...` publication selection. It still
+  replaces the named Pages project's contents.
+- **Telemetry consent** — genuinely fresh installs send no telemetry until
+  `pagecast telemetry enable`. Existing persisted choices and explicit
+  environment overrides remain compatible.
+- **Actual Cloudflare origin** — published URLs and social metadata use the
+  production origin returned by deployment rather than assuming a project-name
+  hostname.
+- **Explicit vanity-link semantics** — custom slugs without the 128-bit
+  capability suffix, including the goal URL, are recorded as public drops;
+  existing word-only links retain their legacy classification and URL.
+- **Native build shell** — source-folder commands use `sh -lc` on POSIX and
+  `%ComSpec% /d /s /c` on Windows. Command syntax itself is still
+  platform-specific.
+- **Pinned publisher toolchain** — native and Docker publishing share the exact
+  Wrangler `4.86.0` pin from `src/platform.js`; an exact-version override is
+  available only for tests and deliberate local compatibility work.
+- **Package boundary and versions** — the root export now has an explicit
+  compatibility-preserving `src/index.js` boundary. npm package, Chrome
+  extension, Codex skill, and Claude plugin metadata are aligned at `0.5.0`.
+
+### Upgrade notes
+
+- Restart any v0.4 background process once so v0.5 can own the workspace lease
+  and authenticated command descriptor. Reload/update the bundled extension at
+  the same time; old extension code cannot complete the new CSRF handshake.
+- Existing URLs and persisted state are not rotated. For unattributed legacy
+  links, select the original Cloudflare project and explicitly attach each link
+  before attempting a mutation.
+- A repository administrator must enable the new CI jobs as required `main`
+  checks after merge; branch-protection settings cannot be changed by this PR.
+
 ## 0.4.0 — 2026-07-08
 
 ### Added
@@ -47,18 +111,18 @@ All notable changes to Pagecast are documented here. This project follows
 ### Added
 
 - **Memorable links** — published pages now get human-readable word-slugs
-  (e.g. `/p/hollow-paperclip/`) instead of a random token tail. Links are
-  long and hard-to-guess (private) by default. (#10)
+  (e.g. `/p/hollow-paperclip/`) instead of a random token tail. This legacy
+  unlisted URL shape remains supported. (#10)
 - **Advanced publish settings** — a "Publish as a drop" toggle in the admin UI
-  mints a short, shareable (guessable) link; the default stays a long,
-  hard-to-guess private link. (#11)
+  mints a short, shareable (guessable) link; the default stayed a longer
+  unlisted word-only link. (#11)
 - **Docker support** — a single image runs the dashboard *and* every
   publish/deploy command. Ships a Dockerfile, Compose file, and headless CLI
   usage with a scoped `CLOUDFLARE_API_TOKEN`. (#9)
 - **Deploy history** — view and remove old whole-site Cloudflare Pages
   deployment snapshots from the admin UI (**Settings → Deploy history**) or the
   terminal: `pagecast pages deployments list|delete|prune`. (#6)
-- **Anonymous usage telemetry (opt-out)** — reports only the command name,
+- **Anonymous usage telemetry (originally opt-out)** — reports only the command name,
   pagecast/Node version, and OS/arch; never file contents, paths, published
   URLs, or Cloudflare tokens. Off in CI by default; disable with
   `pagecast telemetry disable`, `PAGECAST_TELEMETRY=0`, or `DO_NOT_TRACK=1`. (#12)

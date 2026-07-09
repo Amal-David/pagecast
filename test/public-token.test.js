@@ -5,12 +5,13 @@ import { createPublicToken, publicTokenNamePrefix } from "../src/server.js";
 
 const HEX_TAIL = /-[0-9a-f]{32}$/;
 
-test("createPublicToken is an all-words memorable slug with no random tail", () => {
+test("createPublicToken combines a memorable prefix with a 128-bit capability", () => {
   for (let i = 0; i < 500; i += 1) {
     const token = createPublicToken();
-    assert.doesNotMatch(token, HEX_TAIL, `"${token}" still carries a hex tail`);
-    const parts = token.split("-");
-    assert.ok(parts.length >= 2, `"${token}" should be at least two words`);
+    assert.match(token, HEX_TAIL, `"${token}" is missing its capability`);
+    const prefix = publicTokenNamePrefix(token);
+    const parts = prefix.split("-");
+    assert.ok(parts.length >= 2, `"${prefix}" should be at least two words`);
     for (const part of parts) {
       assert.match(part, /^[a-z]+$/, `part "${part}" is not pure lowercase letters`);
     }
@@ -27,7 +28,7 @@ test("createPublicToken re-rolls until the name is not taken", () => {
     return calls <= 5;
   });
   assert.ok(calls >= 6, `expected re-rolls, isNameTaken called ${calls} times`);
-  assert.match(token, /^[a-z]+(?:-[a-z]+)+$/, `"${token}" is not a clean word name`);
+  assert.match(token, /^[a-z]+(?:-[a-z]+)+-[0-9a-f]{32}$/);
 });
 
 test("publicTokenNamePrefix strips a legacy entropy tail but leaves clean names alone", () => {
@@ -41,23 +42,21 @@ test("publicTokenNamePrefix strips a legacy entropy tail but leaves clean names 
   assert.equal(publicTokenNamePrefix(""), "");
 });
 
-test("a fresh token round-trips through publicTokenNamePrefix unchanged", () => {
+test("a fresh token exposes its memorable prefix without its capability", () => {
   const token = createPublicToken();
-  assert.equal(publicTokenNamePrefix(token), token, "tail-free token should be its own name");
+  assert.notEqual(publicTokenNamePrefix(token), token);
+  assert.match(publicTokenNamePrefix(token), /^[a-z]+(?:-[a-z]+)+$/);
 });
 
-test("a drop gets a short shareable name; default gets a long private name", () => {
+test("a drop stays short while the default gets an unlisted capability", () => {
   for (let i = 0; i < 200; i += 1) {
     const dropParts = createPublicToken(() => false, { drop: true }).split("-");
     assert.ok(dropParts.length <= 3, `drop name should be short, got ${dropParts.length} words`);
 
-    const privateParts = createPublicToken(() => false, { drop: false }).split("-");
-    assert.ok(privateParts.length >= 5, `private name should be long, got ${privateParts.length} words`);
+    assert.match(createPublicToken(() => false, { drop: false }), HEX_TAIL);
   }
 });
 
-test("private (non-drop) is the default when no option is passed", () => {
-  // No opts → private/long, so links are not guessable unless explicitly a drop.
-  const parts = createPublicToken().split("-");
-  assert.ok(parts.length >= 5, `default should be the long private name, got "${parts.join("-")}"`);
+test("unlisted (non-drop) is the default when no option is passed", () => {
+  assert.match(createPublicToken(), HEX_TAIL);
 });

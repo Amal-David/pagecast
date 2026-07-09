@@ -30,6 +30,7 @@
     "autoprefixer": "10.5.0",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
+    "esbuild": "0.28.1",
     "framer-motion": "12.40.0",
     "lucide-react": "1.16.0",
     "postcss": "8.5.15",
@@ -40,6 +41,11 @@
     "tailwindcss": "3.4.19",
     "tailwindcss-animate": "1.0.7",
     "typescript": "5.9.3",
-    "vite": "7.3.3"
+    "vite": "7.3.5"
+  },
+  "pnpm": {
+    "overrides": {
+      "esbuild": "0.28.1"
+    }
   }
 }

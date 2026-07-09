@@ -55,6 +55,7 @@ import { DefaultExpiryCard } from "@/components/default-expiry-card";
 import { FeedbackStatsPanel } from "@/components/feedback-stats";
 import { AddReport } from "@/components/add-report";
 import { PublicationRow } from "@/components/publication-row";
+import { OperationJournal } from "@/components/operation-journal";
 import { PreviewDialog } from "@/components/preview-dialog";
 import { EditorSheet } from "@/components/editor/editor-sheet";
 import {
@@ -63,8 +64,10 @@ import {
   useDeleteReport,
   usePasswordProtection,
   usePublishSnapshot,
+  useOperations,
   useReports,
   useRevokeAll,
+  useRetryOperation,
   useSetCloudflareSyncEnabled,
   useSyncCloudflarePages,
   useStatus
@@ -97,6 +100,7 @@ interface ActivityItem extends ActivityEventDetail {
 interface PublishSummary {
   elapsedMs: number;
   url: string;
+  expiresAt: number | null;
 }
 
 interface CloudflareProjectPreviewState {
@@ -203,12 +207,14 @@ function useElapsed(startedAt: number | null) {
 export function App() {
   const status = useStatus();
   const reports = useReports();
+  const operations = useOperations();
   const publish = usePublishSnapshot();
   const autoSync = useAutoSync();
   const passwordProtection = usePasswordProtection();
   const build = useBuildReport();
   const deleteReport = useDeleteReport();
   const revokeAll = useRevokeAll();
+  const retryOperation = useRetryOperation();
   const syncCloudflare = useSyncCloudflarePages();
   const setCloudflareSyncEnabled = useSetCloudflareSyncEnabled();
 
@@ -322,7 +328,8 @@ export function App() {
         const elapsed = Date.now() - startedAt;
         setPublishSummary({
           elapsedMs: elapsed,
-          url: data.publication.publicUrl || data.publication.localUrl || ""
+          url: data.publication.publicUrl || data.publication.localUrl || "",
+          expiresAt: data.publication.expiresAt
         });
         setPublishStartedAt(null);
         setPublishingReportId(null);
@@ -353,7 +360,12 @@ export function App() {
   const cloudflare = status.data?.cloudflare;
   const accountName = displayAccountName(cloudflare);
   const projectName = cloudflare?.projectName || "";
-  const connected = Boolean(cloudflare?.loggedIn && accountName && projectName);
+  const connected = Boolean(
+    cloudflare?.loggedIn &&
+      accountName &&
+      projectName &&
+      cloudflare.requiresAdoption !== true
+  );
   const cloudflareReady = !status.isLoading && status.data !== undefined;
   const feedback = status.data?.config?.feedback ?? null;
   const feedbackEnabled = Boolean(feedback?.url);
@@ -384,12 +396,15 @@ export function App() {
           connected={connected}
           accountName={accountName}
           projectName={projectName}
-          isRefreshing={status.isFetching || reports.isFetching}
+          isRefreshing={
+            status.isFetching || reports.isFetching || operations.isFetching
+          }
           syncPending={syncCloudflare.isPending}
           syncDisabled={!connected}
           onRefresh={() => {
             void status.refetch();
             void reports.refetch();
+            void operations.refetch();
           }}
           onSync={() => syncCloudflare.mutate({})}
           onOpenSettings={goToSettings}
@@ -408,6 +423,14 @@ export function App() {
             .
           </div>
         ) : null}
+
+        <OperationJournal
+          operations={operations.data ?? status.data?.operations ?? []}
+          retryingOperationId={
+            retryOperation.isPending ? retryOperation.variables?.id ?? null : null
+          }
+          onRetry={(operation) => retryOperation.mutate(operation)}
+        />
 
         <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[52px_320px_minmax(0,1fr)]">
           <AppRail activeView={activeView} onPages={() => setActiveView("pages")} onSettings={goToSettings} />
@@ -928,6 +951,7 @@ function CloudflareProjectList({
   const projects = projectsQuery.data?.cloudflare.projects ?? [];
   const projectName = cloudflare?.projectName ?? "";
   const selectedAccountId = cloudflare?.accountId || "";
+  const requiresAdoption = cloudflare?.requiresAdoption === true;
   const { selectedProjectValue, displayedProjects } = getCloudflareProjectSelection(
     projects,
     projectName,
@@ -962,12 +986,13 @@ function CloudflareProjectList({
           {displayedProjects.map((project) => {
             const projectValue = cloudflareProjectValue(project);
             const isCurrent = projectValue === selectedProjectValue;
+            const canAdopt = isCurrent && requiresAdoption;
 
             return (
               <button
                 key={projectValue}
                 type="button"
-                disabled={isCurrent || selectProject.isPending || syncPending}
+                disabled={(isCurrent && !canAdopt) || selectProject.isPending || syncPending}
                 onClick={() => selectProject.mutate(project, { onSuccess: () => onProjectSelected(project) })}
                 className={cn(
                   "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:hover:bg-transparent",
@@ -981,13 +1006,13 @@ function CloudflareProjectList({
                     {cloudflareProjectDomain(project)}
                   </span>
                 </span>
-                {isCurrent ? (
+                {isCurrent && !canAdopt ? (
                   <Badge variant="secondary" className="shrink-0 text-[10px]">
                     Current
                   </Badge>
                 ) : (
                   <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
-                    Switch
+                    {canAdopt ? "Adopt" : "Switch"}
                   </span>
                 )}
               </button>
@@ -1143,8 +1168,8 @@ function PageWorkspace({
 }) {
   const [passwordDraftOpen, setPasswordDraftOpen] = useState(false);
   const [passwordDraft, setPasswordDraft] = useState("");
-  // Publish-time choice: a "drop" gets a short, shareable (guessable) link;
-  // otherwise the link is long and hard to guess. Default off = private.
+  // A drop is short and intentionally discoverable; the default is an unlisted
+  // capability URL. Password protection remains the access-control boundary.
   const [publishAsDrop, setPublishAsDrop] = useState(false);
 
   const reportId = report?.id ?? null;
@@ -1331,7 +1356,7 @@ function PageWorkspace({
               ) : null}
               <SettingsRow
                 label="Short public link"
-                value={publishAsDrop ? "Easy to share" : "Hard to guess"}
+                value={publishAsDrop ? "Easy to share" : "Unlisted capability"}
                 control={
                   <Switch
                     checked={publishAsDrop}
@@ -1739,6 +1764,8 @@ function PreviewPane({
               <iframe
                 src={src}
                 title={`Preview of ${report.name}`}
+                sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
+                referrerPolicy="no-referrer"
                 className="origin-top-left border-0 bg-background"
                 style={{
                   width: viewport.width,
@@ -1821,6 +1848,11 @@ function PublishProgress({
           Live — published in {formatElapsed(summary?.elapsedMs ?? 0)}
         </p>
       </div>
+      <p className="mt-1 text-xs text-emerald-800">
+        {summary?.expiresAt
+          ? `Expires ${new Date(summary.expiresAt).toLocaleString()}`
+          : "Expires never"}
+      </p>
       {url ? (
         <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
           <button

@@ -7,17 +7,18 @@
 # subcommand. The dashboard and the CLI are the same program — installing one
 # installs both.
 #
-# Base is Node 22 (current LTS): pagecast needs >=20, and a pinned wrangler needs
-# >=22, so 22 satisfies both.
+# Base is Node 22 (current LTS). Native Pagecast and the pinned Wrangler support
+# Node >=20.19.0; the container stays on the newer LTS for its production runtime.
 FROM node:22-slim
 
 # wrangler is the Cloudflare CLI that pagecast shells out to for publishing and
-# deploys. Bake a pinned version into the image so deploys are reproducible and
-# don't fetch wrangler over the network on first use. Pin exactly (no `latest`,
-# no `^`) per supply-chain hygiene; bump deliberately. `npx wrangler` inside the
-# app resolves this globally-installed binary instead of downloading one.
-ARG WRANGLER_VERSION=4.101.0
-RUN npm install --global --no-audit --no-fund "wrangler@${WRANGLER_VERSION}" \
+# deploys. Read the exact version from the same runtime module used by native
+# Pagecast, then select this baked global binary at runtime so container deploys
+# neither drift versions nor contact npm after the image has been built.
+COPY src/platform.js /tmp/pagecast-platform.mjs
+RUN node --input-type=module -e \
+  'import { spawnSync } from "node:child_process"; import { PINNED_WRANGLER_VERSION } from "file:///tmp/pagecast-platform.mjs"; const result = spawnSync("npm", ["install", "--global", "--no-audit", "--no-fund", `wrangler@${PINNED_WRANGLER_VERSION}`], { stdio: "inherit" }); process.exit(result.status ?? 1);' \
+  && rm -f /tmp/pagecast-platform.mjs \
   && npm cache clean --force
 
 WORKDIR /app
@@ -37,9 +38,14 @@ RUN mkdir -p /app/.pagecast && chown -R node:node /app
 
 # Inside a container the servers must listen on all interfaces for Docker port
 # mapping to reach them; outside Docker the default stays 127.0.0.1. ALWAYS map
-# these ports to the host's loopback only (see docker-compose.yml) — the admin
-# API is unauthenticated and can run shell commands.
+# these ports to the host's loopback only (see docker-compose.yml). The explicit
+# loopback-proxy opt-in below permits only the container wildcard case; arbitrary
+# routable bind hosts stay rejected. Browser Origin/CSRF and local command
+# capabilities are not remote-user authentication, and the admin server can run
+# user-configured build commands.
 ENV HOST=0.0.0.0 \
+    PAGECAST_ALLOW_LOOPBACK_PROXY=1 \
+    PAGECAST_USE_GLOBAL_WRANGLER=1 \
     PORT=4173 \
     PUBLIC_PORT=4174
 
@@ -51,7 +57,7 @@ EXPOSE 4173 4174
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||4173)+'/',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"
 
-# Drop root: the admin API is unauthenticated and can run shell commands, so the
+# Drop root: the admin server can run user-configured build commands, so the
 # runtime process runs as the unprivileged `node` user. Ports 4173/4174 are
 # >1024, so no privilege is needed to bind them.
 USER node

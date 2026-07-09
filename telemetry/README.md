@@ -2,9 +2,11 @@
 
 This directory holds the server-side validation logic for anonymous usage
 telemetry, plus an optional standalone-Worker deployment. End users control
-whether anything is sent at all (`pagecast telemetry disable`,
-`PAGECAST_TELEMETRY=0`, or `DO_NOT_TRACK=1`). See the repository `PRIVACY.md` for
-exactly what is and isn't collected.
+whether anything is sent at all. A fresh v0.5 install sends nothing until
+`pagecast telemetry enable`; existing persisted choices remain compatible.
+`PAGECAST_TELEMETRY=0` and `DO_NOT_TRACK=1` disable delivery, while an explicit
+`PAGECAST_TELEMETRY=1` enables it outside a `DO_NOT_TRACK` environment. See the
+repository `PRIVACY.md` for exactly what is and isn't collected.
 
 ## Where events actually go
 
@@ -29,6 +31,9 @@ Per event (all anonymous, all re-validated server-side against fixed allowlists)
 - `os` / `arch` / `node` — coarse platform info
 - `anonId` — a random opaque 32-char install id (no PII, no account linkage)
 
+The install id is created lazily only after telemetry is enabled and an event is
+about to be sent.
+
 Never stored: file contents, file paths, published URLs, Cloudflare tokens or
 account IDs, IP addresses.
 
@@ -36,7 +41,7 @@ account IDs, IP addresses.
 
 ```bash
 cd telemetry
-npx wrangler deploy
+npx --yes wrangler@4.86.0 deploy
 ```
 
 Requires Analytics Engine enabled on the account (Dashboard → Workers & Pages →

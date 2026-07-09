@@ -7,6 +7,8 @@ import type {
   DeploymentsResponse,
   FeedbackSetupResponse,
   FeedbackStatsResponse,
+  OperationRetryResponse,
+  OperationsResponse,
   PruneDeploymentsResponse,
   PublishResponse,
   Report,
@@ -14,6 +16,7 @@ import type {
   ReportsResponse,
   StatusResponse
 } from "@/lib/types";
+import { createCsrfRecovery } from "@/lib/csrf-recovery.js";
 
 // Mirrors the server error envelope: { error: { message, statusCode } }.
 export class ApiError extends Error {
@@ -26,20 +29,30 @@ export class ApiError extends Error {
   }
 }
 
+const csrfRecovery = createCsrfRecovery({
+  fetchImpl: (input, init) => fetch(input, init),
+  createSessionError: (message, statusCode) => new ApiError(message, statusCode)
+});
+
 async function request<T>(
   path: string,
   options: RequestInit & { json?: unknown } = {}
 ): Promise<T> {
   const { json, headers, ...rest } = options;
-  const init: RequestInit = { ...rest, headers: { ...headers } };
+  const requestHeaders = new Headers(headers);
+  const init: RequestInit = {
+    ...rest,
+    credentials: rest.credentials ?? "same-origin",
+    headers: requestHeaders
+  };
 
   if (json !== undefined) {
     init.method = init.method ?? "POST";
-    init.headers = { ...init.headers, "Content-Type": "application/json" };
+    requestHeaders.set("Content-Type", "application/json");
     init.body = JSON.stringify(json);
   }
 
-  const response = await fetch(path, init);
+  const response = await csrfRecovery.fetch(path, init);
 
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
@@ -74,6 +87,14 @@ export const api = {
   getStatus: () => request<StatusResponse>("/api/status"),
 
   getReports: () => request<ReportsResponse>("/api/reports"),
+
+  getOperations: () => request<OperationsResponse>("/api/operations"),
+
+  retryOperation: (id: string) =>
+    request<OperationRetryResponse>(
+      `/api/operations/${encodeURIComponent(id)}/retry`,
+      { json: {} }
+    ),
 
   addPath: (path: string) =>
     request<ReportResponse>("/api/reports/path", { json: { path } }),
@@ -116,9 +137,10 @@ export const api = {
     request<ReportsResponse>("/api/reports/reorder", { json: { ids } }),
 
   deleteReport: (id: string) =>
-    request<{ removed: boolean }>(`/api/reports/${encodeURIComponent(id)}`, {
-      method: "DELETE"
-    }),
+    request<{ removed: boolean; cleanupPending: boolean; cleanupError: string | null }>(
+      `/api/reports/${encodeURIComponent(id)}`,
+      { method: "DELETE" }
+    ),
 
   publishSnapshot: (id: string, options?: { label?: string; drop?: boolean }) =>
     request<PublishResponse>(
@@ -192,7 +214,13 @@ export const api = {
     accountId?: string;
     accountName?: string;
     baseUrl?: string;
+    adoptExisting?: boolean;
   }) => request<ConfigResponse>("/api/config/pages", { json: payload }),
+
+  adoptPublicationTarget: (token: string) =>
+    request<PublishResponse>(`/api/publications/${encodeURIComponent(token)}/target`, {
+      json: { confirm: true }
+    }),
 
   cloudflareConnect: () =>
     request<unknown>("/api/cloudflare/connect", { json: {} }),

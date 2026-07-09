@@ -118,6 +118,10 @@ async function publishOnce({ badge }) {
 
   const configStore = createConfigStore({ dataDir });
   await configStore.init();
+  await configStore.updatePages({
+    accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    adoptExisting: true
+  });
   const store = createReportStore({ dataDir });
   await store.init();
   const publisher = createCloudflarePagesPublisher({
@@ -126,11 +130,20 @@ async function publishOnce({ badge }) {
     timeoutMs: 5000,
     getBadge: () => badge,
     getProtectedPublications: () => store.protectedPublicationManifest(),
-    getAuthCookieSecret: () => configStore.get().authCookieSecret
+    getAuthCookieSecret: () => configStore.get().authCookieSecret,
+    getOwnerId: () => configStore.getOwnerId(),
+    isTargetManaged: (projectRef) => configStore.isTargetManaged(projectRef),
+    claimTargetManaged: (projectRef) => configStore.claimManagedTarget(projectRef)
   });
 
   const report = await store.addPath(path.join(reportDir, "index.html"));
   const draft = store.draftPublication(report.id, { kind: "snapshot" });
+  Object.assign(draft.publication, {
+    pagesProjectName: configStore.get().pages.projectName,
+    pagesAccountId: configStore.get().pages.accountId,
+    pagesBaseUrl: configStore.get().pages.baseUrl,
+    projectRef: configStore.get().pages
+  });
   draft.publication.publicUrl = await publisher.publish({
     report: draft.report,
     publication: draft.publication,

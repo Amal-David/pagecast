@@ -141,6 +141,10 @@ test("publishing an expiring report writes a middleware that gates the slug by e
 
   const configStore = createConfigStore({ dataDir });
   await configStore.init();
+  await configStore.updatePages({
+    accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    adoptExisting: true
+  });
   const store = createReportStore({ dataDir });
   await store.init();
   const publisher = createCloudflarePagesPublisher({
@@ -148,12 +152,21 @@ test("publishing an expiring report writes a middleware that gates the slug by e
     spawnImpl: fakeDeploySpawn,
     timeoutMs: 5000,
     getProtectedPublications: () => store.protectedPublicationManifest(),
-    getAuthCookieSecret: () => configStore.get().authCookieSecret
+    getAuthCookieSecret: () => configStore.get().authCookieSecret,
+    getOwnerId: () => configStore.getOwnerId(),
+    isTargetManaged: (projectRef) => configStore.isTargetManaged(projectRef),
+    claimTargetManaged: (projectRef) => configStore.claimManagedTarget(projectRef)
   });
 
   const report = await store.addPath(path.join(reportDir, "index.html"));
   const expiresAt = Date.now() + 3_600_000;
   const draft = store.draftPublication(report.id, { kind: "snapshot", expiresAt });
+  Object.assign(draft.publication, {
+    pagesProjectName: configStore.get().pages.projectName,
+    pagesAccountId: configStore.get().pages.accountId,
+    pagesBaseUrl: configStore.get().pages.baseUrl,
+    projectRef: configStore.get().pages
+  });
   // Commit before deploying so the edge manifest (built from committed snapshots)
   // includes this expiring slug when the middleware is generated.
   await store.commitPublication(report.id, draft.publication);

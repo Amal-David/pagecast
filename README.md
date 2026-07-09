@@ -16,6 +16,9 @@ static web projects. Preview files, manage published versions, rename links,
 re-sync updates, password-protect pages, and revoke old URLs — from a local
 admin UI or headless `pagecast` commands.
 
+The trust boundaries, state/target invariants, and corrected PR-lineage
+decisions are recorded in [ARCHITECTURE.md](ARCHITECTURE.md).
+
 **Good fits:** HTML reports and dashboards (Playwright, Lighthouse, coverage);
 Markdown plans, docs, and release notes; static mini apps from `dist`/`build`/`out`;
 coding-agent workflows that publish a finished artifact on request.
@@ -25,7 +28,7 @@ backend (export static assets first).
 
 ## Quick Start
 
-Requires Node.js 20+ and a Cloudflare account (for publishing). No global install:
+Requires Node.js 20.19+ and a Cloudflare account (for publishing). No global install:
 
 ```sh
 npx pagecast
@@ -34,8 +37,28 @@ npx pagecast
 This starts the local app and opens the admin UI:
 
 - Admin UI — `http://pagecast.localhost:4173`
-- Local published-page preview — `http://pagecast.localhost:4174` (same `/p/<slug>/` shape it deploys)
+- Local preview/public origin — `http://pagecast.localhost:4174` (the admin
+  embeds this separate origin; raw report HTML is never served by the admin
+  origin)
 - Local data/config — `.pagecast/` in the current directory
+
+### Upgrading from 0.4
+
+- Stop and restart any v0.4 background process once after upgrading. v0.5 uses
+  a workspace lease and authenticated local command protocol that an old process
+  does not understand.
+- Reload/update the bundled Chrome extension with Pagecast. The v0.5 extension
+  negotiates the new admin-session token before publishing.
+- Existing URLs, passwords, expiries, redirects, Cloudflare selections, and
+  `.pagecast/` data remain readable. Existing word-only URLs are preserved as
+  issued; Pagecast does not silently rotate them.
+- A legacy publication whose Cloudflare account/project was never recorded is
+  readable but cannot be synced, renamed, re-expired, or revoked until you
+  select its original project and click **Attach selected project** for that
+  link.
+- On a genuinely fresh install, telemetry sends nothing until you run
+  `pagecast telemetry enable`. Existing saved choices and explicit environment
+  overrides keep their previous behavior.
 
 Want Pagecast waiting in the background instead of keeping a terminal tab open?
 
@@ -65,11 +88,20 @@ npx pagecast background service uninstall
 
 Pagecast remembers the local ports in `.pagecast/config.json`. If 4173/4174 are
 busy the first time it starts, it falls forward to the next available pair and
-keeps using that pair on future launches.
+keeps using that pair on future launches. The bundled extension discovers that
+exact origin from the dashboard tab opened by Pagecast and remembers it; it does
+not scan localhost ports. On first use of a fallback port, keep that dashboard
+tab open long enough for discovery. The extension supports Pagecast's standard
+`pagecast.localhost`, `localhost`, and `127.0.0.1` hosts; a server deliberately
+bound to another loopback address (for example `127.0.0.2` or `::1`) still works
+through the CLI/dashboard but is outside the extension's host permissions.
 
 In the admin UI, click **Connect Cloudflare**. Pagecast uses scoped Wrangler
 OAuth (`account:read`, `user:read`, `pages:write`), detects your account, and
-creates the Pages project if needed. From a clone, run `npm start`.
+creates the Pages project if needed. Selecting an existing project is the
+explicit signal that this workspace may manage its `/p/...` publications;
+Pagecast will not silently adopt an unrelated project. From a clone, run
+`npm start`.
 
 Prefer containers? Pagecast ships with Docker support — see [Run with Docker](#run-with-docker).
 
@@ -93,14 +125,29 @@ npx pagecast publish "/absolute/path/report.html" --expires 7d --json
 # A built static project → publish its entry file
 npm run build && npx pagecast publish "$(pwd)/dist/index.html" --json
 
-# A whole folder → deploy directly to a named Pages project (--branch defaults to main)
+# A whole folder → replace a named Pages project directly (--branch defaults to main)
 npx pagecast pages deploy "$(pwd)/dist" --project pagecasthq --json
 ```
 
-Links use human-readable word-slugs (e.g. `/p/hollow-paperclip/`) and are long
-and hard to guess (private) by default; the admin UI's **Publish as a drop**
-toggle mints a short, shareable link instead. Add `--json` for agents and CI,
-and use the admin UI for link renaming, re-sync, revoke, and build settings.
+New links are **unlisted** by default: a memorable label plus a 128-bit opaque
+capability (for example, `/p/hollow-paperclip-<32-hex-characters>/`). Anyone who
+has the URL can view it; unlisted does not mean private. The admin UI's
+**Publish as a drop** toggle instead mints a short, intentionally easy-to-share
+link. Renaming a link to a vanity slug without the 128-bit suffix is also an
+explicit conversion to a public drop. Password protection is the access-control
+option. Existing word-only links keep their original URL and continue to resolve.
+
+Pagecast records the actual production origin returned by Cloudflare rather
+than assuming `<project>.pages.dev`, so a global hostname collision does not
+leave links or social metadata pointing at the wrong host. Add `--json` for
+agents and CI, and use the admin UI for link renaming, re-sync, revoke, and
+build settings.
+
+`pages deploy` is a separate whole-site operation. It replaces the contents of
+the named Cloudflare Pages project and does not change the project selected for
+managed `/p/...` publications. Use a separate project unless replacing the
+managed publication site is intentional.
+
 Common errors: `statusCode 401` → run `pages setup` or connect Cloudflare;
 `statusCode 409` → pass `--account <id>`.
 
@@ -114,9 +161,13 @@ npx pagecast publish "/absolute/path/report.html" --password "your-password" --j
 npx pagecast publish "/absolute/path/report.html" --no-password --json   # remove it
 ```
 
-Enforced at the edge by a generated Cloudflare Pages Function, so it covers every
-file of a multi-file report and the page is never served unprotected. Crypto,
-security model, and caveats: [PASSWORD-PROTECTION.md](PASSWORD-PROTECTION.md).
+Enforced at the edge by a generated Cloudflare Pages Function, so a successful
+protected publish gates every file of a multi-file report from its first live
+deployment. Protection changes on an existing link take effect target by target
+only after each replacement deployment succeeds. Cloudflare's immutable URLs
+for older deployments are not retroactively gated; prune any historical
+unprotected deployment that must stop being reachable. Crypto, security model,
+and caveats: [PASSWORD-PROTECTION.md](PASSWORD-PROTECTION.md).
 
 ## Deploy History
 
@@ -138,6 +189,10 @@ npx pagecast pages deployments prune --keep 5 --yes --json
 
 Snapshots are whole-site, not per-page, so removing one never affects your live
 site or your pages in Pagecast — it just frees up old `<hash>.pages.dev` URLs.
+That also means expiry, password changes, and revoke apply to the production
+site's replacement deployment; an older immutable deployment URL keeps the
+bytes and gate state it originally shipped with until that deployment is
+deleted. Prune history when those direct snapshot URLs must stop working.
 
 ## Use From Coding Agents
 
@@ -228,7 +283,7 @@ model for what the server is allowed to read and publish.
 
 Putting a future MCP endpoint behind a VPN would control who can invoke
 Pagecast; it would not by itself make the returned published URL VPN-only. For
-private recipients today, use Pagecast password protection or protect the
+restricted recipients today, use Pagecast password protection or protect the
 Pages/custom domain with your organization's access layer.
 
 ## Run with Docker
@@ -280,17 +335,23 @@ docker build -t pagecast .
 
 Notes:
 
-- The admin API is unauthenticated and can run shell commands, so the container
-  binds `0.0.0.0` internally but the compose file maps the ports to the host's
-  **loopback only** (`127.0.0.1`). If you start `serve` with `docker run` instead
-  of compose, publish to loopback too — `-p 127.0.0.1:4173:4173`, never a bare
-  `-p 4173:4173`. Set `HOST` only to `127.0.0.1` or `0.0.0.0`, never a routable IP.
+- The admin server can run build and publish commands. Browser mutations use an
+  Origin check and per-process session token; every no-Origin mutation requires
+  the private workspace capability. These are not remote-user authentication.
+  Non-loopback binds are rejected, and the image's wildcard bind works only
+  because it explicitly selects loopback-proxy mode. Expose both ports on the
+  host's **loopback only** (`127.0.0.1`). With `docker run`, use
+  `-p 127.0.0.1:4173:4173` and `-p 127.0.0.1:4174:4174`, never bare `-p` mappings.
 - On Linux the container runs as uid 1000 (`node`); if a bind-mounted `./.pagecast`
   isn't writable by that uid you'll get permission errors. `mkdir -p .pagecast`
   before `compose up` (or `chown 1000:1000 .pagecast`) fixes it. Docker Desktop and
   OrbStack handle this automatically.
-- `wrangler` is pinned and baked into the image, so deploys don't fetch it at
-  runtime. Bump `WRANGLER_VERSION` in the `Dockerfile` to update it.
+- Wrangler is pinned to `4.86.0`. Native and Docker publishing read the same
+  pin from `src/platform.js`; Docker bakes the global binary into the image and
+  selects it directly, so runtime deploys do not contact npm. Native publishing
+  invokes that exact package through `npx`. The exact-version-only
+  `PAGECAST_WRANGLER_VERSION_OVERRIDE` is for tests and deliberate local
+  compatibility work, not normal production use.
 
 ## Chrome Extension (Experimental)
 
@@ -298,16 +359,19 @@ Notes:
 
 When an agent opens an HTML file as `file:///…/report.html`, the bundled
 extension adds a one-click **Publish to Pagecast** button (the running server
-must be up). Install via `chrome://extensions` → **Developer mode** → **Load
-unpacked** → select `extension/`, then enable **"Allow access to file URLs"**.
-See [extension/README.md](extension/README.md).
+must be up). From a source checkout, install via `chrome://extensions` →
+**Developer mode** → **Load unpacked** → select `extension/`, then enable
+**"Allow access to file URLs"**. npm does not install the extension directory;
+npm/npx users should download `pagecast-extension-v<version>.zip` from the
+[matching GitHub release](https://github.com/Amal-David/pagecast/releases),
+unzip it, and load that folder. See [extension/README.md](extension/README.md).
 
 ## Admin UI Features
 
 - Add `.html`/`.md` files by path or `file:///…` URL, deployable static folders,
   or source folders with a build command and output directory.
-- Drag to reorder; publish, re-sync in place, rename links (old links redirect),
-  or revoke one/all versions.
+- Drag to reorder; publish, re-sync in place, rename links (old links redirect;
+  vanity slugs are public drops), or revoke one/all versions.
 - Auto-sync path-backed reports; password-protect pages; edit HTML in-app without
   touching the original source file.
 - View deploy history and remove old whole-site snapshots (the live deploy is
@@ -315,30 +379,43 @@ See [extension/README.md](extension/README.md).
 
 ## Security Model
 
-- Admin UI binds to `127.0.0.1`; draft previews are local-only.
-- Public access only through active `/p/<slug>/` links; revoked links 404 after
-  the redeploy finishes.
+- Admin UI binds to loopback by default, rejects non-loopback Host headers, and
+  requires same-origin browser mutations plus a per-process CSRF token.
+- No-Origin admin mutations require the private workspace capability. Wildcard
+  binds require explicit loopback-proxy mode and arbitrary routable bind hosts
+  remain rejected.
+- Draft/report HTML is served only by the separate preview origin (normally
+  port 4174). The admin origin redirects `/preview/...` there and embeds it in a
+  sandbox without top-navigation permission.
+- The Chrome extension is limited to its session/status/local-publish adapter
+  routes and sends both an extension marker and the current session token.
+- Production access is through active `/p/<slug>/` links; revoked links 404 after
+  the replacement deploy finishes. Direct URLs for older immutable Cloudflare
+  deployments retain their original snapshot until pruned.
 - Public routes reject directory traversal and hidden files. Sibling assets in a
   report's folder can become public if referenced — keep secrets out of it.
 - The Pages root publishes no report listing.
 
 ## Telemetry
 
-Pagecast collects **anonymous** usage stats — which command ran, the pagecast/Node
-version, and OS/arch — to guide what gets built next. It never sends file
-contents, file paths, published URLs, or Cloudflare tokens/account IDs. A one-time
-notice prints on first run. See [PRIVACY.md](PRIVACY.md) for the exact fields.
+Pagecast can collect **anonymous** usage stats — which command ran, the
+Pagecast/Node version, and OS/arch — to guide what gets built next. It never
+sends file contents, file paths, published URLs, or Cloudflare tokens/account
+IDs. See [PRIVACY.md](PRIVACY.md) for the exact fields.
 
-It's on by default; opt out anytime:
+Fresh installs are consent-pending and send nothing. Enable it explicitly:
 
 ```sh
-pagecast telemetry disable      # or: pagecast telemetry status
-# or set an env var (also respects the cross-tool DO_NOT_TRACK standard)
+pagecast telemetry enable       # inspect with: pagecast telemetry status
+pagecast telemetry disable
+# Explicit env overrides are also supported (DO_NOT_TRACK always wins).
+export PAGECAST_TELEMETRY=1
 export PAGECAST_TELEMETRY=0
 export DO_NOT_TRACK=1
 ```
 
-Telemetry is automatically off in CI (unless explicitly re-enabled with `PAGECAST_TELEMETRY=1`).
+Existing persisted choices remain compatible. Telemetry is automatically off
+in CI unless explicitly re-enabled with `PAGECAST_TELEMETRY=1`.
 
 ## Development
 
@@ -352,6 +429,11 @@ Work on the UI with Vite (`pnpm -C web run dev`, proxied to the server on 4173).
 The root CLI/server has no runtime npm dependencies. Layout: `src/` (CLI, server,
 publisher), `public/` (built UI), `web/` (React source), `plugin/` +
 `.codex/skills/` (agent skills), `test/` (Node tests).
+
+Source-folder build commands run through the platform's native command
+interpreter: `sh -lc` on POSIX and `%ComSpec% /d /s /c` on Windows. Pagecast
+selects the right shell, but it cannot translate command syntax; author a
+portable command or configure a platform-appropriate one.
 
 ## Contributing
 
@@ -372,6 +454,11 @@ Issues and pull requests are welcome.
    ```
 
 5. Open a PR describing what changed and why.
+
+After this workflow lands, a repository administrator still needs to configure
+GitHub branch protection/rulesets for `main` to require the four Node matrix
+checks and **Build, package, and container proof**. Workflow files can add the
+checks, but a code-only PR cannot make them required.
 
 See the [Development](#development) section for the project layout. Please
 **don't** file public issues for security problems — report them privately

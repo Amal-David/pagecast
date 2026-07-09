@@ -11,7 +11,7 @@ Pagecast?"* and, on an explicit **yes**, run the headless CLI:
 
 ```sh
 npx pagecast publish "/absolute/path/file.md" --json
-# → {"ok":true,"url":"https://pagecast.pages.dev/p/<token>/", ...}
+# → {"ok":true,"url":"https://<actual-origin>.pages.dev/p/<token>/", ...}
 ```
 
 ## Setup (one time)
@@ -97,9 +97,13 @@ makes a report and you say "yes", it publishes with no further prompts.
 
 Once installed and connected: when your agent writes a report, plan, dashboard, or
 other shareable HTML/Markdown, it offers *"Want me to publish this with Pagecast?"*
-Say **yes** and you get back a public `pagecast.pages.dev` link you own. Say no and
-it drops it — it won't nag. You can rename, re-sync, or revoke any link from
-`npx pagecast`.
+Say **yes** and you get back a Cloudflare Pages URL you own. Say no and it drops
+it — it won't nag. You can rename, re-sync, or revoke any link from `npx pagecast`.
+
+New links are unlisted capability URLs, not private links: anyone with the URL
+can view one. Use `--password` when recipients must authenticate. Pagecast uses
+the actual production origin returned by Cloudflare, which can differ from the
+project-name hostname after a global subdomain collision.
 
 For static web projects that should get a new share link, build first and publish
 the generated entry file, such as `dist/index.html`.
@@ -116,10 +120,18 @@ If you omit `--branch`, Pagecast deploys to `main`:
 npx pagecast pages deploy "/absolute/path/dist" --project pagecasthq --json
 ```
 
-Direct site deploys replace the target Pages project contents. Use `npx pagecast`
-for source-folder build settings, URL renaming, re-sync, and revoke controls.
+Direct site deploys replace the target Pages project contents. They use separate
+staging and do not change the Cloudflare project selected for managed `/p/...`
+links. Use a separate target unless replacing that managed site is intentional;
+use `npx pagecast` for source-folder build settings, URL renaming, re-sync, and
+revoke controls.
 
 ## Requirements
 
-- Node.js >= 20 and `npx` (Wrangler is fetched via `npx` on first use).
+- Node.js >= 20.19.0 and `npx` (the exact Wrangler `4.86.0` package is fetched on
+  first native use; Docker includes the same pin).
 - A Cloudflare account.
+
+When upgrading from Pagecast v0.4, restart any background Pagecast process once
+before the agent publishes. This lets v0.5 establish the workspace lease and
+authenticated local command protocol.

@@ -1,8 +1,9 @@
 "use strict";
 
+importScripts("expiry.js", "discovery.js");
+
 // Right-click "Publish to Pagecast" on a local file:// page. Mirrors the popup's
 // publish flow, but surfaces the result via a notification (and opens the link).
-const BASES = ["http://pagecast.localhost", "http://127.0.0.1:4173"];
 const PUBLISHABLE = /\.(html?|md|markdown)(?:[?#].*)?$/i;
 const MENU_ID = "pagecast-publish";
 
@@ -29,37 +30,67 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
 async function publish(fileUrl) {
   notify("Pagecast", "Publishing… this takes ~30s.");
-  for (const base of BASES) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60000);
-    try {
-      const res = await fetch(`${base}/api/publish-local`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: fileUrl }),
-        signal: controller.signal
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.url) {
-        const message = data && data.error && data.error.message;
-        if (res.status === 401) return notify("Connect Cloudflare", "Open Pagecast to sign in, then try again.");
-        if (res.status === 409) return notify("Choose an account", "Open Pagecast and pick a Cloudflare account.");
-        if (res.status === 404) return notify("File not found", "Is the file still on disk?");
-        return notify("Couldn't publish", message || "Check the Pagecast terminal.");
-      }
-      chrome.tabs.create({ url: data.url });
-      notify(
-        data.updated ? "Updated on Pagecast" : "Published to Pagecast",
-        data.updated ? "Your existing link now shows the latest version." : data.url
-      );
-      return;
-    } catch {
-      // Try the next local endpoint.
-    } finally {
-      clearTimeout(timer);
-    }
+  const discovered = await PagecastDiscovery.discover(chrome, fetch, { timeoutMs: 2500 });
+  if (!discovered) {
+    notify("Pagecast isn't running", "Start it in your terminal: npx pagecast");
+    return;
   }
-  notify("Pagecast isn't running", "Start it in your terminal: npx pagecast");
+  if (discovered.data?.cloudflare?.requiresAdoption) {
+    notify("Adopt the current project", "Open Pagecast and explicitly adopt the selected Cloudflare project, then try again.");
+    chrome.tabs.create({ url: discovered.base });
+    return;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60000);
+  try {
+    const csrfToken = await getCsrfToken(discovered.base, controller.signal);
+    const res = await fetch(`${discovered.base}/api/publish-local`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Pagecast-Extension": "1",
+        "X-Pagecast-CSRF": csrfToken
+      },
+      body: JSON.stringify({ path: fileUrl }),
+      signal: controller.signal
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.url) {
+      const message = data && data.error && data.error.message;
+      if (res.status === 401) return notify("Connect Cloudflare", "Open Pagecast to sign in, then try again.");
+      if (res.status === 409) return notify("Choose an account", "Open Pagecast and pick a Cloudflare account.");
+      if (res.status === 404) return notify("File not found", "Is the file still on disk?");
+      return notify("Couldn't publish", message || "Check the Pagecast terminal.");
+    }
+    chrome.tabs.create({ url: data.url });
+    const expiryNote = PagecastExpiry.format(data.publication?.expiresAt);
+    notify(
+      data.updated ? "Updated on Pagecast" : "Published to Pagecast",
+      data.updated
+        ? `Your existing link now shows the latest version. ${expiryNote}`
+        : `${data.url}\n${expiryNote}`
+    );
+  } catch {
+    notify("Publish failed", "The connection dropped. Check the Pagecast terminal, then try again.");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getCsrfToken(base, signal) {
+  const response = await fetch(`${base}/api/session`, {
+    headers: { "X-Pagecast-Extension": "1" },
+    signal
+  });
+  if (!response.ok) {
+    throw new Error(`Could not establish an admin session (${response.status})`);
+  }
+  const session = await response.json();
+  if (!session || typeof session.csrfToken !== "string" || !session.csrfToken) {
+    throw new Error("Admin session did not include a CSRF token");
+  }
+  return session.csrfToken;
 }
 
 function notify(title, message) {

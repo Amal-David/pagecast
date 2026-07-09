@@ -1,6 +1,6 @@
 // Pagecast usage telemetry.
 //
-// Anonymous, opt-out usage telemetry for the CLI: which command was run, the
+// Anonymous, consent-gated usage telemetry for the CLI: which command was run, the
 // pagecast/Node version, and coarse OS/arch. It mirrors the privacy posture of
 // the feedback feature — aggregate, anonymous, no PII, no file paths, no
 // published URLs, no Cloudflare tokens/account IDs.
@@ -58,8 +58,8 @@ function isTruthyEnv(value) {
 
 // Resolve whether telemetry should actually run, plus the deciding reason.
 // Precedence (highest first): DO_NOT_TRACK, explicit PAGECAST_TELEMETRY, CI,
-// stored config, default-on.
-export function resolveTelemetry({ configEnabled = true, env = process.env } = {}) {
+// stored consent. A fresh install with no saved choice never sends an event.
+export function resolveTelemetry({ configEnabled = null, env = process.env } = {}) {
   if (isTruthyEnv(env.DO_NOT_TRACK)) {
     return { enabled: false, reason: "do-not-track" };
   }
@@ -75,7 +75,10 @@ export function resolveTelemetry({ configEnabled = true, env = process.env } = {
   if (configEnabled === false) {
     return { enabled: false, reason: "config" };
   }
-  return { enabled: true, reason: "config" };
+  if (configEnabled === true) {
+    return { enabled: true, reason: "config" };
+  }
+  return { enabled: false, reason: "consent-required" };
 }
 
 // Map raw argv (process.argv.slice(2)) to a safe { command, subcommand } pair

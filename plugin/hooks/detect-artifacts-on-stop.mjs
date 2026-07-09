@@ -8,6 +8,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { loadOffered, recordOffered } from "./lib-offered.mjs";
+import { encodePathToken } from "./lib-path-token.mjs";
 
 const SKIP_BASENAMES = new Set([
   "readme.md", "readme.markdown", "changelog.md", "contributing.md",
@@ -33,18 +34,20 @@ async function maybeNudgeGoal(event, cwd, now) {
     return null; // no config / no goal
   }
   if (!goalFile) return null;
+  const resolvedGoalFile = path.resolve(cwd, goalFile);
   try {
-    const stat = await fs.stat(goalFile);
-    if (now - stat.mtimeMs <= GOAL_STALE_MS) return goalFile; // fresh — nothing to do
+    const stat = await fs.stat(resolvedGoalFile);
+    if (now - stat.mtimeMs <= GOAL_STALE_MS) return resolvedGoalFile; // fresh — nothing to do
     // Dedup keyed on the file's mtime so we nudge once per stale period; once the
     // agent refreshes the file (new mtime) a later staleness can nudge again.
     const key = `goal-stale:${Math.floor(stat.mtimeMs)}`;
     const offered = await loadOffered(event.session_id);
-    if (offered.has(key)) return goalFile;
+    if (offered.has(key)) return resolvedGoalFile;
     await recordOffered(event.session_id, [key]);
+    const pathToken = encodePathToken(resolvedGoalFile);
     const msg =
-      "Pagecast: your live goal-progress page may be stale — update " +
-      `"${path.basename(goalFile)}" and run \`npx pagecast goal publish "${goalFile}" --json\` to refresh it.`;
+      "Pagecast: your live goal-progress page may be stale — update the configured goal source " +
+      `and run \`npx pagecast goal publish --path-token ${pathToken} --json\` to refresh it.`;
     process.stdout.write(
       JSON.stringify({ hookSpecificOutput: { hookEventName: "Stop", systemMessage: msg } })
     );
@@ -52,7 +55,7 @@ async function maybeNudgeGoal(event, cwd, now) {
   } catch {
     return null; // goal file gone
   }
-  return goalFile;
+    return resolvedGoalFile;
 }
 
 function readStdin() {
@@ -126,13 +129,12 @@ async function main() {
 
     await recordOffered(event.session_id, fresh);
 
-    const names = fresh.slice(0, 5).map((p) => path.basename(p));
-    const list = names.join(", ") + (fresh.length > 5 ? ` (+${fresh.length - 5} more)` : "");
     const first = fresh[0];
+    const pathToken = encodePathToken(first);
     const systemMessage =
       `Pagecast: ${fresh.length === 1 ? "a shareable file was" : "shareable files were"} just created — ` +
-      `${list}. Ask whether to publish as a Claude Code Artifact or with Pagecast. If the user chooses ` +
-      `Pagecast, run \`npx pagecast publish "${first}" --json\`; if they choose Artifact, use the ` +
+      `ask whether to publish as a Claude Code Artifact or with Pagecast. If the user chooses ` +
+      `Pagecast, run \`npx pagecast publish --path-token ${pathToken} --json\`; if they choose Artifact, use the ` +
       `Claude Code Artifact flow. Never publish without an explicit choice.`;
 
     process.stdout.write(

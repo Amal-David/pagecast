@@ -4,11 +4,107 @@ import { createReadStream, existsSync, watch as fsWatch } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import {
+  ADMIN_MUTATION_METHODS,
+  DEFAULT_HOST,
+  DEFAULT_LOCAL_HOSTNAME,
+  EXTENSION_API_ROUTES,
+  assertSafeAdminBind,
+  extensionCorsOrigin,
+  isLoopbackBindHost,
+  isLoopbackHostHeader,
+  requestOrigin,
+  tokensMatch
+} from "./admin-security.js";
+export {
+  DEFAULT_HOST,
+  DEFAULT_LOCAL_HOSTNAME,
+  assertSafeAdminBind,
+  extensionCorsOrigin,
+  isLoopbackBindHost,
+  isLoopbackHostHeader,
+  isWildcardBindHost
+} from "./admin-security.js";
 import { markdownToHtml } from "./markdown.js";
-import { generateName, generateUniqueName, generateUnguessableName } from "./nameGenerator.js";
+import { generateName } from "./nameGenerator.js";
+import {
+  LINK_KINDS,
+  classifyLinkKind,
+  createLinkSlug,
+  inspectCapabilitySlug
+} from "./link-policy.js";
+import { createWranglerInvocation, selectBuildShell } from "./platform.js";
+import { appError } from "./app-error.js";
+export { appError } from "./app-error.js";
+import {
+  CLOUDFLARE_OAUTH_SCOPES,
+  DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
+  DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS,
+  DEFAULT_PAGES_BRANCH,
+  DEFAULT_PAGES_PROJECT_NAME,
+  FEEDBACK_OAUTH_SCOPES,
+  chooseWranglerPagesProject,
+  cleanCommandOutput,
+  cloudflareCredentialStatus,
+  createCloudflareAuthManager,
+  findKvNamespaceId,
+  flagLiveDeployment,
+  normalizeAccountId,
+  normalizeAccountIdSafe,
+  normalizeAccountName,
+  normalizePagesBaseUrl,
+  normalizePagesBranch,
+  normalizePagesProjectName,
+  normalizePagesProjectNameSafe,
+  pagesBaseUrl,
+  parseKvNamespaceId,
+  parseWorkerDevUrl,
+  parseWranglerPagesDeployments,
+  parseWranglerPagesProjects,
+  parseWranglerWhoamiAccounts,
+  runSpawnCommand,
+  selectDeploymentsToPrune,
+  stripAnsi
+} from "./wrangler-gateway.js";
+export {
+  CLOUDFLARE_OAUTH_SCOPES,
+  DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
+  DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS,
+  DEFAULT_PAGES_BRANCH,
+  DEFAULT_PAGES_PROJECT_NAME,
+  FEEDBACK_OAUTH_SCOPES,
+  chooseWranglerPagesProject,
+  cloudflareCredentialStatus,
+  createCloudflareAuthManager,
+  findKvNamespaceId,
+  flagLiveDeployment,
+  parseKvNamespaceId,
+  parseWorkerDevUrl,
+  parseWranglerPagesDeployments,
+  parseWranglerPagesProjects,
+  parseWranglerWhoamiAccounts,
+  selectDeploymentsToPrune
+} from "./wrangler-gateway.js";
+import { TunnelManager } from "./tunnel.js";
+import { createPublicationService } from "./publication-service.js";
+export { TunnelManager, extractPublicUrl } from "./tunnel.js";
+import {
+  WorkspaceLease,
+  atomicWriteJson,
+  tryInvokeLiveCommand
+} from "./state-coordinator.js";
+import {
+  PAGECAST_PROJECT_MARKER_FILE,
+  encodeProjectOwnershipMarker,
+  normalizeProjectRef,
+  normalizeStoredProjectRef,
+  projectRefEquals,
+  projectRefFilesystemKey,
+  validateOwnershipMarker
+} from "./project-ref.js";
 import {
   PAGECAST_SYNC_MANIFEST_PATH,
   isValidPasswordHash,
@@ -21,19 +117,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 
-export const DEFAULT_HOST = "127.0.0.1";
-export const DEFAULT_LOCAL_HOSTNAME = "pagecast.localhost";
 export const DEFAULT_ADMIN_PORT = 4173;
 export const DEFAULT_PUBLIC_PORT = 4174;
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 export const MAX_FOLDER_UPLOAD_BYTES = 100 * 1024 * 1024;
 export const MAX_FOLDER_UPLOAD_FILES = 1000;
 export const MAX_FOLDER_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
-export const DEFAULT_PAGES_PROJECT_NAME = "pagecast";
-export const DEFAULT_PAGES_BRANCH = "main";
-export const DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
-export const DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS = 60 * 1000;
-export const CLOUDFLARE_OAUTH_SCOPES = ["account:read", "user:read", "pages:write"];
 const PAGECAST_MARKETING_PROJECT_NAME = "pagecasthq";
 const PAGECAST_MARKETING_REQUIRED_FILES = ["index.html", "og-image.png"];
 const MAX_SYNC_IMPORT_FILES = MAX_FOLDER_UPLOAD_FILES;
@@ -52,17 +141,11 @@ const PUBLIC_URL_SKIPPED_ASSET_EXTENSIONS = new Set([
   ".webm",
   ".flac"
 ]);
-
-// Feedback provisioning deploys a Worker + KV, which the base publishing scopes
-// don't permit. These elevate the grant only when the user opts into feedback,
-// so publishing never has to request Workers/KV access up front.
-export const FEEDBACK_OAUTH_SCOPES = [
-  "account:read",
-  "user:read",
-  "pages:write",
-  "workers_scripts:write",
-  "workers_kv:write"
-];
+const PREVIEW_SECURITY_HEADERS = {
+  "Referrer-Policy": "no-referrer",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+  "Cross-Origin-Resource-Policy": "same-origin"
+};
 
 const MIME_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -84,13 +167,6 @@ const MIME_TYPES = new Map([
   [".woff", "font/woff"],
   [".map", "application/json; charset=utf-8"]
 ]);
-
-export function appError(message, statusCode = 400) {
-  const error = new Error(message);
-  error.statusCode = statusCode;
-  error.expose = true;
-  return error;
-}
 
 function isProvisionablePagesError(error) {
   const message = stripAnsi(error?.message || "");
@@ -192,49 +268,45 @@ function normalizeCustomSlug(value) {
   return slug;
 }
 
+function normalizePublicationToken(value) {
+  const token = String(value || "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/.test(token)) {
+    throw appError("Publication token must be a non-empty URL-safe identifier.", 400);
+  }
+  return token;
+}
+
+function publicationTokenFilesystemKey(value) {
+  const token = String(value || "");
+  if (!token) {
+    throw appError("Publication token is required.", 400);
+  }
+  return `token-${createHash("sha256").update(token, "utf8").digest("hex")}`;
+}
+
 function createReportId(fileName) {
   return `${slugifyReportName(fileName)}-${randomBytes(4).toString("hex")}`;
 }
 
-// Recover the human-readable name from a public token. New tokens ARE the name
-// (e.g. "hollow-paperclip"); this also strips the trailing "-<32 hex>" tail from
-// any legacy token (e.g. "v1-<hex>" -> "v1") so old and new compare cleanly.
+// Recover the memorable prefix from capability-bearing tokens while leaving
+// existing word-only slugs unchanged.
 export function publicTokenNamePrefix(token) {
   return String(token || "").replace(/-[0-9a-f]{32}$/i, "");
 }
 
-// A published page's URL slug is now a memorable all-words name with NO random
-// tail (e.g. /p/hollow-paperclip/). Uniqueness comes from the very large word
-// library plus a per-publish collision check (isNameTaken); see nameGenerator.js.
-// NOTE: without the old entropy tail the slug is guessable, so it is no longer an
-// access-control boundary — sensitive pages must use password protection.
+// New unlisted links combine a memorable prefix with 128 random capability bits.
+// Existing word-only links remain valid and are never rotated automatically.
 export function createPublicToken(isNameTaken = () => false, { drop = false } = {}) {
-  // A "drop" is a deliberately public link: short and memorable, but guessable.
-  // Otherwise the link is private and gets a long, hard-to-guess all-words name
-  // (still no digits). Password protection remains the boundary for true secrecy.
-  const generate = drop ? () => generateName() : () => generateUnguessableName();
-  return generateUniqueName(isNameTaken, { generate });
+  return createLinkSlug({
+    kind: drop ? LINK_KINDS.DROP : LINK_KINDS.UNLISTED,
+    isTaken: isNameTaken,
+    generateMemorableName: () => generateName()
+  });
 }
 
 function isPathInside(rootDir, targetPath) {
   const relative = path.relative(rootDir, targetPath);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-function normalizePagesProjectName(value) {
-  const projectName = String(value || "").trim().toLowerCase();
-  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(projectName)) {
-    throw appError("Cloudflare Pages project name must be a valid lowercase slug.", 400);
-  }
-  return projectName;
-}
-
-function normalizePagesProjectNameSafe(value) {
-  try {
-    return normalizePagesProjectName(value || "");
-  } catch {
-    return "";
-  }
 }
 
 function projectRootImportSlug(projectName) {
@@ -243,68 +315,6 @@ function projectRootImportSlug(projectName) {
   return normalizeCustomSlug(
     `${normalized.slice(0, 63 - rootSuffix.length).replace(/-+$/g, "")}${rootSuffix}`
   );
-}
-
-function normalizeAccountId(value) {
-  const accountId = String(value || "").trim();
-  if (!accountId) {
-    return "";
-  }
-
-  if (!/^[a-fA-F0-9]{32}$/.test(accountId)) {
-    throw appError("Cloudflare account ID must be 32 hex characters.", 400);
-  }
-  return accountId;
-}
-
-function normalizePagesBranch(value = DEFAULT_PAGES_BRANCH) {
-  const branch = String(value || DEFAULT_PAGES_BRANCH).trim();
-  if (
-    !branch ||
-    branch.length > 128 ||
-    branch.startsWith("-") ||
-    branch.startsWith("/") ||
-    branch.endsWith("/") ||
-    branch.includes("..") ||
-    !/^[A-Za-z0-9._/-]+$/.test(branch)
-  ) {
-    throw appError("Cloudflare Pages branch must be a valid branch name.", 400);
-  }
-  return branch;
-}
-
-function normalizeAccountName(value) {
-  const accountName = stripAnsi(value).trim();
-  if (!accountName || isRedactedAccountName(accountName)) {
-    return "";
-  }
-  return accountName;
-}
-
-function pagesBaseUrl(projectName) {
-  return `https://${projectName}.pages.dev`;
-}
-
-function normalizePagesBaseUrl(value, projectName) {
-  const fallback = pagesBaseUrl(projectName);
-  const raw = String(value || "").trim();
-  if (!raw) {
-    return fallback;
-  }
-
-  const firstDomain = raw.split(/[,\s]+/).find((item) => item && item !== "-") || "";
-  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(firstDomain)
-    ? firstDomain
-    : `https://${firstDomain}`;
-  try {
-    const url = new URL(candidate);
-    if ((url.protocol !== "https:" && url.protocol !== "http:") || !url.hostname) {
-      return fallback;
-    }
-    return stripTrailingSlash(`${url.protocol}//${url.host}`);
-  } catch {
-    return fallback;
-  }
 }
 
 async function assertSafePagesDeployRoot(rootDir, projectName) {
@@ -357,30 +367,74 @@ function publicUrlOrigin(publicUrl) {
   }
 }
 
+function redirectTargetSlug(value) {
+  try {
+    const pathname = new URL(String(value || ""), "https://pagecast.invalid").pathname;
+    const match = /^\/p\/([^/]+)\/?$/.exec(pathname);
+    return match ? normalizeCustomSlug(decodeURIComponent(match[1])) : "";
+  } catch {
+    return "";
+  }
+}
+
+function inferLegacyRedirectProjectRef(redirect, publications) {
+  const targetSlug = redirectTargetSlug(redirect?.to);
+  if (!targetSlug) {
+    return null;
+  }
+
+  const candidates = new Map();
+  for (const publication of publications || []) {
+    if (
+      publication?.revokedAt ||
+      (publication?.kind && publication.kind !== "snapshot") ||
+      (publication?.slug || publication?.token) !== targetSlug
+    ) {
+      continue;
+    }
+    try {
+      const projectRef = normalizeStoredProjectRef(publication, { allowLegacy: true });
+      if (projectRef) {
+        candidates.set(projectRefFilesystemKey(projectRef), projectRef);
+      }
+    } catch {
+      // Invalid or partial legacy identity is not sufficient attribution.
+    }
+  }
+  return candidates.size === 1 ? candidates.values().next().value : null;
+}
+
 function pagesConfigForPublication(publication, currentPages) {
   const currentProjectName = normalizePagesProjectNameSafe(currentPages?.projectName) || DEFAULT_PAGES_PROJECT_NAME;
   const currentBaseUrl = stripTrailingSlash(currentPages?.baseUrl || pagesBaseUrl(currentProjectName));
-  const storedProjectName = normalizePagesProjectNameSafe(publication.pagesProjectName);
-  const inferredProjectName = pagesProjectNameFromPublicUrl(publication.publicUrl);
-  const projectName = storedProjectName || inferredProjectName || currentProjectName;
-  const storedBaseUrl = publication.pagesBaseUrl ? stripTrailingSlash(publication.pagesBaseUrl) : "";
-  const inferredBaseUrl = inferredProjectName ? pagesBaseUrl(inferredProjectName) : "";
   const publicOrigin = publicUrlOrigin(publication.publicUrl);
+  let storedProjectRef = null;
+  try {
+    storedProjectRef = normalizeStoredProjectRef(publication, { allowLegacy: true });
+  } catch {
+    storedProjectRef = null;
+  }
 
-  if (!storedProjectName && !inferredProjectName && publicOrigin && publicOrigin !== currentBaseUrl) {
+  if (!storedProjectRef) {
     throw appError(
-      `This published link belongs to ${publicOrigin}, but Pagecast is connected to ${currentBaseUrl}. Click Publish URL to publish it to the current Pages project, or switch back to the original project before syncing.`,
+      `This legacy published link${publicOrigin ? ` belongs to ${publicOrigin}` : ""}, but its Cloudflare account/project identity was not recorded. Select and adopt the original project before syncing it.`,
       409
     );
   }
 
+  const projectRef = storedProjectRef;
+  const storedBaseUrl = publication.pagesBaseUrl ? stripTrailingSlash(publication.pagesBaseUrl) : "";
+
   return {
     ...currentPages,
-    projectName,
-    accountId: normalizeAccountIdSafe(publication.pagesAccountId || currentPages?.accountId),
+    projectName: projectRef.projectName,
+    accountId: projectRef.accountId,
     accountName: publication.pagesAccountName || currentPages?.accountName || "",
     branch: DEFAULT_PAGES_BRANCH,
-    baseUrl: storedBaseUrl || inferredBaseUrl || currentBaseUrl || pagesBaseUrl(projectName)
+    baseUrl:
+      storedBaseUrl ||
+      projectRef.baseUrl ||
+      (projectRefEquals(projectRef, currentPages) ? currentBaseUrl : pagesBaseUrl(projectRef.projectName))
   };
 }
 
@@ -389,6 +443,157 @@ function rememberPublicationPagesTarget(publication, pagesConfig) {
   publication.pagesAccountId = normalizeAccountIdSafe(pagesConfig.accountId);
   publication.pagesAccountName = normalizeAccountName(pagesConfig.accountName || "");
   publication.pagesBaseUrl = stripTrailingSlash(pagesConfig.baseUrl || pagesBaseUrl(pagesConfig.projectName));
+  if (publication.pagesAccountId) {
+    publication.projectRef = {
+      accountId: publication.pagesAccountId,
+      projectName: publication.pagesProjectName,
+      baseUrl: publication.pagesBaseUrl
+    };
+  }
+}
+
+async function persistActualPublicationOrigin(publication, configStore) {
+  const baseUrl = publicUrlOrigin(publication?.publicUrl);
+  if (!baseUrl) {
+    return;
+  }
+  publication.pagesBaseUrl = baseUrl;
+  if (publication.projectRef) {
+    publication.projectRef = { ...publication.projectRef, baseUrl };
+  }
+  const current = configStore.get().pages;
+  if (
+    publication.projectRef &&
+    projectRefEquals(publication.projectRef, current) &&
+    stripTrailingSlash(current.baseUrl) !== baseUrl
+  ) {
+    await configStore.updatePages({ baseUrl });
+  }
+}
+
+const OPERATION_RECOVERY_COPY = Object.freeze({
+  publish: {
+    title: "Publish needs attention",
+    summary: "Pagecast did not finish making this link available.",
+    action: "Retry publish"
+  },
+  sync: {
+    title: "Link sync needs attention",
+    summary: "The saved page and its published link are out of sync.",
+    action: "Retry sync"
+  },
+  auto_sync: {
+    title: "Automatic sync needs attention",
+    summary: "A watched source changed, but its published link was not updated.",
+    action: "Retry sync"
+  },
+  content_sync: {
+    title: "Saved content needs attention",
+    summary: "The edit is saved locally, but its published link was not updated.",
+    action: "Retry sync"
+  },
+  password_sync: {
+    title: "Password state needs attention",
+    summary: "The published link may not match Pagecast's current protection state.",
+    action: "Reconcile protection"
+  },
+  password_compensate: {
+    title: "Password rollback needs attention",
+    summary: "Pagecast could not restore one published target after a partial password change.",
+    action: "Reconcile protection"
+  },
+  rename: {
+    title: "Link rename needs attention",
+    summary: "Pagecast did not finish moving this link to its requested path.",
+    action: "Retry rename"
+  },
+  goal_sync: {
+    title: "Goal page sync needs attention",
+    summary: "The latest goal page is staged locally but was not fully published.",
+    action: "Retry goal sync"
+  },
+  revoke: {
+    title: "Link cleanup needs attention",
+    summary: "Pagecast could not finish taking this link offline.",
+    action: "Retry revoke"
+  }
+});
+
+function operationRecoveryMissingMetadata(operation) {
+  if (!operation || !OPERATION_RECOVERY_COPY[operation.type]) {
+    return "This operation type is not supported by this version of Pagecast.";
+  }
+  if (operation.type === "publish") {
+    if (
+      typeof operation.reportId !== "string" ||
+      !operation.publication ||
+      operation.publication.token !== operation.token
+    ) {
+      return "This older publish record does not contain enough state for an automatic retry.";
+    }
+    if (
+      operation.remoteSucceeded === true &&
+      !operation.publicUrl &&
+      !operation.publication.publicUrl
+    ) {
+      return "The remote publish checkpoint is missing its resulting URL.";
+    }
+  }
+  if (
+    ["sync", "auto_sync", "content_sync", "password_sync", "password_compensate"].includes(
+      operation.type
+    ) &&
+    typeof operation.reportId !== "string"
+  ) {
+    return "This older sync record does not identify its source page.";
+  }
+  if (
+    operation.type === "rename" &&
+    (typeof operation.previousSlug !== "string" || !operation.previousSlug)
+  ) {
+    return "This older rename record does not contain the previous link path.";
+  }
+  if (
+    operation.type === "goal_sync" &&
+    (typeof operation.reportId !== "string" ||
+      typeof operation.goalFile !== "string" ||
+      !operation.goalFile)
+  ) {
+    return "This older goal-sync record does not contain the source-file intent.";
+  }
+  return null;
+}
+
+function formatOperationForApi(operation) {
+  const copy = OPERATION_RECOVERY_COPY[operation?.type] || {
+    title: "Operation needs attention",
+    summary: "Pagecast could not determine how to finish this operation safely.",
+    action: null
+  };
+  const manualReason = operationRecoveryMissingMetadata(operation);
+  return {
+    id: operation.id,
+    type: operation.type,
+    token: operation.token,
+    slug: operation.slug || operation.token,
+    projectRef: operation.projectRef || null,
+    status: operation.status === "failed" ? "failed" : "pending",
+    error: typeof operation.error === "string" ? operation.error : "",
+    createdAt: operation.createdAt,
+    updatedAt: operation.updatedAt,
+    attempts: Number.isInteger(operation.attempts) ? operation.attempts : 0,
+    recovery: {
+      mode: manualReason ? "manual" : "automatic",
+      title: copy.title,
+      summary: copy.summary,
+      action: manualReason ? null : copy.action,
+      manualReason
+    }
+  };
+}
+
+function formatOperationsForApi(store) {
+  return store.listOperations().map(formatOperationForApi);
 }
 
 // Derive the REAL production base URL from a `wrangler pages deploy` output.
@@ -413,53 +618,6 @@ function pagesDeploymentUrlFromDeployOutput(output, fallbackUrl = "") {
     return match[0].replace(/[),.;]+$/g, "");
   }
   return fallbackUrl;
-}
-
-function stripAnsi(value) {
-  return String(value || "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
-}
-
-function cleanCommandOutput(output) {
-  return stripAnsi(output)
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-// --- Feedback Worker provisioning: parse wrangler outputs --------------------
-
-// A KV namespace id is a 32-char hex string. `wrangler kv namespace create`
-// prints a TOML/JSON snippet containing `id = "<hex>"` / `"id": "<hex>"`.
-export function parseKvNamespaceId(output) {
-  const text = stripAnsi(output || "");
-  const match = text.match(/(?:id\s*=\s*|"id"\s*:\s*)"([0-9a-f]{32})"/i);
-  return match ? match[1].toLowerCase() : "";
-}
-
-// `wrangler kv namespace list` prints a JSON array of { id, title }. Reuse an
-// existing namespace by title so re-running setup is idempotent.
-export function findKvNamespaceId(output, title) {
-  const text = stripAnsi(output || "");
-  try {
-    const start = text.indexOf("[");
-    const end = text.lastIndexOf("]");
-    if (start >= 0 && end > start) {
-      const list = JSON.parse(text.slice(start, end + 1));
-      const hit = list.find((entry) => entry && entry.title === title);
-      if (hit && /^[0-9a-f]{32}$/i.test(hit.id || "")) {
-        return String(hit.id).toLowerCase();
-      }
-    }
-  } catch {
-    // Non-JSON or unexpected shape — treat as "not found" and create one.
-  }
-  return "";
-}
-
-// The deployed Worker's public origin, e.g. https://name.sub.workers.dev.
-export function parseWorkerDevUrl(output) {
-  const text = stripAnsi(output || "");
-  const match = text.match(/https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev/i);
-  return match ? match[0].toLowerCase() : "";
 }
 
 // Normalize the persisted feedback (reactions + analytics) settings. Returns
@@ -498,6 +656,10 @@ function normalizeGoal(goal) {
     slug: String(goal.slug || token),
     url,
     file: String(goal.file || ""),
+    expiresAt:
+      typeof goal.expiresAt === "number" && goal.expiresAt > 0
+        ? goal.expiresAt
+        : null,
     startedAt: String(goal.startedAt || ""),
     updatedAt: String(goal.updatedAt || "")
   };
@@ -555,10 +717,8 @@ function normalizeRuntimePort(value, fallback) {
 }
 
 function normalizeLocalHostname(value) {
-  const hostname = String(value || "").trim().toLowerCase();
-  return /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/.test(hostname)
-    ? hostname
-    : DEFAULT_LOCAL_HOSTNAME;
+  const hostname = String(value || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return isLoopbackBindHost(hostname) ? hostname : DEFAULT_LOCAL_HOSTNAME;
 }
 
 function normalizeLocalConfig(local = {}) {
@@ -567,6 +727,24 @@ function normalizeLocalConfig(local = {}) {
     adminPort: normalizeLocalPort(local.adminPort, DEFAULT_ADMIN_PORT),
     publicPort: normalizeLocalPort(local.publicPort, DEFAULT_PUBLIC_PORT)
   };
+}
+
+function normalizeManagedTargets(value) {
+  const targets = [];
+  const seen = new Set();
+  for (const candidate of Array.isArray(value) ? value : []) {
+    try {
+      const projectRef = normalizeProjectRef(candidate);
+      const key = projectRefFilesystemKey(projectRef);
+      if (!seen.has(key)) {
+        seen.add(key);
+        targets.push(projectRef);
+      }
+    } catch {
+      // Invalid legacy ownership records are ignored rather than trusted.
+    }
+  }
+  return targets;
 }
 
 function normalizeConfig(config = {}) {
@@ -613,9 +791,10 @@ function normalizeConfig(config = {}) {
       typeof config.syncSecret === "string" && config.syncSecret
         ? config.syncSecret
         : null,
-    // Anonymous usage telemetry (which commands run, version, OS). On by default;
-    // opt out via `pagecast telemetry disable`, PAGECAST_TELEMETRY=0, or DO_NOT_TRACK=1.
-    telemetry: config.telemetry !== false,
+    // Fresh installs are consent-pending (null). Existing explicit choices and
+    // environment overrides remain compatible.
+    telemetry:
+      config.telemetry === true ? true : config.telemetry === false ? false : null,
     // Opaque random install id (no PII). Generated lazily only when telemetry is
     // enabled and about to send; stripped from any client-/CLI-facing config.
     telemetryId:
@@ -623,472 +802,17 @@ function normalizeConfig(config = {}) {
         ? config.telemetryId
         : null,
     // Whether the one-time first-run telemetry notice has been shown.
-    telemetryNotified: config.telemetryNotified === true
+    telemetryNotified: config.telemetryNotified === true,
+    installationId:
+      typeof config.installationId === "string" && /^[a-f0-9]{32}$/.test(config.installationId)
+        ? config.installationId
+        : null,
+    managedTargets: normalizeManagedTargets(config.managedTargets)
   };
 }
 
-export function cloudflareCredentialStatus(env = process.env) {
-  const tokenConfigured = Boolean(String(env.CLOUDFLARE_API_TOKEN || "").trim());
-  const rawAccountId = String(env.CLOUDFLARE_ACCOUNT_ID || "").trim();
-  let accountIdConfigured = false;
-  let accountId = "";
-
-  if (rawAccountId) {
-    try {
-      accountId = normalizeAccountId(rawAccountId);
-      accountIdConfigured = true;
-    } catch {
-      accountIdConfigured = false;
-    }
-  }
-
-  return {
-    authMode: tokenConfigured ? "api-token" : "scoped-oauth",
-    tokenConfigured,
-    accountIdConfigured,
-    accountId,
-    scopedOauthAvailable: true,
-    oauthScopes: CLOUDFLARE_OAUTH_SCOPES
-  };
-}
-
-function parseJsonFromCommandOutput(output) {
-  const text = String(output || "").trim();
-  if (!text) {
-    throw appError("Wrangler did not return JSON output.", 502);
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    const firstObject = text.indexOf("{");
-    const firstArray = text.indexOf("[");
-    const starts = [firstObject, firstArray].filter((index) => index >= 0);
-    const start = starts.length > 0 ? Math.min(...starts) : -1;
-    const end = Math.max(text.lastIndexOf("}"), text.lastIndexOf("]"));
-    if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(text.slice(start, end + 1));
-      } catch {
-        // Fall through to the public error below.
-      }
-    }
-  }
-
-  throw appError("Wrangler project list output was not valid JSON.", 502);
-}
-
-function firstString(...values) {
-  for (const value of values) {
-    if (Array.isArray(value)) {
-      const nested = firstString(...value);
-      if (nested) {
-        return nested;
-      }
-    }
-    if (typeof value === "string" && value.trim()) {
-      return value.trim();
-    }
-  }
-  return "";
-}
-
-function isRedactedAccountName(value) {
-  return /^\(?redacted\)?$/i.test(String(value || "").trim());
-}
-
-function extractProjectCandidates(parsed) {
-  if (Array.isArray(parsed)) {
-    return parsed;
-  }
-
-  if (Array.isArray(parsed?.projects)) {
-    return parsed.projects;
-  }
-
-  if (Array.isArray(parsed?.items)) {
-    return parsed.items;
-  }
-
-  if (Array.isArray(parsed?.result)) {
-    return parsed.result;
-  }
-
-  if (Array.isArray(parsed?.result?.projects)) {
-    return parsed.result.projects;
-  }
-
-  return [];
-}
-
-function parseWranglerPagesProjectTable(output) {
-  const text = stripAnsi(output);
-  const rows = text
-    .split(/\r?\n/)
-    .filter((line) => line.includes("│"))
-    .map((line) => line.split("│").slice(1, -1).map((column) => column.trim()))
-    .filter((columns) => columns.some(Boolean));
-
-  if (rows.length === 0) {
-    return [];
-  }
-
-  const headerIndex = rows.findIndex((columns) =>
-    columns.some((column) => /^(project\s+)?name$/i.test(column))
-  );
-  if (headerIndex === -1) {
-    return [];
-  }
-
-  const headers = rows[headerIndex].map((column) => column.toLowerCase());
-  const nameIndex = headers.findIndex((header) => header === "name" || header === "project name");
-  const domainIndex = headers.findIndex((header) => header.includes("domain"));
-  const branchIndex = headers.findIndex((header) => header.includes("branch"));
-  const accountIdIndex = headers.findIndex((header) => header === "account id");
-  const accountNameIndex = headers.findIndex((header) => header === "account");
-
-  return rows.slice(headerIndex + 1)
-    .map((columns) => {
-      const name = columns[nameIndex] || "";
-      if (!name || /^(name|project name)$/i.test(name)) {
-        return null;
-      }
-
-      return {
-        name,
-        project_domains: domainIndex >= 0 ? columns[domainIndex] : "",
-        account_id: accountIdIndex >= 0 ? columns[accountIdIndex] : "",
-        account_name: accountNameIndex >= 0 ? columns[accountNameIndex] : "",
-        production_branch: branchIndex >= 0 ? columns[branchIndex] : ""
-      };
-    })
-    .filter(Boolean);
-}
-
-export function parseWranglerPagesProjects(output) {
-  let parsed;
-  try {
-    parsed = parseJsonFromCommandOutput(output);
-  } catch {
-    parsed = parseWranglerPagesProjectTable(output);
-  }
-
-  return extractProjectCandidates(parsed)
-    .map((project) => {
-      const name = firstString(project?.name, project?.projectName, project?.project_name, project?.["Project Name"]);
-      if (!name) {
-        return null;
-      }
-
-      let projectName;
-      try {
-        projectName = normalizePagesProjectName(name);
-      } catch {
-        return null;
-      }
-
-      let accountId = "";
-      try {
-        accountId = normalizeAccountId(
-          firstString(
-            project?.accountId,
-            project?.account_id,
-            project?.account?.id,
-            project?.account?.account_id
-          )
-        );
-      } catch {
-        accountId = "";
-      }
-
-      return {
-        name: projectName,
-        accountId,
-        accountName: firstString(project?.accountName, project?.account_name, project?.account?.name),
-        productionBranch: firstString(
-          project?.productionBranch,
-          project?.production_branch,
-          project?.deployment_configs?.production?.branch,
-          project?.["Production Branch"]
-        ),
-        baseUrl: normalizePagesBaseUrl(
-          firstString(
-            project?.baseUrl,
-            project?.base_url,
-            project?.url,
-            project?.domains,
-            project?.domain,
-            project?.projectDomains,
-            project?.project_domains,
-            project?.["Project Domains"]
-          ),
-          projectName
-        )
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-export function chooseWranglerPagesProject(projects, pagesConfig = {}) {
-  if (!Array.isArray(projects) || projects.length === 0) {
-    return null;
-  }
-
-  const preferredName = String(pagesConfig.projectName || "").toLowerCase();
-  const preferredAccountId = String(pagesConfig.accountId || "").toLowerCase();
-  // Only adopt a project that is actually requested. If no explicit preference
-  // is available, fall back to Pagecast's default project.
-  if (preferredName) {
-    const matches = projects.filter((project) => project.name === preferredName);
-    if (preferredAccountId) {
-      return matches.find((project) => String(project.accountId || "").toLowerCase() === preferredAccountId) || matches[0] || null;
-    }
-    return matches[0] || null;
-  }
-  return projects.find((project) => project.name === DEFAULT_PAGES_PROJECT_NAME) || null;
-}
-
-function normalizeAccountIdSafe(value) {
-  try {
-    return normalizeAccountId(value || "");
-  } catch {
-    return "";
-  }
-}
-
-function parseWranglerWhoamiTable(output) {
-  const text = stripAnsi(output);
-  const rows = text
-    .split(/\r?\n/)
-    .filter((line) => line.includes("│"))
-    .map((line) => line.split("│").slice(1, -1).map((column) => column.trim()))
-    .filter((columns) => columns.some(Boolean));
-
-  if (rows.length === 0) {
-    return [];
-  }
-
-  const headerIndex = rows.findIndex((columns) =>
-    columns.some((column) => /account\s*id/i.test(column))
-  );
-  if (headerIndex === -1) {
-    return [];
-  }
-
-  const headers = rows[headerIndex].map((column) => column.toLowerCase());
-  const idIndex = headers.findIndex((header) => /account\s*id/.test(header));
-  const nameIndex = headers.findIndex(
-    (header) => /account\s*name/.test(header) || header === "account" || header === "name"
-  );
-
-  return rows.slice(headerIndex + 1)
-    .map((columns) => {
-      const id = normalizeAccountIdSafe(idIndex >= 0 ? columns[idIndex] : "");
-      const name = nameIndex >= 0 ? columns[nameIndex] || "" : "";
-      return id ? { id, name } : null;
-    })
-    .filter(Boolean);
-}
-
-export function parseWranglerWhoamiAccounts(output) {
-  let parsed = null;
-  try {
-    parsed = parseJsonFromCommandOutput(output);
-  } catch {
-    parsed = null;
-  }
-
-  if (parsed) {
-    const candidates = Array.isArray(parsed)
-      ? parsed
-      : Array.isArray(parsed.accounts)
-        ? parsed.accounts
-        : Array.isArray(parsed.result?.accounts)
-          ? parsed.result.accounts
-          : Array.isArray(parsed.result)
-            ? parsed.result
-            : [];
-
-    const accounts = candidates
-      .map((account) => {
-        const id = normalizeAccountIdSafe(
-          firstString(account?.id, account?.account_id, account?.accountId, account?.account?.id)
-        );
-        const name = firstString(
-          account?.name,
-          account?.account_name,
-          account?.accountName,
-          account?.account?.name
-        );
-        return id ? { id, name } : null;
-      })
-      .filter(Boolean);
-
-    if (accounts.length > 0) {
-      return accounts;
-    }
-  }
-
-  return parseWranglerWhoamiTable(output);
-}
-
-// --- Cloudflare Pages deployment history: parse `wrangler pages deployment`
-// outputs and flag/select deployments for the view-and-remove feature. --------
-
-function parseWranglerPagesDeploymentTable(output) {
-  // Text fallback for Wrangler versions where `--json` is unsupported. The table
-  // can't carry aliases, so live-detection degrades to the env+date heuristic.
-  const text = stripAnsi(output);
-  const rows = text
-    .split(/\r?\n/)
-    .filter((line) => line.includes("│"))
-    .map((line) => line.split("│").slice(1, -1).map((column) => column.trim()))
-    .filter((columns) => columns.some(Boolean));
-
-  if (rows.length === 0) {
-    return [];
-  }
-
-  const headerIndex = rows.findIndex((columns) =>
-    columns.some((column) => /deployment\s*id|^id$/i.test(column))
-  );
-  if (headerIndex === -1) {
-    return [];
-  }
-
-  const headers = rows[headerIndex].map((column) => column.toLowerCase());
-  const idIndex = headers.findIndex((header) => /deployment\s*id|^id$/.test(header));
-  const envIndex = headers.findIndex((header) => header.includes("environment"));
-  const branchIndex = headers.findIndex((header) => header.includes("branch"));
-  const createdIndex = headers.findIndex((header) => header.includes("created") || header.includes("date"));
-  const urlIndex = headers.findIndex((header) => header.includes("url") || header.includes("source"));
-
-  return rows.slice(headerIndex + 1)
-    .map((columns) => {
-      const id = idIndex >= 0 ? columns[idIndex] : "";
-      if (!id || /deployment\s*id|^id$/i.test(id)) {
-        return null;
-      }
-      return {
-        id,
-        deployment_id: id,
-        environment: envIndex >= 0 ? columns[envIndex] : "",
-        branch: branchIndex >= 0 ? columns[branchIndex] : "",
-        created_on: createdIndex >= 0 ? columns[createdIndex] : "",
-        url: urlIndex >= 0 ? columns[urlIndex] : ""
-      };
-    })
-    .filter(Boolean);
-}
-
-// Normalize `wrangler pages deployment list` output (JSON first, table fallback)
-// into a stable shape. Tolerant of field-name drift across Wrangler versions.
-export function parseWranglerPagesDeployments(output) {
-  let parsed;
-  try {
-    parsed = parseJsonFromCommandOutput(output);
-  } catch {
-    parsed = parseWranglerPagesDeploymentTable(output);
-  }
-
-  const list = Array.isArray(parsed)
-    ? parsed
-    : Array.isArray(parsed?.result)
-      ? parsed.result
-      : Array.isArray(parsed?.deployments)
-        ? parsed.deployments
-        : [];
-
-  return list
-    .map((deployment) => {
-      // Wrangler's CLI `--json` emits PascalCase, column-named fields
-      // (Id/Environment/Deployment/Status), while the REST API and the text
-      // table use snake_case/lowercase. Read every known casing.
-      const id = firstString(deployment?.id, deployment?.Id, deployment?.deployment_id);
-      if (!id) {
-        return null;
-      }
-      const aliases = Array.isArray(deployment?.aliases)
-        ? deployment.aliases.filter((alias) => typeof alias === "string")
-        : [];
-      return {
-        id,
-        shortId: firstString(deployment?.short_id, deployment?.shortId) || id.slice(0, 8),
-        url: firstString(deployment?.url, deployment?.Deployment, deployment?.deployment_url),
-        // Normalize case: JSON returns "production"/"preview"; wrangler's CLI
-        // JSON and the text table yield "Production"/"Preview". Downstream live
-        // detection compares against "production", so lowercase it here.
-        environment: (
-          firstString(deployment?.environment, deployment?.Environment) || "preview"
-        ).toLowerCase(),
-        branch: firstString(
-          deployment?.deployment_trigger?.metadata?.branch,
-          deployment?.branch,
-          deployment?.Branch
-        ),
-        // ISO timestamp when present (REST shape). Wrangler's CLI JSON omits it
-        // and lists newest-first, so live-detection's stable sort preserves order.
-        createdOn: firstString(deployment?.created_on, deployment?.createdOn, deployment?.created_at),
-        modifiedOn: firstString(deployment?.modified_on, deployment?.modifiedOn, deployment?.modified_at),
-        // A human-friendly age/stage for display when no ISO timestamp exists
-        // (wrangler's CLI JSON puts e.g. "2 days ago" in Status).
-        status: firstString(
-          deployment?.Status,
-          deployment?.latest_stage?.name,
-          deployment?.latest_stage,
-          deployment?.status
-        ),
-        latestStage: firstString(deployment?.latest_stage?.name, deployment?.latest_stage),
-        isSkipped: deployment?.is_skipped === true,
-        aliases,
-        isLive: false
-      };
-    })
-    .filter(Boolean);
-}
-
-function deploymentTimestamp(deployment) {
-  const parsed = Date.parse(deployment?.modifiedOn || deployment?.createdOn || "");
-  return Number.isNaN(parsed) ? 0 : parsed;
-}
-
-// Flag the single live production deployment so callers can protect it from
-// deletion. Live = the newest non-skipped production deployment, OR (when JSON
-// aliases are present) any production deployment aliased to the project base URL.
-// Returns a NEW list sorted newest-first with `isLive` set.
-export function flagLiveDeployment(deployments, { baseUrl = "" } = {}) {
-  const host = String(baseUrl || "")
-    .replace(/^https?:\/\//, "")
-    .replace(/\/+$/, "")
-    .toLowerCase();
-  const sorted = [...deployments].sort((a, b) => deploymentTimestamp(b) - deploymentTimestamp(a));
-  const production = sorted.filter((d) => d.environment === "production" && !d.isSkipped);
-  const liveId = production.length > 0 ? production[0].id : "";
-  return sorted.map((deployment) => {
-    const aliasMatch =
-      host &&
-      deployment.environment === "production" &&
-      deployment.aliases.some(
-        (alias) =>
-          alias.replace(/^https?:\/\//, "").replace(/\/+$/, "").toLowerCase() === host
-      );
-    return { ...deployment, isLive: deployment.id === liveId || Boolean(aliasMatch) };
-  });
-}
-
-// Pick which deployments a `keep N` prune should delete: keep the N newest
-// (including the live one), delete the rest oldest-first, NEVER the live one.
-export function selectDeploymentsToPrune(deployments, keep) {
-  const keepCount = Math.max(0, Number.isFinite(keep) ? Math.floor(keep) : 0);
-  const sorted = [...deployments].sort((a, b) => deploymentTimestamp(b) - deploymentTimestamp(a));
-  return sorted
-    .slice(keepCount)
-    .filter((deployment) => !deployment.isLive)
-    .reverse();
-}
-
-async function copyPublicTree(sourceRoot, destinationRoot) {
+async function copyPublicTree(sourceRoot, destinationRoot, { excludedRoots = [] } = {}) {
+  const blockedRoots = [destinationRoot, ...excludedRoots].map((entry) => path.resolve(entry));
   await fs.rm(destinationRoot, { recursive: true, force: true });
   await fs.mkdir(destinationRoot, { recursive: true });
 
@@ -1100,6 +824,9 @@ async function copyPublicTree(sourceRoot, destinationRoot) {
       }
 
       const sourcePath = path.join(currentSource, entry.name);
+      if (blockedRoots.some((blockedRoot) => isPathInside(blockedRoot, sourcePath))) {
+        continue;
+      }
       const relativePath = path.join(currentRelative, entry.name);
       const destinationPath = path.join(destinationRoot, relativePath);
 
@@ -1181,13 +908,19 @@ function normalizeSyncRecord(record, { baseUrl = "", source = "" } = {}) {
         .map((file) => (typeof file === "string" ? file : file?.path))
         .filter((file) => typeof file === "string" && file.trim())
     : [];
+  let token;
+  try {
+    token = normalizePublicationToken(record?.token || slug);
+  } catch {
+    token = slug;
+  }
   return {
     slug,
     source,
     files,
     title: String(record?.title || record?.name || "").trim(),
     label: String(record?.label || "imported").trim(),
-    token: String(record?.token || slug).trim(),
+    token,
     publicUrl: String(record?.publicUrl || record?.url || "").trim(),
     baseUrl: String(record?.baseUrl || baseUrl || "").trim(),
     createdAt: firstUsableIso(record?.createdAt, record?.created_on),
@@ -1461,74 +1194,6 @@ async function copyPublicUrlFiles({ publicUrl, destinationRoot, fetchImpl = fetc
   return { entryFile: "index.html", files: await listPublicTreeFiles(destinationRoot) };
 }
 
-async function runSpawnCommand({
-  spawnImpl,
-  command,
-  args,
-  timeoutMs,
-  cwd = PROJECT_ROOT,
-  env = process.env
-}) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let child;
-    let output = "";
-
-    const finish = (result) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-
-    const fail = (error) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      terminateChild(child);
-      reject(error);
-    };
-
-    const timer = setTimeout(() => {
-      fail(appError(`${command} did not finish within ${timeoutMs}ms.\n${output.trim()}`, 504));
-    }, timeoutMs);
-    timer.unref?.();
-
-    try {
-      // On Windows, `npx` is a `.cmd` shim that CreateProcess cannot launch
-      // directly (modern Node also refuses to spawn .cmd/.bat without a shell),
-      // so spawn it through the shell. Scoped to `npx`; other callers (e.g. the
-      // `sh -lc` build runner) keep direct argv semantics. shell:true joins the
-      // args into one unquoted cmd.exe line, so npx callers must keep them free
-      // of spaces and shell metacharacters: slugs/branch/32-hex account id are
-      // validated, and filesystem paths are passed via `cwd` + a relative arg,
-      // never inline.
-      child = spawnImpl(command, args, {
-        cwd,
-        stdio: ["ignore", "pipe", "pipe"],
-        env,
-        shell: process.platform === "win32" && command === "npx"
-      });
-    } catch (error) {
-      fail(appError(`${command} could not start.`, 502));
-      return;
-    }
-
-    const recordOutput = (chunk) => {
-      output += chunk.toString();
-    };
-
-    child.stdout?.on("data", recordOutput);
-    child.stderr?.on("data", recordOutput);
-    child.on("error", () => fail(appError(`${command} could not start.`, 502)));
-    child.on("exit", (code, signal) => finish({ code, signal, output }));
-  });
-}
-
 export function trimPastedLocalPathInput(inputPath) {
   if (typeof inputPath !== "string") {
     return "";
@@ -1764,13 +1429,30 @@ async function normalizeLocalHtmlPathCandidate(candidatePath) {
   return resolvedPath;
 }
 
-export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast") } = {}) {
+export function createConfigStore({
+  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
+  atomicWriteJsonImpl = atomicWriteJson
+} = {}) {
   const configPath = path.join(dataDir, "config.json");
   let config = normalizeConfig();
+  let mutationChain = Promise.resolve();
 
-  async function save() {
-    await fs.mkdir(dataDir, { recursive: true });
-    await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  async function persistConfig(nextConfig) {
+    const snapshot = structuredClone(nextConfig);
+    await atomicWriteJsonImpl(configPath, snapshot);
+  }
+
+  function enqueueConfigMutation(buildNext) {
+    const operation = mutationChain.then(async () => {
+      const nextConfig = buildNext(config);
+      // Install the next in-memory state only after its atomic file replacement
+      // succeeds. A rejected write can therefore never leak into a later save.
+      await persistConfig(nextConfig);
+      config = nextConfig;
+      return get();
+    });
+    mutationChain = operation.catch(() => {});
+    return operation;
   }
 
   // Generate local secrets once and keep them stable across redeploys.
@@ -1781,19 +1463,43 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
     if (!config.syncSecret) {
       config = { ...config, syncSecret: randomBytes(32).toString("hex") };
     }
+    if (!config.installationId) {
+      config = { ...config, installationId: randomBytes(16).toString("hex") };
+    }
   }
 
-  async function init() {
+  async function init({ persist = true } = {}) {
     if (!(await pathExists(configPath))) {
       ensureSecrets();
-      await save();
+      if (persist) {
+        await persistConfig(config);
+      }
       return;
     }
 
-    const parsed = safeJsonParse(await fs.readFile(configPath, "utf8"), {});
-    config = normalizeConfig(parsed);
+    let parsed;
+    try {
+      parsed = JSON.parse(await fs.readFile(configPath, "utf8"));
+    } catch (error) {
+      throw appError(
+        `Pagecast config is corrupt at ${configPath}; restore or remove it before continuing (${error.message}).`,
+        500
+      );
+    }
+    const persisted = JSON.stringify(parsed);
+    config = normalizeConfig({
+      ...parsed,
+      // v0.4 treated a missing field in an existing config as enabled. Preserve
+      // that historical choice; only a genuinely new config starts pending.
+      telemetry: Object.hasOwn(parsed, "telemetry") ? parsed.telemetry : true
+    });
     ensureSecrets();
-    await save();
+    // Read-only callers can load defaults/migrations without becoming a second
+    // writer. Normal initialization persists only when canonicalization, a
+    // migration, or secret generation actually changed the stored document.
+    if (persist && JSON.stringify(config) !== persisted) {
+      await persistConfig(config);
+    }
   }
 
   function get() {
@@ -1803,119 +1509,143 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
   // Client-safe view of the config. Secrets must never reach the browser
   // (it's served by /api/status and /api/config), or auth/sync tokens leak.
   function getPublicConfig() {
-    // telemetryId is an internal anonymous id; like secrets it must never reach
-    // the browser or CLI JSON output. The `telemetry` boolean stays visible.
-    const { authCookieSecret, syncSecret, telemetryId, ...rest } = config;
-    return structuredClone(rest);
-  }
-
-  async function updatePages({ projectName, accountId, accountName, baseUrl } = {}) {
-    const nextProjectName = projectName === undefined ? config.pages.projectName : projectName;
-    const nextAccountId = accountId === undefined ? config.pages.accountId : accountId;
-    const nextAccountName =
-      accountName === undefined && nextAccountId === config.pages.accountId
-        ? config.pages.accountName
-        : accountName;
-    const nextBaseUrl =
-      baseUrl === undefined && nextProjectName === config.pages.projectName
-        ? config.pages.baseUrl
-        : baseUrl;
-    config = normalizeConfig({
-      pages: {
-        projectName: nextProjectName,
-        accountId: nextAccountId,
-        accountName: nextAccountName,
-        baseUrl: nextBaseUrl
-      },
-      // Preserve feedback + badge + goal config — a pages update (e.g. persisting
-      // the account on publish) must not wipe other settings.
-      feedback: config.feedback,
+    // This is an allowlist rather than a denylist: adding a new private config
+    // field cannot accidentally expose it through HTTP, CLI JSON, or MCP.
+    return structuredClone({
+      pages: config.pages,
+      feedback: config.feedback
+        ? {
+            url: config.feedback.url,
+            workerName: config.feedback.workerName
+          }
+        : null,
       badge: config.badge,
-      goal: config.goal,
       defaultExpiry: config.defaultExpiry,
       cloudflareSyncEnabled: config.cloudflareSyncEnabled,
-      local: config.local,
-      authCookieSecret: config.authCookieSecret,
-      syncSecret: config.syncSecret,
-      telemetry: config.telemetry,
-      telemetryId: config.telemetryId,
-      telemetryNotified: config.telemetryNotified
+      telemetryConsent: config.telemetry,
+      local: config.local
     });
-    await save();
-    return get();
+  }
+
+  async function updatePages({
+    projectName,
+    accountId,
+    accountName,
+    baseUrl,
+    adoptExisting = false
+  } = {}) {
+    return enqueueConfigMutation((current) => {
+      const nextProjectName = projectName === undefined ? current.pages.projectName : projectName;
+      const nextAccountId = accountId === undefined ? current.pages.accountId : accountId;
+      const nextAccountName =
+        accountName === undefined && nextAccountId === current.pages.accountId
+          ? current.pages.accountName
+          : accountName;
+      const sameTarget =
+        nextProjectName === current.pages.projectName && nextAccountId === current.pages.accountId;
+      const nextBaseUrl = baseUrl === undefined && sameTarget ? current.pages.baseUrl : baseUrl;
+      const nextConfig = normalizeConfig({
+        ...current,
+        pages: {
+          projectName: nextProjectName,
+          accountId: nextAccountId,
+          accountName: nextAccountName,
+          baseUrl: nextBaseUrl
+        }
+      });
+      return adoptExisting && nextConfig.pages.accountId
+        ? normalizeConfig({
+            ...nextConfig,
+            managedTargets: [...nextConfig.managedTargets, nextConfig.pages]
+          })
+        : nextConfig;
+    });
+  }
+
+  function getOwnerId() {
+    return config.installationId || "";
+  }
+
+  function isTargetManaged(projectRef) {
+    return config.managedTargets.some((target) => projectRefEquals(target, projectRef));
+  }
+
+  async function claimManagedTarget(projectRef) {
+    const normalized = normalizeProjectRef(projectRef);
+    if (isTargetManaged(normalized)) return normalized;
+    await enqueueConfigMutation((current) =>
+      current.managedTargets.some((target) => projectRefEquals(target, normalized))
+        ? current
+        : normalizeConfig({
+            ...current,
+            managedTargets: [...current.managedTargets, normalized]
+          })
+    );
+    return normalized;
   }
 
   async function setBadge(enabled) {
-    config = normalizeConfig({ ...config, badge: enabled !== false });
-    await save();
-    return get();
+    return enqueueConfigMutation((current) =>
+      normalizeConfig({ ...current, badge: enabled !== false })
+    );
   }
 
   async function setDefaultExpiry(value) {
-    config = normalizeConfig({ ...config, defaultExpiry: value });
-    await save();
-    return get();
+    return enqueueConfigMutation((current) => normalizeConfig({ ...current, defaultExpiry: value }));
   }
 
   async function setCloudflareSyncEnabled(enabled) {
-    config = normalizeConfig({ ...config, cloudflareSyncEnabled: enabled !== false });
-    await save();
-    return get();
+    return enqueueConfigMutation((current) =>
+      normalizeConfig({ ...current, cloudflareSyncEnabled: enabled !== false })
+    );
   }
 
   async function setLocalRuntime(local) {
-    config = normalizeConfig({ ...config, local: { ...config.local, ...local } });
-    await save();
-    return get();
+    return enqueueConfigMutation((current) =>
+      normalizeConfig({ ...current, local: { ...current.local, ...local } })
+    );
   }
 
   async function setGoal(goal) {
-    config = normalizeConfig({ ...config, goal });
-    await save();
-    return get();
+    return enqueueConfigMutation((current) => normalizeConfig({ ...current, goal }));
   }
 
-  async function setTelemetry(enabled) {
-    config = normalizeConfig({ ...config, telemetry: enabled !== false });
-    await save();
-    return get();
+  async function setTelemetry(enabled, { notified = false } = {}) {
+    return enqueueConfigMutation((current) =>
+      normalizeConfig({
+        ...current,
+        telemetry: enabled !== false,
+        telemetryNotified: notified ? true : current.telemetryNotified
+      })
+    );
   }
 
   // Generate the opaque anonymous install id once, on demand. Random and PII-free;
   // only created when telemetry is enabled and about to send its first event.
   async function ensureTelemetryId() {
-    if (!config.telemetryId) {
-      config = { ...config, telemetryId: randomBytes(16).toString("hex") };
-      await save();
-    }
-    return config.telemetryId;
+    if (config.telemetryId) return config.telemetryId;
+    const generated = randomBytes(16).toString("hex");
+    const next = await enqueueConfigMutation((current) =>
+      current.telemetryId ? current : { ...current, telemetryId: generated }
+    );
+    return next.telemetryId;
   }
 
   async function markTelemetryNotified() {
-    if (!config.telemetryNotified) {
-      config = { ...config, telemetryNotified: true };
-      await save();
-    }
-    return get();
+    if (config.telemetryNotified) return get();
+    return enqueueConfigMutation((current) =>
+      current.telemetryNotified ? current : { ...current, telemetryNotified: true }
+    );
   }
 
   async function updateFeedback(feedback) {
-    config = normalizeConfig({
-      pages: config.pages,
-      badge: config.badge,
-      goal: config.goal,
-      defaultExpiry: config.defaultExpiry,
-      cloudflareSyncEnabled: config.cloudflareSyncEnabled,
-      local: config.local,
-      authCookieSecret: config.authCookieSecret,
-      syncSecret: config.syncSecret,
-      telemetry: config.telemetry,
-      telemetryId: config.telemetryId,
-      telemetryNotified: config.telemetryNotified,
-      feedback: feedback === null ? null : { ...(config.feedback || {}), ...feedback }
-    });
-    await save();
-    return get();
+    await enqueueConfigMutation((current) =>
+      normalizeConfig({
+        ...current,
+        feedback: feedback === null ? null : { ...(current.feedback || {}), ...feedback }
+      })
+    );
+    return getPublicConfig();
   }
 
   return {
@@ -1932,6 +1662,9 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
     getPublicConfig,
     updatePages,
     updateFeedback,
+    getOwnerId,
+    isTargetManaged,
+    claimManagedTarget,
     configPath
   };
 }
@@ -1953,7 +1686,11 @@ export function createDeployQueue() {
     return result;
   }
 
-  return { enqueue };
+  function drain() {
+    return chain;
+  }
+
+  return { enqueue, drain };
 }
 
 // Insert the feedback widget into a published HTML document. The widget (served
@@ -2104,457 +1841,65 @@ export function injectSocialMeta(html, { title, description, url, image, siteNam
   return `${block}\n${doc}`;
 }
 
-export function createCloudflarePagesPublisher({
-  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
-  spawnImpl = spawn,
-  fetchImpl = fetch,
-  timeoutMs = 180000,
-  getRedirects = () => [],
-  getFeedback = () => null,
-  getBadge = () => true,
-  getProtectedPublications = () => [],
-  getAuthCookieSecret = () => null,
-  getSyncToken = () => ""
-} = {}) {
-  const siteRoot = path.join(dataDir, "pages-site");
-  const deployRoot = path.join(dataDir, "pages-deploy");
-
-  function publicationDir(slug) {
-    return path.join(siteRoot, "p", slug);
-  }
-
-  // Returns the directory whose contents should be published for a report: the
-  // working copy when the report has been detached/edited in-app, otherwise the
-  // original source directory.
-  function publishSourceFor(report) {
-    return report.workingDir || report.buildOutputRoot || report.rootDir;
-  }
-
-  async function buildSyncManifest(pagesConfig = {}) {
-    const baseUrl = pagesConfig?.baseUrl || pagesBaseUrl(pagesConfig?.projectName || DEFAULT_PAGES_PROJECT_NAME);
-    const pRoot = path.join(siteRoot, "p");
-    const publications = [];
-    let entries = [];
-    try {
-      entries = await fs.readdir(pRoot, { withFileTypes: true });
-    } catch (error) {
-      if (error.code !== "ENOENT") {
-        throw error;
-      }
-    }
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
-      let slug;
-      try {
-        slug = normalizeCustomSlug(entry.name);
-      } catch {
-        continue;
-      }
-      const root = publicationDir(slug);
-      const files = await listPublicTreeFiles(root);
-      if (!files.includes("index.html") && !files.includes("index.htm")) {
-        continue;
-      }
-      let title = slug;
-      try {
-        const indexName = files.includes("index.html") ? "index.html" : "index.htm";
-        const html = await fs.readFile(path.join(root, indexName), "utf8");
-        title = extractTitle(html, slug) || slug;
-      } catch {
-        title = slug;
-      }
-      publications.push({
-        slug,
-        title,
-        files,
-        publicUrl: baseUrl ? joinUrl(baseUrl, `/p/${encodeURIComponent(slug)}/`) : "",
-        updatedAt: nowIso()
-      });
-    }
-
-    publications.sort((a, b) => a.slug.localeCompare(b.slug));
-    return {
-      version: 1,
-      generatedAt: nowIso(),
-      baseUrl,
-      publications
-    };
-  }
-
-  async function ensureSiteRoot(pagesConfig = {}) {
-    await fs.mkdir(siteRoot, { recursive: true });
-    await fs.rm(path.join(siteRoot, "index.html"), { force: true });
-    await fs.writeFile(path.join(siteRoot, "404.html"), "<!doctype html><title>Not found</title>", "utf8");
-    await fs.writeFile(
-      path.join(siteRoot, "_headers"),
-      "/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n",
-      "utf8"
-    );
-
-    const redirects = getRedirects() || [];
-    const redirectsPath = path.join(siteRoot, "_redirects");
-    if (redirects.length > 0) {
-      const lines = redirects
-        .map((entry) => `${stripTrailingSlash(entry.from)}/* ${stripTrailingSlash(entry.to)}/:splat 301`)
-        .join("\n");
-      await fs.writeFile(redirectsPath, `${lines}\n`, "utf8");
-    } else {
-      await fs.rm(redirectsPath, { force: true });
-    }
-
-    await writeAuthAssets(pagesConfig);
-  }
-
-  // (Re)generate the edge gate on every deploy. When any publication needs one —
-  // password-protected and/or expiring — write functions/_middleware.js (the
-  // gate + baked manifest) and a _routes.json scoping the Function to those
-  // prefixes only. When none need it, remove both so the site stays pure-static.
-  async function writeAuthAssets(pagesConfig = {}) {
-    const manifest = (getProtectedPublications() || []).filter(
-      (entry) =>
-        entry &&
-        entry.slug &&
-        (isValidPasswordHash(entry) || (Number.isFinite(entry.expiresAt) && entry.expiresAt > 0))
-    );
-    const functionsDir = path.join(siteRoot, "functions");
-    const middlewarePath = path.join(functionsDir, "_middleware.js");
-    const routesPath = path.join(siteRoot, "_routes.json");
-    const syncToken = String(getSyncToken() || "");
-    const syncManifest = syncToken ? await buildSyncManifest(pagesConfig) : null;
-    const includeSyncEndpoint = Boolean(syncToken && syncManifest?.publications?.length);
-
-    if (manifest.length === 0 && !includeSyncEndpoint) {
-      await fs.rm(functionsDir, { recursive: true, force: true });
-      await fs.rm(routesPath, { force: true });
-      return;
-    }
-
-    await fs.mkdir(functionsDir, { recursive: true });
-    await fs.writeFile(
-      middlewarePath,
-      renderAuthMiddleware(manifest, {
-        cookieSecret: getAuthCookieSecret() || "",
-        badge: getBadge(),
-        syncToken,
-        syncManifest
-      }),
-      "utf8"
-    );
-    await fs.writeFile(
-      routesPath,
-      renderRoutesJson(manifest.map((entry) => entry.slug), { includeSyncEndpoint }),
-      "utf8"
-    );
-  }
-
-  async function stagePublication(report, publication, { pagesBaseUrl = "" } = {}) {
-    const slug = publication.slug || publication.token;
-    const destinationRoot = publicationDir(slug);
-    const sourceRoot = publishSourceFor(report);
-    await copyPublicTree(sourceRoot, destinationRoot);
-
-    const indexPath = path.join(destinationRoot, "index.html");
-    let html;
-    if (isMarkdownFileName(report.entryFile)) {
-      // Render the raw markdown entry to real HTML so the published Cloudflare
-      // site serves a proper document; sibling assets were copied above.
-      const markdown = await fs.readFile(path.join(sourceRoot, report.entryFile), "utf8");
-      html = markdownToHtml(markdown, { title: report.name });
-    } else {
-      html = await fs.readFile(path.join(sourceRoot, report.entryFile), "utf8");
-    }
-
-    // Inject the reactions + analytics widget when feedback is provisioned.
-    const feedback = getFeedback();
-    if (feedback?.url) {
-      html = injectFeedbackWidget(html, { url: feedback.url, slug });
-    }
-    // Inject the "Published with Pagecast" badge unless turned off (white-label).
-    const badgeOn = getBadge();
-    if (badgeOn) {
-      html = injectBadge(html);
-    }
-    // Inject Open Graph / Twitter meta so the shared link unfurls richly. The
-    // Pagecast-branded card image + site_name are gated on the badge setting, so
-    // white-label pages get clean per-report unfurls without Pagecast branding.
-    html = injectSocialMeta(html, {
-      title: extractTitle(html, report.name),
-      description: extractDescription(html),
-      url: pagesBaseUrl ? joinUrl(pagesBaseUrl, `/p/${encodeURIComponent(slug)}/`) : "",
-      image: badgeOn ? DEFAULT_OG_IMAGE : "",
-      siteName: badgeOn ? "Pagecast" : ""
-    });
-    await fs.writeFile(indexPath, html, "utf8");
-  }
-
-  async function removePublication(slug) {
-    await fs.rm(publicationDir(slug), { recursive: true, force: true });
-  }
-
-  async function runPagesDeploy(rootDir, pagesConfig, branch = DEFAULT_PAGES_BRANCH) {
-    const projectName = normalizePagesProjectName(pagesConfig.projectName);
-    const accountId = normalizeAccountId(pagesConfig.accountId || "");
-    const deployBranch = normalizePagesBranch(branch);
-    await assertSafePagesDeployRoot(rootDir, projectName);
-
-    // Deploy from INSIDE rootDir (path arg ".") instead of passing rootDir as
-    // the path. `wrangler pages deploy` resolves the Functions directory
-    // relative to the current working directory, NOT the deploy-path argument —
-    // so running from rootDir is what lets our generated functions/_middleware.js
-    // (the password gate) and _routes.json actually get compiled and uploaded.
-    const args = [
-      "--yes",
-      "wrangler",
-      "pages",
-      "deploy",
-      ".",
-      "--project-name",
-      projectName,
-      "--branch",
-      deployBranch
-    ];
-
-    // `wrangler pages deploy` does not accept an `--account-id` flag (it errors
-    // with "Unknown arguments: account-id" on e.g. 4.63.0). The account is
-    // selected via the CLOUDFLARE_ACCOUNT_ID environment variable instead.
-    const result = await runSpawnCommand({
-      spawnImpl,
-      command: "npx",
-      args,
-      timeoutMs,
-      cwd: rootDir,
-      env: accountId ? { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountId } : process.env
-    });
-
-    if (result.code !== 0) {
-      throw appError(
-        `Cloudflare Pages deploy failed (${result.signal || result.code}).\n${cleanCommandOutput(result.output)}`,
-        502
-      );
-    }
-
-    // Use the real subdomain Cloudflare actually assigned (may differ from the
-    // project name on a global subdomain collision), not an assumed one.
-    const baseUrl = pagesBaseUrlFromDeployOutput(result.output, projectName);
-    return {
-      baseUrl,
-      deploymentUrl: pagesDeploymentUrlFromDeployOutput(result.output, baseUrl),
-      output: result.output
-    };
-  }
-
-  async function deploy(pagesConfig) {
-    await ensureSiteRoot(pagesConfig);
-    const result = await runPagesDeploy(siteRoot, pagesConfig, DEFAULT_PAGES_BRANCH);
-    return result.baseUrl;
-  }
-
-  async function deploySite({ sourceDir, pagesConfig, branch = DEFAULT_PAGES_BRANCH } = {}) {
-    const normalizedSourceDir = await normalizeLocalFolderPath(sourceDir);
-    const projectName = normalizePagesProjectName(pagesConfig.projectName);
-    if (isPathInside(deployRoot, normalizedSourceDir)) {
-      throw appError("Cannot deploy Pagecast's internal deploy staging folder.", 400);
-    }
-    const stagingRoot = path.join(deployRoot, projectName);
-    await copyPublicTree(normalizedSourceDir, stagingRoot);
-    const result = await runPagesDeploy(stagingRoot, pagesConfig, branch);
-    return {
-      ...result,
-      sourceDir: normalizedSourceDir,
-      stagingRoot,
-      projectName,
-      branch: normalizePagesBranch(branch)
-    };
-  }
-
-  async function publish({ report, publication, pagesConfig }) {
-    const slug = publication.slug || publication.token;
-    await ensureSiteRoot(pagesConfig);
-    await stagePublication(report, publication, { pagesBaseUrl: pagesConfig?.baseUrl });
-    try {
-      const baseUrl = await deploy(pagesConfig);
-      return joinUrl(baseUrl, `/p/${encodeURIComponent(slug)}/`);
-    } catch (error) {
-      await removePublication(slug);
-      throw error;
-    }
-  }
-
-  // Re-stage and redeploy the SAME slug folder so the public URL updates in
-  // place. Unlike publish(), this never removes the staged folder on failure so
-  // the last known-good content stays live.
-  async function syncPublication({ report, publication, pagesConfig }) {
-    const slug = publication.slug || publication.token;
-    await ensureSiteRoot(pagesConfig);
-    await stagePublication(report, publication, { pagesBaseUrl: pagesConfig?.baseUrl });
-    const baseUrl = await deploy(pagesConfig);
-    return joinUrl(baseUrl, `/p/${encodeURIComponent(slug)}/`);
-  }
-
-  // Move a publication's staged content from oldSlug to newSlug and redeploy,
-  // returning the new public URL.
-  async function renamePublication({ oldSlug, newSlug, report, publication, pagesConfig }) {
-    await ensureSiteRoot(pagesConfig);
-    await stagePublication(report, { ...publication, slug: newSlug }, { pagesBaseUrl: pagesConfig?.baseUrl });
-    if (oldSlug && oldSlug !== newSlug) {
-      await removePublication(oldSlug);
-    }
-    try {
-      const baseUrl = await deploy(pagesConfig);
-      return joinUrl(baseUrl, `/p/${encodeURIComponent(newSlug)}/`);
-    } catch (error) {
-      if (oldSlug && oldSlug !== newSlug) {
-        await removePublication(newSlug).catch(() => {});
-        await stagePublication(report, { ...publication, slug: oldSlug }, { pagesBaseUrl: pagesConfig?.baseUrl })
-          .catch(() => {});
-      }
-      throw error;
-    }
-  }
-
-  async function revoke(slugs, pagesConfig) {
-    await ensureSiteRoot(pagesConfig);
-    for (const slug of slugs) {
-      await removePublication(slug);
-    }
-    return deploy(pagesConfig);
-  }
-
-  async function discoverPublishedPages({ pagesConfig = {}, syncToken = "" } = {}) {
-    const baseUrl = pagesConfig?.baseUrl || pagesBaseUrl(pagesConfig?.projectName || DEFAULT_PAGES_PROJECT_NAME);
-    const records = new Map();
-    const warnings = [];
-    let remoteManifestFound = false;
-
-    if (baseUrl && syncToken) {
-      const manifestUrl = joinUrl(
-        baseUrl,
-        `${PAGECAST_SYNC_MANIFEST_PATH}?token=${encodeURIComponent(syncToken)}`
-      );
-      try {
-        const response = await fetchWithTimeout(
-          fetchImpl,
-          manifestUrl,
-          { headers: { Accept: "application/json" } }
-        );
-        if (response.ok) {
-          const contentType = response.headers.get("content-type") || "";
-          if (!contentType.includes("application/json")) {
-            remoteManifestFound = false;
-          } else {
-            const manifest = await response.json();
-            const remoteBaseUrl = String(manifest?.baseUrl || baseUrl);
-            for (const item of manifest?.publications || []) {
-              const record = normalizeSyncRecord(item, {
-                baseUrl: remoteBaseUrl,
-                source: "cloudflare"
-              });
-              if (record) {
-                records.set(record.slug, record);
-              }
-            }
-            remoteManifestFound = true;
-          }
-        } else if (response.status !== 404) {
-          warnings.push(`Cloudflare sync manifest returned ${response.status}.`);
-        }
-      } catch (error) {
-        warnings.push(`Cloudflare sync manifest could not be read: ${error.message || error}.`);
-      }
-    }
-
-    const localManifest = await buildSyncManifest(pagesConfig);
-    for (const item of localManifest.publications) {
-      const record = normalizeSyncRecord(item, {
-        baseUrl: localManifest.baseUrl,
-        source: "local-staged"
-      });
-      if (record) {
-        records.set(record.slug, {
-          ...records.get(record.slug),
-          ...record,
-          sourceRoot: publicationDir(record.slug),
-          source: records.has(record.slug) ? "cloudflare+local-staged" : "local-staged"
-        });
-      }
-    }
-
-    const projectName =
-      normalizePagesProjectNameSafe(pagesConfig?.projectName) || DEFAULT_PAGES_PROJECT_NAME;
-    const projectRootSlug = projectRootImportSlug(projectName);
-    const projectDeployRoot = path.join(deployRoot, projectName);
-    try {
-      const projectEntry = await findFolderEntry(projectDeployRoot);
-      const files = await listPublicTreeFiles(projectDeployRoot);
-      let title = projectName;
-      try {
-        const html = await fs.readFile(path.join(projectDeployRoot, projectEntry), "utf8");
-        title = extractTitle(html, title) || title;
-      } catch {
-        title = projectName;
-      }
-      if (!records.has(projectRootSlug)) {
-        records.set(projectRootSlug, {
-          slug: projectRootSlug,
-          source: "local-staged-site-root",
-          sourceRoot: projectDeployRoot,
-          files,
-          title,
-          label: "recovered",
-          token: projectRootSlug,
-          publicUrl: baseUrl,
-          baseUrl,
-          createdAt: nowIso(),
-          updatedAt: nowIso()
-        });
-      }
-    } catch (error) {
-      if (error.code !== "ENOENT" && error.statusCode !== 400) {
-        warnings.push(`Local staged Pages project could not be read: ${error.message || error}.`);
-      }
-    }
-
-    if (!remoteManifestFound && !records.has(projectRootSlug) && baseUrl) {
-      records.set(projectRootSlug, {
-        slug: projectRootSlug,
-        source: "cloudflare-public-root",
-        files: [],
-        title: projectName,
-        label: "recovered",
-        token: projectRootSlug,
-        publicUrl: baseUrl,
-        baseUrl,
-        createdAt: nowIso(),
-        updatedAt: nowIso()
-      });
-    }
-
-    return {
-      publications: [...records.values()].sort((a, b) => a.slug.localeCompare(b.slug)),
-      warnings,
-      remoteManifestFound
-    };
-  }
-
-  return {
-    siteRoot,
-    deployRoot,
-    fetchImpl,
-    publish,
-    syncPublication,
-    renamePublication,
-    revoke,
-    deploySite,
-    publicationDir,
-    publishSourceFor,
-    discoverPublishedPages,
-    buildSyncManifest
-  };
+export function createCloudflarePagesPublisher(options = {}) {
+  return createPublicationService(options, {
+    DEFAULT_OG_IMAGE,
+    DEFAULT_PAGES_BRANCH,
+    DEFAULT_PAGES_PROJECT_NAME,
+    PAGECAST_PROJECT_MARKER_FILE,
+    PAGECAST_SYNC_MANIFEST_PATH,
+    PROJECT_ROOT,
+    appError,
+    assertSafePagesDeployRoot,
+    atomicWriteJson,
+    cleanCommandOutput,
+    copyPublicTree,
+    createWranglerInvocation,
+    encodeProjectOwnershipMarker,
+    extractDescription,
+    extractTitle,
+    fetchWithTimeout,
+    findFolderEntry,
+    fs,
+    inferLegacyRedirectProjectRef,
+    injectBadge,
+    injectFeedbackWidget,
+    injectSocialMeta,
+    isMarkdownFileName,
+    isPathInside,
+    isValidPasswordHash,
+    joinUrl,
+    listPublicTreeFiles,
+    markdownToHtml,
+    normalizeAccountId,
+    normalizeCustomSlug,
+    normalizeLocalFolderPath,
+    normalizePagesBranch,
+    normalizePagesProjectName,
+    normalizePagesProjectNameSafe,
+    normalizeProjectRef,
+    normalizePublicationToken,
+    normalizeStoredProjectRef,
+    normalizeSyncRecord,
+    nowIso,
+    pagesBaseUrl,
+    pagesBaseUrlFromDeployOutput,
+    pagesDeploymentUrlFromDeployOutput,
+    path,
+    pathExists,
+    projectRefEquals,
+    projectRefFilesystemKey,
+    projectRootImportSlug,
+    publicationTokenFilesystemKey,
+    randomBytes,
+    renderAuthMiddleware,
+    renderRoutesJson,
+    runSpawnCommand,
+    spawn,
+    stripTrailingSlash,
+    validateOwnershipMarker
+  });
 }
-
 // Watches the source directories of auto-sync path reports and re-publishes
 // (same URL, in place) each active snapshot when the entry file changes. All
 // deploys go through the shared deploy queue so they never overlap. Failures are
@@ -2564,6 +1909,7 @@ export function createWatchManager({
   pagesPublisher,
   configStore,
   deployQueue,
+  mutationQueue = null,
   debounceMs = 1000,
   onError = () => {}
 } = {}) {
@@ -2583,21 +1929,39 @@ export function createWatchManager({
     if (!report) {
       return;
     }
-    const snapshots = store.activeSnapshotPublications(report);
-    if (snapshots.length === 0) {
+    const targets = reportDeploymentTargets(store, report, configStore.get().pages);
+    if (targets.length === 0) {
       return;
     }
-    for (const publication of snapshots) {
+    const entries = targets.map(({ publication, pagesConfig }) => ({
+      type: "auto_sync",
+      token: publication.token,
+      slug: publication.slug || publication.token,
+      projectRef: pagesConfig,
+      reportId
+    }));
+    await store.beginOperations(entries);
+    for (const target of targets) {
       try {
-        const pagesConfig = pagesConfigForPublication(publication, configStore.get().pages);
-        rememberPublicationPagesTarget(publication, pagesConfig);
-        await pagesPublisher.syncPublication({
-          report,
-          publication,
-          pagesConfig
+        await deployReportTargetState({
+          store,
+          configStore,
+          pagesPublisher,
+          deployQueue: null,
+          report: store.get(reportId),
+          ...target
         });
-        await store.syncSnapshot(publication.token);
+        await store.clearOperation("auto_sync", target.publication.token);
       } catch (error) {
+        await store
+          .recordOperationFailure({
+            type: "auto_sync",
+            token: target.publication.token,
+            slug: target.publication.slug || target.publication.token,
+            projectRef: target.pagesConfig,
+            error
+          })
+          .catch(() => {});
         onError(error);
       }
     }
@@ -2609,9 +1973,8 @@ export function createWatchManager({
       timers.delete(reportId);
       // Run the actual deploy work inside the shared queue so concurrent
       // watchers never deploy at the same time. Recover so the chain survives.
-      deployQueue
-        .enqueue(() => syncReportSnapshots(reportId))
-        .catch((error) => onError(error));
+      const sync = () => deployQueue.enqueue(() => syncReportSnapshots(reportId));
+      (mutationQueue ? mutationQueue.enqueue(sync) : sync()).catch((error) => onError(error));
     }, debounceMs);
     timer.unref?.();
     timers.set(reportId, timer);
@@ -2670,337 +2033,21 @@ export function createWatchManager({
     }
   }
 
-  return { register, unregister, closeAll };
+  function isRegistered(reportId) {
+    return watchers.has(reportId);
+  }
+
+  return { register, unregister, closeAll, isRegistered };
 }
 
-export function createCloudflareAuthManager({
-  spawnImpl = spawn,
-  loginTimeoutMs = DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS,
-  listTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS
-} = {}) {
-  async function runWrangler(args, timeoutMs, env = {}, cwd) {
-    const result = await runSpawnCommand({
-      spawnImpl,
-      command: "npx",
-      args: ["--yes", "wrangler", ...args],
-      timeoutMs,
-      // Defaults to PROJECT_ROOT in runSpawnCommand when undefined. Callers
-      // pass a cwd so any filesystem path can be given as a relative arg
-      // instead of an absolute one (see the feedback deploy below).
-      cwd,
-      env: {
-        ...process.env,
-        ...env
-      }
-    });
-
-    if (result.code !== 0) {
-      throw appError(
-        `Wrangler failed (${result.signal || result.code}).\n${cleanCommandOutput(result.output)}`,
-        502
-      );
-    }
-
-    return result.output;
-  }
-
-  // Cached view of the current Wrangler OAuth session so /api/status can report
-  // "logged in" without spawning Wrangler on every poll. The probe runs at
-  // connect/refresh time; the cache is invalidated whenever login state changes.
-  let sessionCache = null;
-
-  async function login(scopes = CLOUDFLARE_OAUTH_SCOPES) {
-    const scopedArgs = scopes.flatMap((scope) => ["--scopes", scope]);
-    await runWrangler(["login", ...scopedArgs], loginTimeoutMs);
-    sessionCache = null;
-  }
-
-  async function logout() {
-    await runWrangler(["logout"], listTimeoutMs);
-    sessionCache = null;
-  }
-
-  async function listProjects({ accountId = "" } = {}) {
-    const env = accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {};
-    // Try the JSON form, but fall back to the plain-text listing on ANY failure:
-    // some Wrangler versions (e.g. 4.63.0) don't support `--json` and exit 1 with
-    // a help screen rather than a clean "Unknown argument: json" message.
-    try {
-      const output = await runWrangler(["pages", "project", "list", "--json"], listTimeoutMs, env);
-      const projects = parseWranglerPagesProjects(output);
-      if (projects.length > 0) {
-        return projects;
-      }
-    } catch {
-      // fall through to the text listing
-    }
-    const output = await runWrangler(["pages", "project", "list"], listTimeoutMs, env);
-    return parseWranglerPagesProjects(output);
-  }
-
-  async function loginAndListProjects(options = {}) {
-    await login();
-    return listProjects(options);
-  }
-
-  // List a Pages project's deployment snapshots (the immutable per-deploy
-  // <hash>.pages.dev versions). JSON-first with a plain-text fallback, mirroring
-  // listProjects(): some Wrangler versions exit 1 on `--json`. Returns the
-  // normalized (unflagged) list; callers flag the live one via flagLiveDeployment
-  // since the project base URL lives in config, not here.
-  async function listDeployments({ projectName, accountId = "" } = {}) {
-    const name = normalizePagesProjectName(projectName);
-    const env = accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {};
-    try {
-      const output = await runWrangler(
-        ["pages", "deployment", "list", "--project-name", name, "--json"],
-        listTimeoutMs,
-        env
-      );
-      const deployments = parseWranglerPagesDeployments(output);
-      if (deployments.length > 0) {
-        return deployments;
-      }
-    } catch {
-      // fall through to the text listing
-    }
-    const output = await runWrangler(
-      ["pages", "deployment", "list", "--project-name", name],
-      listTimeoutMs,
-      env
-    );
-    return parseWranglerPagesDeployments(output);
-  }
-
-  // Delete one deployment snapshot by id. `force` adds --force, required for
-  // aliased non-production deployments. Cloudflare refuses the live/latest
-  // production deploy regardless — callers should pre-check isLive. On a
-  // non-force failure that asks for --force, retry once for non-production
-  // deploys only (never force the live production one).
-  async function deleteDeployment({ id, projectName, accountId = "", force = false, environment = "" } = {}) {
-    const name = normalizePagesProjectName(projectName);
-    const deployId = String(id || "").trim();
-    if (!deployId) {
-      throw appError("A deployment id is required.", 400);
-    }
-    const env = accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {};
-    const runDelete = async (useForce) => {
-      const args = ["pages", "deployment", "delete", deployId, "--project-name", name];
-      if (useForce) {
-        args.push("--force");
-      }
-      await runWrangler(args, listTimeoutMs, env);
-    };
-    try {
-      await runDelete(force);
-    } catch (error) {
-      const message = stripAnsi(error.message || "");
-      const needsForce = /--force|aliased|alias/i.test(message);
-      if (needsForce && !force && environment && environment !== "production") {
-        await runDelete(true);
-      } else {
-        throw error;
-      }
-    }
-    return { id: deployId, deleted: true };
-  }
-
-  // Returns the Cloudflare accounts visible to the current OAuth session.
-  // An empty array means "not logged in". Used to auto-detect the account so
-  // the user never has to paste an account ID for the single-account case.
-  async function whoami() {
-    // Prefer the JSON form on newer Wrangler, but fall back to the stable text
-    // table whenever `--json` is unsupported or yields nothing. Wrangler 4.63.0
-    // exits 1 and prints a help screen for `whoami --json` — that must NOT be
-    // read as "logged out", or the app will trigger a needless re-login.
-    try {
-      const output = await runWrangler(["whoami", "--json"], listTimeoutMs);
-      const accounts = parseWranglerWhoamiAccounts(output);
-      if (accounts.length > 0) {
-        return accounts;
-      }
-    } catch {
-      // fall through to the text whoami
-    }
-    try {
-      const output = await runWrangler(["whoami"], listTimeoutMs);
-      return parseWranglerWhoamiAccounts(output);
-    } catch (error) {
-      const message = stripAnsi(error.message || "");
-      if (/not authenticated|not logged in|wrangler login|run `?wrangler login/i.test(message)) {
-        return [];
-      }
-      throw error;
-    }
-  }
-
-  // Idempotently ensures a Pages project exists so a first-time user can publish
-  // without manually creating one in the Cloudflare dashboard.
-  async function ensureProject({ projectName, accountId = "", branch = DEFAULT_PAGES_BRANCH } = {}) {
-    const name = normalizePagesProjectName(projectName);
-    const env = accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {};
-    try {
-      await runWrangler(
-        ["pages", "project", "create", name, "--production-branch", branch],
-        listTimeoutMs,
-        env
-      );
-    } catch (error) {
-      const message = stripAnsi(error.message);
-      if (/already exists|already taken|name is taken|project with.*name/i.test(message)) {
-        return name;
-      }
-      throw error;
-    }
-    return name;
-  }
-
-  // Provision the feedback Worker: reuse-or-create a KV namespace, stage the
-  // worker + a generated wrangler.toml, and deploy it to the account's
-  // workers.dev. Returns { url, kvId, workerName, statsToken }. Side-effecting
-  // (creates real Cloudflare resources) — only run on explicit user action.
-  async function setupFeedback({
-    accountId = "",
-    workerName = "pagecast-feedback",
-    workerSource = "",
-    statsToken = "",
-    deployDir,
-    timeoutMs = 120000
-  } = {}) {
-    if (!workerSource) {
-      throw appError("Feedback Worker source was not found in the package.", 500);
-    }
-    if (!deployDir) {
-      throw appError("A deploy directory is required to set up feedback.", 500);
-    }
-    const env = accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {};
-    const kvTitle = `${workerName}-store`;
-
-    const provision = async () => {
-      // 1. Reuse or create the KV namespace.
-      let kvId = "";
-      try {
-        const listOut = await runWrangler(["kv", "namespace", "list"], timeoutMs, env);
-        kvId = findKvNamespaceId(listOut, kvTitle);
-      } catch {
-        // Listing isn't available/authorized — fall through to create.
-      }
-      if (!kvId) {
-        const createOut = await runWrangler(
-          ["kv", "namespace", "create", kvTitle],
-          timeoutMs,
-          env
-        );
-        kvId = parseKvNamespaceId(createOut);
-      }
-      if (!kvId) {
-        throw appError("Could not create the feedback KV namespace.", 502);
-      }
-
-      // 2. Stage worker.js + a generated wrangler.toml in a clean temp dir.
-      await fs.rm(deployDir, { recursive: true, force: true });
-      await fs.mkdir(deployDir, { recursive: true });
-      await fs.writeFile(path.join(deployDir, "worker.js"), workerSource, "utf8");
-      const toml = [
-        `name = "${workerName}"`,
-        `main = "worker.js"`,
-        `compatibility_date = "2024-09-01"`,
-        `workers_dev = true`,
-        ``,
-        `[[kv_namespaces]]`,
-        `binding = "PAGECAST_FEEDBACK"`,
-        `id = "${kvId}"`,
-        ``,
-        `[vars]`,
-        `PAGECAST_STATS_TOKEN = "${statsToken}"`,
-        ``
-      ].join("\n");
-      await fs.writeFile(path.join(deployDir, "wrangler.toml"), toml, "utf8");
-
-      // 3. Deploy. Wrangler resolves `main` relative to the config file's dir.
-      // Run from inside deployDir with a RELATIVE --config so the absolute
-      // path (which may contain spaces, e.g. C:\Users\John Doe\...) never
-      // crosses the cmd.exe command line when npx is spawned with shell:true
-      // on Windows. cwd is passed to spawn natively and is space-safe.
-      const deployOut = await runWrangler(
-        ["deploy", "--config", "wrangler.toml"],
-        timeoutMs,
-        env,
-        deployDir
-      );
-      const url = parseWorkerDevUrl(deployOut);
-      if (!url) {
-        throw appError(
-          "Feedback Worker deployed but no workers.dev URL was returned. Enable a workers.dev subdomain in your Cloudflare dashboard, then retry.",
-          502
-        );
-      }
-      return { url, kvId, workerName, statsToken };
-    };
-
-    try {
-      return await provision();
-    } catch (error) {
-      // The base publishing OAuth lacks Workers/KV permission, surfacing as a
-      // Cloudflare "Authentication error [code: 10000]". Elevate the grant to the
-      // feedback scopes once, then retry. (No-op if a token is already broad.)
-      if (/code:\s*10000|authentication error/i.test(stripAnsi(error.message || ""))) {
-        await login(FEEDBACK_OAUTH_SCOPES);
-        return await provision();
-      }
-      throw error;
-    }
-  }
-
-  function cachedSession() {
-    return sessionCache ? sessionCache.value : { loggedIn: false, accounts: [] };
-  }
-
-  // Whether the session has ever been probed. False on a fresh boot, so callers
-  // can do a one-time refresh to detect an existing Wrangler login instead of
-  // reporting "not connected" until the user clicks Connect again.
-  function isSessionInitialized() {
-    return sessionCache !== null;
-  }
-
-  async function refreshSession() {
-    let accounts = [];
-    try {
-      accounts = await whoami();
-    } catch {
-      accounts = [];
-    }
-    const value = { loggedIn: accounts.length > 0, accounts };
-    sessionCache = { value };
-    return value;
-  }
-
-  function invalidateSession() {
-    sessionCache = null;
-  }
-
-  return {
-    login,
-    logout,
-    listProjects,
-    loginAndListProjects,
-    listDeployments,
-    deleteDeployment,
-    whoami,
-    ensureProject,
-    setupFeedback,
-    cachedSession,
-    isSessionInitialized,
-    refreshSession,
-    invalidateSession
-  };
-}
 
 export function createReportStore({
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   buildSpawnImpl = spawn,
   buildTimeoutMs = 5 * 60 * 1000,
-  recoverFetchImpl = fetch
+  recoverFetchImpl = fetch,
+  removePathImpl = (targetPath) => fs.rm(targetPath, { recursive: true, force: true }),
+  atomicWriteJsonImpl = atomicWriteJson
 } = {}) {
   const statePath = path.join(dataDir, "reports.json");
   const uploadRoot = path.join(dataDir, "uploads");
@@ -3008,25 +2055,42 @@ export function createReportStore({
   const workingRoot = path.join(dataDir, "working");
   const reports = new Map();
   let redirects = [];
+  let operations = [];
+  let pendingDeletions = [];
+  let saveChain = Promise.resolve();
+  let storeMutationChain = Promise.resolve();
+  let committedState = null;
+
+  function storedProjectRef(value) {
+    try {
+      return normalizeStoredProjectRef(value, { allowLegacy: true });
+    } catch {
+      return null;
+    }
+  }
 
   function normalizePublication(publication) {
     const kind = publication.kind || "snapshot";
     // Legacy (version-2) publications had no slug; the token doubled as the
     // staged-folder/URL-path key, so backfill slug from token.
     const slug = publication.slug || publication.token;
+    const projectRef = storedProjectRef(publication);
     return {
       ...publication,
       kind,
       slug,
       // Whether this link was published as a public "drop" (short, guessable
-      // slug). Legacy publications default to false (treated as private).
+      // slug). Legacy publications default to the unlisted classification.
       drop: publication.drop === true,
+      targetAttributed: Boolean(projectRef),
       publicUrl: kind === "snapshot" ? publication.publicUrl || null : null,
       pagesProjectName: normalizePagesProjectNameSafe(publication.pagesProjectName),
       pagesAccountId: normalizeAccountIdSafe(publication.pagesAccountId),
       pagesAccountName: normalizeAccountName(publication.pagesAccountName || ""),
       pagesBaseUrl: publication.pagesBaseUrl ? stripTrailingSlash(publication.pagesBaseUrl) : "",
+      projectRef,
       revokedAt: publication.revokedAt || null,
+      pending: publication.pending === true,
       updatedAt: publication.updatedAt || publication.createdAt
     };
   }
@@ -3085,43 +2149,188 @@ export function createReportStore({
     return !existsSync(entryPath);
   }
 
-  async function save() {
-    await fs.mkdir(dataDir, { recursive: true });
-    const state = {
-      version: 3,
+  function captureState() {
+    return structuredClone({
+      version: 4,
       reports: Array.from(reports.values()),
-      redirects
-    };
-    await fs.writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+      redirects,
+      operations,
+      pendingDeletions
+    });
   }
 
-  async function init() {
-    await fs.mkdir(uploadRoot, { recursive: true });
-    await fs.mkdir(importRoot, { recursive: true });
-    await fs.mkdir(workingRoot, { recursive: true });
+  function installState(state) {
+    reports.clear();
+    for (const report of state?.reports || []) {
+      reports.set(report.id, report);
+    }
+    redirects = state?.redirects || [];
+    operations = state?.operations || [];
+    pendingDeletions = state?.pendingDeletions || [];
+  }
+
+  function save() {
+    const snapshot = captureState();
+    const write = saveChain.then(() => atomicWriteJsonImpl(statePath, snapshot));
+    const committed = write.then(
+      () => {
+        committedState = structuredClone(snapshot);
+      },
+      (error) => {
+        if (committedState) {
+          installState(structuredClone(committedState));
+        }
+        throw error;
+      }
+    );
+    saveChain = committed.catch(() => {});
+    return committed;
+  }
+
+  function serializeStoreMutation(operation) {
+    return (...args) => {
+      const run = storeMutationChain.then(() => operation(...args));
+      storeMutationChain = run.catch(() => {});
+      return run;
+    };
+  }
+
+  function isOwnedCleanupPath(candidatePath) {
+    const candidate = path.resolve(candidatePath);
+    return [uploadRoot, importRoot, workingRoot].some((root) => {
+      const normalizedRoot = path.resolve(root);
+      return candidate !== normalizedRoot && isPathInside(normalizedRoot, candidate);
+    });
+  }
+
+  function normalizePendingDeletion(entry) {
+    if (!entry || typeof entry !== "object" || typeof entry.reportId !== "string") {
+      return null;
+    }
+    const paths = Array.isArray(entry.paths)
+      ? [...new Set(entry.paths.map((value) => path.resolve(String(value || ""))))].filter(
+          isOwnedCleanupPath
+        )
+      : [];
+    return {
+      id:
+        typeof entry.id === "string" && entry.id
+          ? entry.id
+          : `delete:${entry.reportId}`,
+      reportId: entry.reportId,
+      paths,
+      createdAt: entry.createdAt || nowIso(),
+      updatedAt: entry.updatedAt || entry.createdAt || nowIso(),
+      attempts: Number.isInteger(entry.attempts) && entry.attempts >= 0 ? entry.attempts : 0,
+      error: typeof entry.error === "string" ? entry.error : ""
+    };
+  }
+
+  async function cleanupPendingDeletion(entry) {
+    try {
+      for (const cleanupPath of entry.paths) {
+        await removePathImpl(cleanupPath);
+      }
+      return null;
+    } catch (error) {
+      entry.updatedAt = nowIso();
+      entry.attempts += 1;
+      entry.error = String(error?.message || error || "Report source cleanup failed.");
+      return error;
+    }
+  }
+
+  async function init({ persist = true } = {}) {
+    if (persist) {
+      await fs.mkdir(uploadRoot, { recursive: true });
+      await fs.mkdir(importRoot, { recursive: true });
+      await fs.mkdir(workingRoot, { recursive: true });
+    }
     if (!(await pathExists(statePath))) {
-      await save();
+      committedState = captureState();
+      if (persist) {
+        await save();
+      }
       return;
     }
 
     const rawState = await fs.readFile(statePath, "utf8");
-    const parsed = safeJsonParse(rawState, { reports: [] });
+    let parsed;
+    try {
+      parsed = JSON.parse(rawState);
+    } catch (error) {
+      throw appError(
+        `Pagecast report state is corrupt at ${statePath}; restore it before continuing (${error.message}).`,
+        500
+      );
+    }
     redirects = Array.isArray(parsed.redirects)
       ? parsed.redirects
           .filter((entry) => entry && typeof entry.from === "string" && typeof entry.to === "string")
-          .map((entry) => ({ from: entry.from, to: entry.to }))
+          .map((entry) => ({
+            from: entry.from,
+            to: entry.to,
+            projectRef: storedProjectRef(entry)
+          }))
+      : [];
+    operations = Array.isArray(parsed.operations)
+      ? parsed.operations.filter(
+          (entry) =>
+            entry &&
+            typeof entry.id === "string" &&
+            typeof entry.type === "string" &&
+            typeof entry.token === "string"
+        )
+      : [];
+    pendingDeletions = Array.isArray(parsed.pendingDeletions)
+      ? parsed.pendingDeletions.map(normalizePendingDeletion).filter(Boolean)
       : [];
     for (const report of parsed.reports || []) {
       if (typeof report?.id === "string" && typeof report?.kind === "string") {
         reports.set(report.id, normalizeReport(report));
       }
     }
+    // This is the last state known to have come from disk. Any migration or
+    // cleanup below is installed as committed only after its replacement write.
+    committedState = captureState();
+
+    const publications = Array.from(reports.values()).flatMap(
+      (report) => report.publications || []
+    );
+    let redirectsAttributed = false;
+    for (const redirect of redirects) {
+      if (redirect.projectRef !== null) {
+        continue;
+      }
+      const inferred = inferLegacyRedirectProjectRef(redirect, publications);
+      if (inferred) {
+        redirect.projectRef = inferred;
+        redirectsAttributed = true;
+      }
+    }
 
     // Group legacy duplicates: before re-publishing reused a report, each publish
     // of the same file created a separate row. Merge same-source path reports
     // into one whose Published links hold every version. Idempotent.
-    if (mergeDuplicatePathReports()) {
+    let stateChanged = mergeDuplicatePathReports() || redirectsAttributed;
+    if (persist && pendingDeletions.length > 0) {
+      stateChanged = true;
+      const retained = [];
+      for (const deletion of pendingDeletions) {
+        if (await cleanupPendingDeletion(deletion)) {
+          retained.push(deletion);
+        } else {
+          stateChanged = true;
+        }
+      }
+      if (retained.length !== pendingDeletions.length) {
+        pendingDeletions = retained;
+      }
+    }
+    if (persist && stateChanged) {
       await save();
+    } else {
+      committedState = captureState();
     }
   }
 
@@ -3154,51 +2363,79 @@ export function createReportStore({
     return merged;
   }
 
-  function listRedirects() {
-    return redirects.map((entry) => ({ ...entry }));
+  function listRedirects(pagesConfig = null) {
+    return redirects
+      .filter(
+        (entry) =>
+          pagesConfig === null ||
+          (entry.projectRef !== null && projectRefEquals(entry.projectRef, pagesConfig))
+      )
+      .map((entry) => ({ ...entry }));
   }
 
   // Add a 301 redirect, collapsing chains: if an existing entry pointed at the
   // slug we are now renaming away from, rewrite its target to the new
   // destination so we never need a multi-hop redirect. Dedupes on `from`.
-  function addRedirect(from, to) {
+  function addRedirect(from, to, projectRef = null) {
     if (!from || !to || from === to) {
       return;
     }
+    const normalizedProjectRef = storedProjectRef({ projectRef });
     for (const entry of redirects) {
-      if (entry.to === from) {
+      if (
+        entry.to === from &&
+        ((entry.projectRef === null && normalizedProjectRef === null) ||
+          projectRefEquals(entry.projectRef, normalizedProjectRef))
+      ) {
         entry.to = to;
       }
     }
-    const existing = redirects.find((entry) => entry.from === from);
+    const existing = redirects.find(
+      (entry) =>
+        entry.from === from &&
+        ((entry.projectRef === null && normalizedProjectRef === null) ||
+          projectRefEquals(entry.projectRef, normalizedProjectRef))
+    );
     if (existing) {
       existing.to = to;
     } else {
-      redirects.push({ from, to });
+      redirects.push({ from, to, projectRef: normalizedProjectRef });
     }
     // Drop any self-referential entries produced by collapsing.
     redirects = redirects.filter((entry) => entry.from !== entry.to);
   }
 
-  function formatPublication(publication, { localPublicBaseUrl } = {}) {
+  function formatPublication(
+    publication,
+    { localPublicBaseUrl, passwordProtected = false } = {}
+  ) {
     const slug = publication.slug || publication.token;
     const suffix = `/p/${encodeURIComponent(slug)}/`;
     const expiresAt = typeof publication.expiresAt === "number" && publication.expiresAt > 0 ? publication.expiresAt : null;
     const expired = expiresAt !== null && Date.now() > expiresAt;
     // Expired links read as inactive (the edge serves a 410), like revoked ones.
-    const active = !publication.revokedAt && !expired;
+    const active = !publication.revokedAt && !expired && publication.pending !== true;
     const kind = publication.kind || "snapshot";
     return {
       token: publication.token,
       slug,
       label: publication.label,
       kind,
-      // Public "drop" (short, guessable slug) vs a private hard-to-guess link.
+      // Retain the historical boolean while exposing the complete product state:
+      // protected, public drop, capability-bearing unlisted, or legacy word-only.
       drop: publication.drop === true,
+      linkKind: classifyLinkKind({
+        slug,
+        drop: publication.drop === true,
+        passwordProtected
+      }),
+      targetAttributed:
+        publication.targetAttributed === true || Boolean(storedProjectRef(publication)),
       active,
       createdAt: publication.createdAt,
       updatedAt: publication.updatedAt || publication.createdAt,
       revokedAt: publication.revokedAt || null,
+      pending: publication.pending === true,
       expiresAt,
       expired,
       localUrl: active && localPublicBaseUrl ? joinUrl(localPublicBaseUrl, suffix) : null,
@@ -3211,7 +2448,12 @@ export function createReportStore({
     const publications = (report.publications || [])
       .slice()
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .map((publication) => formatPublication(publication, { localPublicBaseUrl }));
+      .map((publication) =>
+        formatPublication(publication, {
+          localPublicBaseUrl,
+          passwordProtected: report.passwordProtected === true
+        })
+      );
     const latestActivePublication = publications.find((publication) => publication.active) || null;
     return {
       id: report.id,
@@ -3233,7 +2475,10 @@ export function createReportStore({
       sourceMissing: reportSourceMissing(report),
       createdAt: report.createdAt,
       updatedAt: report.updatedAt,
-      localUrl: adminBaseUrl ? joinUrl(adminBaseUrl, previewSuffix) : null,
+      // Report-controlled HTML must never share the admin origin. The public
+      // preview server is a separate origin (normally port 4174) and exposes no
+      // mutation API.
+      localUrl: localPublicBaseUrl ? joinUrl(localPublicBaseUrl, previewSuffix) : null,
       publicUrl: latestActivePublication?.publicUrl || null,
       publications
     };
@@ -3348,27 +2593,32 @@ export function createReportStore({
     // rendering at preview/publish time; HTML uploads are stored as index.html.
     const entryFile = isMarkdownFileName(safeName) ? "index.md" : "index.html";
 
-    await fs.mkdir(reportDir, { recursive: true });
-    await fs.writeFile(path.join(reportDir, entryFile), content);
+    try {
+      await fs.mkdir(reportDir, { recursive: true });
+      await fs.writeFile(path.join(reportDir, entryFile), content);
 
-    const report = {
-      id,
-      kind: "upload",
-      name: safeName,
-      rootDir: reportDir,
-      entryFile,
-      order: reports.size,
-      autoSync: false,
-      workingDir: null,
-      sourceMode: "edited-in-pagecast",
-      createdAt,
-      updatedAt: createdAt,
-      publications: []
-    };
+      const report = {
+        id,
+        kind: "upload",
+        name: safeName,
+        rootDir: reportDir,
+        entryFile,
+        order: reports.size,
+        autoSync: false,
+        workingDir: null,
+        sourceMode: "edited-in-pagecast",
+        createdAt,
+        updatedAt: createdAt,
+        publications: []
+      };
 
-    reports.set(report.id, report);
-    await save();
-    return report;
+      reports.set(report.id, report);
+      await save();
+      return reports.get(report.id);
+    } catch (error) {
+      await fs.rm(reportDir, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
   }
 
   async function addFolderUpload({ files, name = "" }) {
@@ -3379,12 +2629,8 @@ export function createReportStore({
       throw appError(`Folder upload can include at most ${MAX_FOLDER_UPLOAD_FILES} files.`, 413);
     }
 
-    const createdAt = nowIso();
-    const id = createReportId(name || files[0].filename || "folder");
-    const reportDir = path.join(uploadRoot, id);
+    const normalizedFiles = [];
     let totalBytes = 0;
-
-    await fs.mkdir(reportDir, { recursive: true });
     for (const file of files) {
       const relativePath = normalizeAssetRequestPath(file.filename || "");
       if (!relativePath) {
@@ -3397,56 +2643,66 @@ export function createReportStore({
       if (totalBytes > MAX_FOLDER_UPLOAD_BYTES) {
         throw appError("Folder upload is too large.", 413);
       }
-      const destinationPath = path.resolve(reportDir, relativePath);
-      if (!isPathInside(reportDir, destinationPath)) {
-        throw appError("Folder upload includes an unsafe file path.", 400);
-      }
-      await fs.mkdir(path.dirname(destinationPath), { recursive: true });
-      await fs.writeFile(destinationPath, file.content);
+      normalizedFiles.push({ relativePath, content: file.content });
     }
 
-    let publishRoot = reportDir;
-    let entryFile;
+    const createdAt = nowIso();
+    const id = createReportId(name || files[0].filename || "folder");
+    const reportDir = path.join(uploadRoot, id);
     try {
-      entryFile = await findFolderEntry(publishRoot);
-    } catch (error) {
-      const roots = new Set(
-        files
-          .map((file) => normalizeAssetRequestPath(file.filename || ""))
-          .filter(Boolean)
-          .map((relativePath) => relativePath.split(path.sep)[0])
-      );
-      if (roots.size !== 1) {
-        throw error;
+      await fs.mkdir(reportDir, { recursive: true });
+      for (const file of normalizedFiles) {
+        const destinationPath = path.resolve(reportDir, file.relativePath);
+        if (!isPathInside(reportDir, destinationPath)) {
+          throw appError("Folder upload includes an unsafe file path.", 400);
+        }
+        await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+        await fs.writeFile(destinationPath, file.content);
       }
-      publishRoot = path.join(reportDir, Array.from(roots)[0]);
-      entryFile = await findFolderEntry(publishRoot);
-    }
-    const report = {
-      id,
-      kind: "folder",
-      name: name || path.basename(id),
-      sourcePath: null,
-      rootDir: publishRoot,
-      entryFile,
-      order: reports.size,
-      autoSync: false,
-      workingDir: null,
-      sourceMode: "edited-in-pagecast",
-      buildCommand: "",
-      buildOutputDir: "",
-      buildOutputRoot: null,
-      buildStatus: "ready",
-      buildError: "",
-      lastBuildAt: null,
-      createdAt,
-      updatedAt: createdAt,
-      publications: []
-    };
 
-    reports.set(report.id, report);
-    await save();
-    return report;
+      let publishRoot = reportDir;
+      let entryFile;
+      try {
+        entryFile = await findFolderEntry(publishRoot);
+      } catch (error) {
+        const roots = new Set(
+          normalizedFiles.map((file) => file.relativePath.split(path.sep)[0])
+        );
+        if (roots.size !== 1) {
+          throw error;
+        }
+        publishRoot = path.join(reportDir, Array.from(roots)[0]);
+        entryFile = await findFolderEntry(publishRoot);
+      }
+      const report = {
+        id,
+        kind: "folder",
+        name: name || path.basename(id),
+        sourcePath: null,
+        rootDir: publishRoot,
+        entryFile,
+        order: reports.size,
+        autoSync: false,
+        workingDir: null,
+        sourceMode: "edited-in-pagecast",
+        buildCommand: "",
+        buildOutputDir: "",
+        buildOutputRoot: null,
+        buildStatus: "ready",
+        buildError: "",
+        lastBuildAt: null,
+        createdAt,
+        updatedAt: createdAt,
+        publications: []
+      };
+
+      reports.set(report.id, report);
+      await save();
+      return reports.get(report.id);
+    } catch (error) {
+      await fs.rm(reportDir, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
   }
 
   async function buildReport(id) {
@@ -3474,10 +2730,11 @@ export function createReportStore({
     report.updatedAt = nowIso();
     await save();
 
+    const shell = selectBuildShell(report.buildCommand);
     const result = await runSpawnCommand({
       spawnImpl: buildSpawnImpl,
-      command: "sh",
-      args: ["-lc", report.buildCommand],
+      command: shell.command,
+      args: shell.args,
       cwd: report.rootDir,
       timeoutMs: buildTimeoutMs
     });
@@ -3509,17 +2766,67 @@ export function createReportStore({
       return false;
     }
 
-    reports.delete(id);
+    const cleanupPaths = [];
     if (
       report.kind === "upload" ||
-      (report.kind === "folder" && (isPathInside(uploadRoot, report.rootDir) || isPathInside(importRoot, report.rootDir)))
+      (report.kind === "folder" &&
+        (isPathInside(uploadRoot, report.rootDir) || isPathInside(importRoot, report.rootDir)))
     ) {
-      await fs.rm(report.rootDir, { recursive: true, force: true });
+      cleanupPaths.push(path.resolve(report.rootDir));
     }
     if (report.workingDir && isPathInside(workingRoot, report.workingDir)) {
-      await fs.rm(report.workingDir, { recursive: true, force: true });
+      cleanupPaths.push(path.resolve(report.workingDir));
     }
-    await save();
+    const deletion =
+      cleanupPaths.length > 0
+        ? normalizePendingDeletion({
+            id: `delete:${id}:${randomBytes(8).toString("hex")}`,
+            reportId: id,
+            paths: cleanupPaths,
+            createdAt: nowIso()
+          })
+        : null;
+    const previousPendingDeletions = pendingDeletions;
+    reports.delete(id);
+    if (deletion) {
+      pendingDeletions = [...pendingDeletions, deletion];
+    }
+    try {
+      // Removing the report and recording every owned source path is one atomic
+      // state transition. Cleanup happens only after this journal is durable.
+      await save();
+    } catch (error) {
+      reports.set(id, report);
+      pendingDeletions = previousPendingDeletions;
+      throw error;
+    }
+
+    if (!deletion) {
+      return true;
+    }
+
+    const cleanupError = await cleanupPendingDeletion(deletion);
+    if (cleanupError) {
+      // The report is durably deleted and its remaining source is still durably
+      // owned by the pending-deletion journal. Persist the diagnostic when
+      // possible; the original journal entry is already safe if this write fails.
+      await save().catch(() => {});
+      return true;
+    }
+
+    const withDeletion = pendingDeletions;
+    pendingDeletions = pendingDeletions.filter((entry) => entry.id !== deletion.id);
+    try {
+      await save();
+    } catch (error) {
+      // The on-disk journal remains a safe, idempotent cleanup instruction. Keep
+      // the in-memory view aligned so a caller can surface cleanupPending.
+      pendingDeletions = withDeletion;
+      deletion.updatedAt = nowIso();
+      deletion.error = `Source cleanup completed, but its journal could not be finalized: ${
+        error?.message || error
+      }`;
+    }
     return true;
   }
 
@@ -3536,10 +2843,9 @@ export function createReportStore({
     const isDrop = drop === true;
     const createdAt = nowIso();
     const cleanLabel = slugifyReportName(label || nextPublicationLabel(report));
-    // The slug now carries no random tail, so it must be unique on its own.
-    // Collect every existing slug (and any legacy name prefix) and re-roll the
-    // generated name until it does not collide. A drop gets a short, shareable
-    // (guessable) name; otherwise a long, hard-to-guess private name.
+    // Reserve every existing identity, slug, legacy name, and redirect source.
+    // Drops use a short memorable name; unlisted links add a 128-bit capability
+    // suffix, but still must never collide with an existing complete slug.
     const takenNames = new Set();
     for (const existing of reports.values()) {
       for (const publication of existing.publications || []) {
@@ -3568,13 +2874,14 @@ export function createReportStore({
       slug: token,
       label: cleanLabel,
       kind,
-      // Whether this is a public "drop" (short, guessable slug) vs a private,
-      // hard-to-guess link.
+      // Whether this is a public "drop" (short, guessable slug) rather than the
+      // default unlisted capability link.
       drop: isDrop,
       publicUrl: kind === "snapshot" ? publicUrl : null,
       createdAt,
       updatedAt: createdAt,
       revokedAt: null,
+      pending: true,
       // Absolute expiry (epoch ms) or null = never. Enforced at the edge.
       expiresAt: typeof expiresAt === "number" && expiresAt > 0 ? expiresAt : null
     };
@@ -3640,7 +2947,10 @@ export function createReportStore({
     }
   }
 
-  async function importPublishedPage(record, { pagesBaseUrl = "", fetchImpl = fetch } = {}) {
+  async function importPublishedPage(
+    record,
+    { pagesBaseUrl = "", pagesConfig = null, fetchImpl = fetch } = {}
+  ) {
     const normalized = normalizeSyncRecord(record, {
       baseUrl: pagesBaseUrl,
       source: record?.source || "cloudflare"
@@ -3695,7 +3005,12 @@ export function createReportStore({
     const publicUrl =
       normalized.publicUrl ||
       joinUrl(normalized.baseUrl || pagesBaseUrl, `/p/${encodeURIComponent(normalized.slug)}/`);
-    const pagesProjectName = pagesProjectNameFromPublicUrl(publicUrl);
+    let projectRef = null;
+    try {
+      projectRef = pagesConfig ? normalizeProjectRef(pagesConfig) : null;
+    } catch {
+      projectRef = null;
+    }
     const publication = {
       token,
       slug: normalized.slug,
@@ -3703,12 +3018,11 @@ export function createReportStore({
       kind: "snapshot",
       drop: false,
       publicUrl,
-      pagesProjectName,
-      pagesAccountId: "",
+      pagesProjectName: projectRef?.projectName || "",
+      pagesAccountId: projectRef?.accountId || "",
       pagesAccountName: "",
-      pagesBaseUrl: pagesProjectName
-        ? `https://${pagesProjectName}.pages.dev`
-        : publicUrlOrigin(publicUrl),
+      pagesBaseUrl: projectRef?.baseUrl || publicUrlOrigin(publicUrl),
+      projectRef,
       createdAt,
       updatedAt,
       revokedAt: null,
@@ -3785,9 +3099,16 @@ export function createReportStore({
     }
 
     if (!match.publication.revokedAt) {
+      const previousReportUpdatedAt = match.report.updatedAt;
       match.publication.revokedAt = revokedAt;
       match.report.updatedAt = revokedAt;
-      await save();
+      try {
+        await save();
+      } catch (error) {
+        match.publication.revokedAt = null;
+        match.report.updatedAt = previousReportUpdatedAt;
+        throw error;
+      }
     }
     return match;
   }
@@ -3799,9 +3120,12 @@ export function createReportStore({
     }
 
     const revokedAt = nowIso();
+    const previousReportUpdatedAt = report.updatedAt;
+    const previousRevokedAt = new Map();
     let revokedCount = 0;
     for (const publication of report.publications || []) {
       if (!publication.revokedAt) {
+        previousRevokedAt.set(publication, publication.revokedAt || null);
         publication.revokedAt = revokedAt;
         revokedCount += 1;
       }
@@ -3809,7 +3133,15 @@ export function createReportStore({
 
     if (revokedCount > 0) {
       report.updatedAt = revokedAt;
-      await save();
+      try {
+        await save();
+      } catch (error) {
+        for (const [publication, previous] of previousRevokedAt) {
+          publication.revokedAt = previous;
+        }
+        report.updatedAt = previousReportUpdatedAt;
+        throw error;
+      }
     }
 
     return { report, revokedCount };
@@ -3845,6 +3177,240 @@ export function createReportStore({
     );
   }
 
+  function listPublications(pagesConfig = null) {
+    const publications = [];
+    for (const report of reports.values()) {
+      for (const publication of report.publications || []) {
+        const projectRef = storedProjectRef(publication);
+        if (
+          pagesConfig === null ||
+          (projectRef !== null && projectRefEquals(projectRef, pagesConfig))
+        ) {
+          publications.push(publication);
+        }
+      }
+    }
+    return publications;
+  }
+
+  function listProjectRefs() {
+    const refs = new Map();
+    for (const publication of listPublications()) {
+      const projectRef = storedProjectRef(publication);
+      if (projectRef) {
+        refs.set(projectRefFilesystemKey(projectRef), projectRef);
+      }
+    }
+    for (const redirect of redirects) {
+      if (redirect.projectRef) {
+        refs.set(projectRefFilesystemKey(redirect.projectRef), redirect.projectRef);
+      }
+    }
+    return [...refs.values()];
+  }
+
+  function listOperations() {
+    return operations.map((entry) => structuredClone(entry));
+  }
+
+  function getOperation(id) {
+    const operation = operations.find((entry) => entry.id === id);
+    return operation ? structuredClone(operation) : null;
+  }
+
+  function listPendingDeletions() {
+    return pendingDeletions.map((entry) => structuredClone(entry));
+  }
+
+  async function beginOperations(entries = []) {
+    const timestamp = nowIso();
+    const incoming = (Array.isArray(entries) ? entries : [entries]).map((entry) => {
+      const token = String(entry?.token || "").trim();
+      const type = String(entry?.type || "").trim();
+      if (!token || !type) {
+        throw appError("An operation type and publication token are required.", 400);
+      }
+      const id = `${type}:${token}`;
+      const existing = operations.find((item) => item.id === id);
+      return {
+        ...(existing || {}),
+        ...structuredClone(entry),
+        id,
+        type,
+        token,
+        slug: entry.slug || token,
+        projectRef: storedProjectRef({ projectRef: entry.projectRef }),
+        status: "pending",
+        error: "",
+        createdAt: existing?.createdAt || timestamp,
+        updatedAt: timestamp,
+        attempts: existing?.attempts || 0
+      };
+    });
+    const ids = new Set(incoming.map((entry) => entry.id));
+    operations = [...operations.filter((entry) => !ids.has(entry.id)), ...incoming];
+    await save();
+    return incoming.map((entry) => structuredClone(entry));
+  }
+
+  async function recordOperationFailure(entry = {}) {
+    const { error, ...metadata } = entry;
+    const type = String(metadata.type || "").trim();
+    const token = String(metadata.token || "").trim();
+    if (!type || !token) {
+      throw appError("An operation type and publication token are required.", 400);
+    }
+    const id = `${type}:${token}`;
+    const timestamp = nowIso();
+    const existing = operations.find((entry) => entry.id === id);
+    const next = {
+      ...(existing || {}),
+      ...structuredClone(metadata),
+      id,
+      type,
+      token,
+      slug: metadata.slug || existing?.slug || token,
+      projectRef: storedProjectRef({
+        projectRef:
+          metadata.projectRef === undefined ? existing?.projectRef : metadata.projectRef
+      }),
+      status: "failed",
+      error: String(error?.message || error || "Operation failed."),
+      createdAt: existing?.createdAt || timestamp,
+      updatedAt: timestamp,
+      attempts: (existing?.attempts || 0) + 1
+    };
+    const previousOperations = operations;
+    operations = [...operations.filter((entry) => entry.id !== id), next];
+    try {
+      await save();
+    } catch (saveError) {
+      operations = previousOperations;
+      throw saveError;
+    }
+    return structuredClone(next);
+  }
+
+  async function clearOperation(type, token) {
+    const id = `${type}:${token}`;
+    const next = operations.filter((entry) => entry.id !== id);
+    if (next.length !== operations.length) {
+      const previousOperations = operations;
+      operations = next;
+      try {
+        await save();
+      } catch (error) {
+        operations = previousOperations;
+        throw error;
+      }
+    }
+  }
+
+  async function clearOperations(entries = []) {
+    const ids = new Set(
+      (Array.isArray(entries) ? entries : [entries]).map(
+        (entry) => `${String(entry?.type || "")}:${String(entry?.token || "")}`
+      )
+    );
+    const next = operations.filter((entry) => !ids.has(entry.id));
+    if (next.length !== operations.length) {
+      const previousOperations = operations;
+      operations = next;
+      try {
+        await save();
+      } catch (error) {
+        operations = previousOperations;
+        throw error;
+      }
+    }
+  }
+
+  async function commitSuccessfulRevoke(token) {
+    const match = findPublication(token);
+    if (!match) {
+      throw appError("Published link was not found.", 404);
+    }
+
+    const operationId = `revoke:${token}`;
+    const previousOperations = operations;
+    const previousRevokedAt = match.publication.revokedAt || null;
+    const previousReportUpdatedAt = match.report.updatedAt;
+    const nextOperations = operations.filter((entry) => entry.id !== operationId);
+    const revokedAt = previousRevokedAt || nowIso();
+    const revoked = !previousRevokedAt;
+    const operationCleared = nextOperations.length !== operations.length;
+    if (!revoked && !operationCleared) {
+      return { ...match, revoked: false, operationCleared: false };
+    }
+
+    if (revoked) {
+      match.publication.revokedAt = revokedAt;
+      match.report.updatedAt = revokedAt;
+    }
+    operations = nextOperations;
+    try {
+      // Remote success has exactly one local commit: the link becomes revoked
+      // and any retry journal entry disappears in the same reports.json write.
+      await save();
+    } catch (error) {
+      match.publication.revokedAt = previousRevokedAt;
+      match.report.updatedAt = previousReportUpdatedAt;
+      operations = previousOperations;
+      throw error;
+    }
+    return { ...match, revoked, operationCleared };
+  }
+
+  async function commitRecoveredPublish(reportId, publication) {
+    const report = reports.get(reportId);
+    if (!report) {
+      throw appError("The page for this publish operation no longer exists.", 409);
+    }
+    if (!publication || typeof publication.token !== "string" || !publication.token) {
+      throw appError("The publish operation is missing its publication state.", 409);
+    }
+
+    const token = publication.token;
+    const existing = findPublication(token);
+    if (existing && existing.report.id !== reportId) {
+      throw appError("The publication token now belongs to a different page.", 409);
+    }
+    if (existing?.publication.revokedAt) {
+      throw appError("A revoked publication cannot be recovered as a publish.", 409);
+    }
+
+    let committedPublication;
+    if (existing && existing.publication.pending !== true) {
+      const existingSlug = existing.publication.slug || existing.publication.token;
+      const recoveredSlug = publication.slug || publication.token;
+      if (existingSlug !== recoveredSlug) {
+        throw appError("The published link changed after this operation was recorded.", 409);
+      }
+      committedPublication = existing.publication;
+    } else {
+      committedPublication = normalizePublication({
+        ...structuredClone(publication),
+        pending: false,
+        revokedAt: null
+      });
+      const publications = report.publications || [];
+      const index = publications.findIndex((item) => item.token === token);
+      report.publications =
+        index === -1
+          ? [...publications, committedPublication]
+          : publications.map((item, itemIndex) =>
+              itemIndex === index ? committedPublication : item
+            );
+      report.updatedAt = committedPublication.updatedAt || nowIso();
+    }
+
+    operations = operations.filter((entry) => entry.id !== `publish:${token}`);
+    // The remote-success checkpoint and local publication become one durable
+    // outcome: callers never observe an active publication with a stale retry.
+    await save();
+    return { report, publication: committedPublication };
+  }
+
   async function recoverMissingReportSource(report) {
     if (!report || !reportSourceMissing(report)) {
       return false;
@@ -3859,13 +3425,48 @@ export function createReportStore({
     const recoveryRoot = path.join(workingRoot, `${report.id}-recovered`);
     let recovered = null;
     const slug = publication.slug || publication.token;
-    const pagesProjectName =
-      publication.pagesProjectName || pagesProjectNameFromPublicUrl(publication.publicUrl);
+    const projectRef = storedProjectRef(publication);
     const localCandidates = [
+      projectRef
+        ? path.join(
+            dataDir,
+            "targets",
+            projectRefFilesystemKey(projectRef),
+            "snapshots",
+            publicationTokenFilesystemKey(publication.token),
+            "content"
+          )
+        : "",
+      projectRef
+        ? path.join(
+            dataDir,
+            "targets",
+            projectRefFilesystemKey(projectRef),
+            "last-deployed",
+            "p",
+            slug
+          )
+        : "",
       slug ? path.join(dataDir, "pages-site", "p", slug) : "",
-      pagesProjectName && slug ? path.join(dataDir, "pages-deploy", pagesProjectName, "p", slug) : "",
-      pagesProjectName && publication.publicUrl === pagesBaseUrl(pagesProjectName)
-        ? path.join(dataDir, "pages-deploy", pagesProjectName)
+      projectRef && slug
+        ? path.join(
+            dataDir,
+            "pages-deploy",
+            "direct",
+            projectRefFilesystemKey(projectRef),
+            encodeURIComponent(DEFAULT_PAGES_BRANCH),
+            "p",
+            slug
+          )
+        : "",
+      projectRef && publication.publicUrl === projectRef.baseUrl
+        ? path.join(
+            dataDir,
+            "pages-deploy",
+            "direct",
+            projectRefFilesystemKey(projectRef),
+            encodeURIComponent(DEFAULT_PAGES_BRANCH)
+          )
         : ""
     ].filter(Boolean);
 
@@ -3908,16 +3509,20 @@ export function createReportStore({
   // Slugs that need an edge Function — password-protected and/or expiring. Note:
   // expired (but not revoked) publications stay in the manifest so the middleware
   // keeps returning 410 rather than silently serving the still-deployed content.
-  function protectedPublicationManifest() {
+  function protectedPublicationManifest(pagesConfig = null) {
     const manifest = [];
     for (const report of reports.values()) {
       const protectedReport = report.passwordProtected && isValidPasswordHash(report.passwordHash);
       for (const publication of activeSnapshotPublications(report)) {
+        const projectRef = storedProjectRef(publication);
+        if (pagesConfig !== null && (!projectRef || !projectRefEquals(projectRef, pagesConfig))) {
+          continue;
+        }
         const hasExpiry = typeof publication.expiresAt === "number" && publication.expiresAt > 0;
         if (!protectedReport && !hasExpiry) {
           continue;
         }
-        const entry = { slug: publication.slug || publication.token };
+        const entry = { slug: publication.slug || publication.token, projectRef };
         if (protectedReport) {
           Object.assign(entry, report.passwordHash);
         }
@@ -3961,6 +3566,22 @@ export function createReportStore({
     return match;
   }
 
+  async function adoptPublicationTarget(token, pagesConfig) {
+    const match = findPublication(token);
+    if (!match) {
+      throw appError("Published link was not found.", 404);
+    }
+    const projectRef = normalizeProjectRef(pagesConfig);
+    rememberPublicationPagesTarget(match.publication, {
+      ...pagesConfig,
+      ...projectRef
+    });
+    match.publication.updatedAt = nowIso();
+    match.report.updatedAt = match.publication.updatedAt;
+    await save();
+    return match;
+  }
+
   // Returns the set of slugs currently in use (non-revoked publications) plus
   // existing redirect sources, so callers can enforce slug uniqueness.
   function usedSlugs() {
@@ -4000,13 +3621,18 @@ export function createReportStore({
 
     const updatedAt = nowIso();
     match.publication.slug = newSlug;
+    // A user-selected vanity path without a full 128-bit capability is
+    // intentionally discoverable and must not keep claiming the `unlisted`
+    // classification. Persist the decision as metadata so old slugs loaded
+    // from disk remain legacy links unless a user explicitly renames them.
+    match.publication.drop = inspectCapabilitySlug(newSlug) === null;
     if (match.publication.kind === "snapshot" && match.publication.publicUrl) {
       const base = match.publication.publicUrl.replace(/\/p\/[^/]+\/?$/, "");
       match.publication.publicUrl = joinUrl(base, `/p/${encodeURIComponent(newSlug)}/`);
     }
     match.publication.updatedAt = updatedAt;
     match.report.updatedAt = updatedAt;
-    addRedirect(`/p/${oldSlug}/`, `/p/${newSlug}/`);
+    addRedirect(`/p/${oldSlug}/`, `/p/${newSlug}/`, storedProjectRef(match.publication));
     await save();
     return { ...match, oldSlug, newSlug };
   }
@@ -4019,6 +3645,9 @@ export function createReportStore({
     const oldSlug = previous?.slug || match.publication.token;
     const failedSlug = match.publication.slug || match.publication.token;
     match.publication.slug = oldSlug;
+    if (previous && Object.hasOwn(previous, "drop")) {
+      match.publication.drop = previous.drop === true;
+    }
     match.publication.publicUrl =
       previous && Object.hasOwn(previous, "publicUrl") ? previous.publicUrl : match.publication.publicUrl;
     match.publication.updatedAt = previous?.publicationUpdatedAt || match.publication.updatedAt;
@@ -4029,7 +3658,11 @@ export function createReportStore({
       return !(entry.from === from && entry.to === to);
     });
     if (Array.isArray(previous?.redirects)) {
-      redirects = previous.redirects.map((entry) => ({ from: entry.from, to: entry.to }));
+      redirects = previous.redirects.map((entry) => ({
+        from: entry.from,
+        to: entry.to,
+        projectRef: storedProjectRef(entry)
+      }));
     }
     await save();
     return match;
@@ -4183,18 +3816,24 @@ export function createReportStore({
     // re-renders via staging); HTML reports normalize their entry to index.html.
     const workingEntry = isMarkdownFileName(report.entryFile) ? "index.md" : "index.html";
     const sourceRoot = reportSourceRoot(report);
-    await copyPublicTree(sourceRoot, workingDir);
-    await fs.copyFile(
-      path.join(sourceRoot, report.entryFile),
-      path.join(workingDir, workingEntry)
-    );
-    report.workingDir = workingDir;
-    report.entryFile = workingEntry;
-    report.sourceMode = "edited-in-pagecast";
-    report.autoSync = false;
-    report.updatedAt = nowIso();
-    await save();
-    return report;
+    await fs.rm(workingDir, { recursive: true, force: true });
+    try {
+      await copyPublicTree(sourceRoot, workingDir);
+      await fs.copyFile(
+        path.join(sourceRoot, report.entryFile),
+        path.join(workingDir, workingEntry)
+      );
+      report.workingDir = workingDir;
+      report.entryFile = workingEntry;
+      report.sourceMode = "edited-in-pagecast";
+      report.autoSync = false;
+      report.updatedAt = nowIso();
+      await save();
+      return reports.get(id);
+    } catch (error) {
+      await fs.rm(workingDir, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
   }
 
   // Read the current HTML content of a report's entry document, from the working
@@ -4252,10 +3891,29 @@ export function createReportStore({
     if (!isPathInside(editRoot, targetPath)) {
       throw appError("Report content path is not allowed.", 403);
     }
-    await fs.writeFile(targetPath, html, "utf8");
+    const previousContent = await fs.readFile(targetPath);
+    const temporaryPath = `${targetPath}.next-${randomBytes(6).toString("hex")}`;
+    await fs.writeFile(temporaryPath, html, "utf8");
+    await fs.rename(temporaryPath, targetPath);
     report.updatedAt = nowIso();
-    await save();
-    return report;
+    try {
+      await save();
+      return reports.get(id);
+    } catch (error) {
+      const restorePath = `${targetPath}.restore-${randomBytes(6).toString("hex")}`;
+      try {
+        await fs.writeFile(restorePath, previousContent);
+        await fs.rename(restorePath, targetPath);
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          "Report state failed to save and its previous content could not be restored."
+        );
+      } finally {
+        await fs.rm(restorePath, { force: true }).catch(() => {});
+      }
+      throw error;
+    }
   }
 
   // Toggle auto-sync for a source-tracked path report (only valid before it has
@@ -4353,34 +4011,46 @@ export function createReportStore({
     init,
     list,
     get,
-    addPath,
-    addFolder,
-    addUpload,
-    addFolderUpload,
-    buildReport,
-    remove,
+    addPath: serializeStoreMutation(addPath),
+    addFolder: serializeStoreMutation(addFolder),
+    addUpload: serializeStoreMutation(addUpload),
+    addFolderUpload: serializeStoreMutation(addFolderUpload),
+    buildReport: serializeStoreMutation(buildReport),
+    remove: serializeStoreMutation(remove),
     draftPublication,
-    commitPublication,
-    publish,
-    importPublishedPage,
-    importPublishedPages,
+    commitPublication: serializeStoreMutation(commitPublication),
+    publish: serializeStoreMutation(publish),
+    importPublishedPage: serializeStoreMutation(importPublishedPage),
+    importPublishedPages: serializeStoreMutation(importPublishedPages),
     findPublication,
     findActivePublication,
     findActivePublicationBySlug,
     activeSnapshotPublications,
+    listPublications,
+    listProjectRefs,
+    listOperations,
+    getOperation,
+    listPendingDeletions,
+    beginOperations: serializeStoreMutation(beginOperations),
+    recordOperationFailure: serializeStoreMutation(recordOperationFailure),
+    clearOperation: serializeStoreMutation(clearOperation),
+    clearOperations: serializeStoreMutation(clearOperations),
+    commitSuccessfulRevoke: serializeStoreMutation(commitSuccessfulRevoke),
+    commitRecoveredPublish: serializeStoreMutation(commitRecoveredPublish),
     protectedPublicationManifest,
-    setPublicationExpiry,
-    revokePublication,
-    revokeAll,
-    syncSnapshot,
-    renameSlug,
-    restorePublicationSlug,
-    detachToWorkingCopy,
+    setPublicationExpiry: serializeStoreMutation(setPublicationExpiry),
+    revokePublication: serializeStoreMutation(revokePublication),
+    revokeAll: serializeStoreMutation(revokeAll),
+    syncSnapshot: serializeStoreMutation(syncSnapshot),
+    adoptPublicationTarget: serializeStoreMutation(adoptPublicationTarget),
+    renameSlug: serializeStoreMutation(renameSlug),
+    restorePublicationSlug: serializeStoreMutation(restorePublicationSlug),
+    detachToWorkingCopy: serializeStoreMutation(detachToWorkingCopy),
     readContent,
-    writeContent,
-    setAutoSync,
-    setPasswordProtection,
-    reorder,
+    writeContent: serializeStoreMutation(writeContent),
+    setAutoSync: serializeStoreMutation(setAutoSync),
+    setPasswordProtection: serializeStoreMutation(setPasswordProtection),
+    reorder: serializeStoreMutation(reorder),
     listAutoSyncReports,
     listRedirects,
     addRedirect,
@@ -4391,267 +4061,6 @@ export function createReportStore({
     workingRoot,
     dataDir
   };
-}
-
-export function extractPublicUrl(text) {
-  const urls = String(text).match(/https:\/\/[^\s"'<>]+/g) || [];
-  const cleanedUrls = urls.map((url) => url.replace(/[),.]+$/g, ""));
-  return cleanedUrls.find((url) => /\.ts\.net/i.test(url)) || null;
-}
-
-function tunnelCommandFor(provider, localUrl) {
-  if (provider === "tailscale") {
-    return {
-      command: "tailscale",
-      args: ["funnel", "--bg", "--yes", "--https=443", localUrl],
-      stopArgs: ["funnel", "--https=443", "off"],
-      startupHint: "Start Tailscale and make sure Funnel is enabled for this tailnet."
-    };
-  }
-
-  throw appError("Pagecast is configured for Tailscale Funnel only.", 400);
-}
-
-function hasTailscaleFunnelCapability(capabilities) {
-  return capabilities.some(
-    (capability) =>
-      capability === "funnel" ||
-      capability === "https://tailscale.com/cap/funnel" ||
-      capability.startsWith("https://tailscale.com/cap/funnel-ports")
-  );
-}
-
-function terminateChild(child) {
-  if (!child) {
-    return;
-  }
-
-  const hasExited =
-    (child.exitCode !== null && child.exitCode !== undefined) ||
-    (child.signalCode !== null && child.signalCode !== undefined);
-  if (hasExited) {
-    return;
-  }
-
-  child.kill("SIGTERM");
-  const timer = setTimeout(() => {
-    const stillRunning = child.exitCode === null || child.exitCode === undefined;
-    if (stillRunning) {
-      child.kill("SIGKILL");
-    }
-  }, 1000);
-  timer.unref?.();
-}
-
-export class TunnelManager {
-  constructor({ localUrl, spawnImpl = spawn, timeoutMs = 30000 } = {}) {
-    this.localUrl = localUrl;
-    this.spawnImpl = spawnImpl;
-    this.timeoutMs = timeoutMs;
-    this.child = null;
-    this.provider = null;
-    this.publicUrl = null;
-    this.startedAt = null;
-    this.logs = [];
-  }
-
-  status() {
-    return {
-      running: Boolean(this.child || this.publicUrl),
-      provider: this.provider,
-      publicUrl: this.publicUrl,
-      localUrl: this.localUrl,
-      startedAt: this.startedAt,
-      logs: this.logs.slice(-20)
-    };
-  }
-
-  async start(provider = "tailscale") {
-    if (this.publicUrl) {
-      return this.status();
-    }
-
-    const providers = [provider === "auto" ? "tailscale" : provider];
-    const errors = [];
-
-    for (const candidate of providers) {
-      try {
-        return await this.startProvider(candidate);
-      } catch (error) {
-        errors.push(`${candidate}: ${error.message}`);
-      }
-    }
-
-    throw appError(`Could not start a public tunnel. ${errors.join(" ")}`, 502);
-  }
-
-  async startProvider(provider) {
-    const config = tunnelCommandFor(provider, this.localUrl);
-    this.logs = [];
-    await this.preflightProvider(provider);
-    const result = await this.runCommand(config);
-
-    if (result.code !== 0) {
-      throw appError(
-        this.withRecentOutput(`${provider} exited before returning a public URL (${result.signal || result.code}).`),
-        502
-      );
-    }
-
-    const publicUrl = extractPublicUrl(result.output);
-    if (!publicUrl) {
-      throw appError(this.withRecentOutput(`${provider} did not return a public URL.`), 502);
-    }
-
-    this.child = null;
-    this.provider = provider;
-    this.publicUrl = stripTrailingSlash(publicUrl);
-    this.startedAt = nowIso();
-    return this.status();
-  }
-
-  async preflightProvider(provider) {
-    if (provider !== "tailscale") {
-      return;
-    }
-
-    const result = await this.runCommand(
-      {
-        command: "tailscale",
-        args: ["status", "--json"],
-        startupHint: "Start Tailscale before starting a public URL."
-      },
-      { timeoutMs: 10000, recordLogs: false }
-    );
-
-    if (result.code !== 0) {
-      throw appError(`Tailscale is not running.\n${result.output.trim()}`, 502);
-    }
-
-    const status = safeJsonParse(result.output, null);
-    if (!status?.Self?.ID) {
-      throw appError("Tailscale status did not include this device ID.", 502);
-    }
-
-    const capabilities = status.Self.Capabilities || [];
-    if (!hasTailscaleFunnelCapability(capabilities)) {
-      const nodeId = encodeURIComponent(status.Self.ID);
-      throw appError(
-        `Tailscale Funnel is not enabled on this tailnet. Enable it here:\nhttps://login.tailscale.com/f/funnel?node=${nodeId}`,
-        502
-      );
-    }
-  }
-
-  withRecentOutput(message) {
-    const recent = this.logs.slice(-3).join("\n").trim();
-    return recent ? `${message}\n${recent}` : message;
-  }
-
-  runCommand(config, { timeoutMs = this.timeoutMs, recordLogs = true } = {}) {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      let child;
-      let output = "";
-
-      const fail = (error) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearTimeout(timer);
-        terminateChild(child);
-        reject(error);
-      };
-
-      const finish = (result) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearTimeout(timer);
-        resolve(result);
-      };
-
-      const recordOutput = (chunk) => {
-        const text = chunk.toString();
-        output += text;
-        if (recordLogs) {
-          this.logs.push(text.trim());
-          this.logs = this.logs.filter(Boolean).slice(-50);
-        }
-      };
-
-      const timer = setTimeout(() => {
-        fail(
-          appError(
-            this.withRecentOutput(`${config.command} did not finish within ${timeoutMs}ms.`),
-            504
-          )
-        );
-      }, timeoutMs);
-      timer.unref?.();
-
-      try {
-        child = this.spawnImpl(config.command, config.args, {
-          stdio: ["ignore", "pipe", "pipe"],
-          env: process.env
-        });
-      } catch (error) {
-        fail(appError(`${config.command} could not start. ${config.startupHint}`, 502));
-        return;
-      }
-
-      child.stdout?.on("data", recordOutput);
-      child.stderr?.on("data", recordOutput);
-      child.on("error", () => {
-        fail(appError(`${config.command} could not start. ${config.startupHint}`, 502));
-      });
-      child.on("exit", (code, signal) => {
-        finish({ code, signal, output });
-      });
-    });
-  }
-
-  async stop() {
-    if (!this.child && !this.publicUrl) {
-      this.provider = null;
-      this.publicUrl = null;
-      this.startedAt = null;
-      return this.status();
-    }
-
-    const provider = this.provider;
-    const child = this.child;
-    if (child) {
-      terminateChild(child);
-    }
-    if (provider) {
-      const config = tunnelCommandFor(provider, this.localUrl);
-      this.logs = [];
-      const result = await this.runCommand(
-        { ...config, args: config.stopArgs || config.args },
-        { timeoutMs: 10000 }
-      );
-      if (result.code !== 0) {
-        throw appError(
-          this.withRecentOutput(`${provider} did not stop cleanly (${result.signal || result.code}).`),
-          502
-        );
-      }
-    }
-
-    this.child = null;
-    this.provider = null;
-    this.publicUrl = null;
-    this.startedAt = null;
-    return this.status();
-  }
-
-  async rotate(provider = "tailscale") {
-    await this.stop();
-    return this.start(provider);
-  }
 }
 
 async function readRequestBody(req, maxBytes = MAX_UPLOAD_BYTES) {
@@ -4815,13 +4224,14 @@ function sendError(res, error) {
 
 // Send an in-memory HTML body (used for the markdown preview render, where
 // there is no file on disk to stream).
-function sendHtmlBody(req, res, file) {
+function sendHtmlBody(req, res, file, extraHeaders = {}) {
   const buffer = Buffer.isBuffer(file.body) ? file.body : Buffer.from(String(file.body), "utf8");
   res.writeHead(200, {
     "Content-Type": file.contentType || "text/html; charset=utf-8",
     "Content-Length": buffer.length,
     "Cache-Control": "no-store",
-    "X-Content-Type-Options": "nosniff"
+    "X-Content-Type-Options": "nosniff",
+    ...extraHeaders
   });
 
   if (req.method === "HEAD") {
@@ -4832,12 +4242,13 @@ function sendHtmlBody(req, res, file) {
   res.end(buffer);
 }
 
-async function sendFile(req, res, file) {
+async function sendFile(req, res, file, extraHeaders = {}) {
   res.writeHead(200, {
     "Content-Type": file.contentType || contentTypeFor(file.filePath),
     "Content-Length": file.size,
     "Cache-Control": "no-store",
-    "X-Content-Type-Options": "nosniff"
+    "X-Content-Type-Options": "nosniff",
+    ...extraHeaders
   });
 
   if (req.method === "HEAD") {
@@ -4894,6 +4305,15 @@ function reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl }) {
   };
 }
 
+function targetManagementState(configStore, pages = configStore.get().pages) {
+  const configured = Boolean(
+    normalizeAccountIdSafe(pages?.accountId) &&
+      normalizePagesProjectNameSafe(pages?.projectName)
+  );
+  const managed = configured && configStore.isTargetManaged(pages);
+  return { managed, requiresAdoption: configured && !managed };
+}
+
 async function detectAndPersistCloudflareProjects({ cloudflareAuth, configStore }) {
   const currentConfig = configStore.getPublicConfig();
   const projects = await cloudflareAuth.listProjects({
@@ -4915,7 +4335,8 @@ async function detectAndPersistCloudflareProjects({ cloudflareAuth, configStore 
       authenticated: true,
       projects,
       selectedProject,
-      projectCount: projects.length
+      projectCount: projects.length,
+      ...targetManagementState(configStore)
     }
   };
 }
@@ -4928,6 +4349,7 @@ async function ensureCloudflarePagesTarget({
   cloudflareAuth,
   configStore,
   autoCreate = true,
+  adoptExisting = false,
   branch = DEFAULT_PAGES_BRANCH
 }) {
   const currentConfig = configStore.getPublicConfig();
@@ -4946,7 +4368,8 @@ async function ensureCloudflarePagesTarget({
         projects: [],
         selectedProject: null,
         projectCount: 0,
-        autoCreated: false
+        autoCreated: false,
+        ...targetManagementState(configStore, currentConfig.pages)
       }
     };
   }
@@ -4977,7 +4400,8 @@ async function ensureCloudflarePagesTarget({
         projects: [],
         selectedProject: null,
         projectCount: 0,
-        autoCreated: false
+        autoCreated: false,
+        ...targetManagementState(configStore, currentConfig.pages)
       }
     };
   }
@@ -5021,7 +4445,8 @@ async function ensureCloudflarePagesTarget({
       projectName: selectedProject.name,
       accountId: selectedProject.accountId || accountId,
       accountName: accountName || selectedProject.accountName,
-      baseUrl
+      baseUrl,
+      adoptExisting: autoCreated || adoptExisting
     });
   } else if (accountId) {
     await configStore.updatePages({
@@ -5046,7 +4471,8 @@ async function ensureCloudflarePagesTarget({
       projects,
       selectedProject,
       projectCount: projects.length,
-      autoCreated
+      autoCreated,
+      ...targetManagementState(configStore)
     }
   };
 }
@@ -5062,6 +4488,36 @@ export function createPublicHandler({ store }) {
       const url = new URL(req.url, `http://${req.headers.host || DEFAULT_HOST}`);
       if (url.pathname === "/healthz") {
         sendText(res, 200, "ok");
+        return;
+      }
+
+      const previewMatch = /^\/preview\/([^/]+)(\/.*)?$/.exec(url.pathname);
+      if (previewMatch) {
+        const id = decodeURIComponent(previewMatch[1]);
+        const tail = previewMatch[2] || "";
+        if (tail === "") {
+          res.writeHead(302, {
+            Location: `/preview/${encodeURIComponent(id)}/`,
+            ...PREVIEW_SECURITY_HEADERS,
+            "Cache-Control": "no-store"
+          });
+          res.end();
+          return;
+        }
+
+        const rawAssetPath = tail === "/" ? "" : tail.slice(1);
+        const resolvedAsset = await store.resolveAsset(id, rawAssetPath);
+        if (resolvedAsset.statusCode !== 200) {
+          sendText(res, resolvedAsset.statusCode, resolvedAsset.message);
+          return;
+        }
+
+        if (resolvedAsset.body !== undefined) {
+          sendHtmlBody(req, res, resolvedAsset, PREVIEW_SECURITY_HEADERS);
+          return;
+        }
+
+        await sendFile(req, res, resolvedAsset, PREVIEW_SECURITY_HEADERS);
         return;
       }
 
@@ -5105,59 +4561,6 @@ export function createPublicHandler({ store }) {
   };
 }
 
-// DNS-rebinding defense for the admin server. The admin API is unauthenticated
-// and can run shell (folder build commands), so it must only answer requests
-// addressed to a loopback host. A malicious web page that rebinds its own domain
-// to 127.0.0.1 still sends *its* Host header (e.g. "evil.example"), which fails
-// this check, while the real admin UI on 127.0.0.1/localhost passes.
-export function isLoopbackHostHeader(hostHeader, bindHost, allowedHosts = []) {
-  if (!hostHeader) {
-    // No Host header (HTTP/1.0, some internal callers) — the request cannot have
-    // come from a rebound browser origin, so allow it.
-    return true;
-  }
-  let hostname = String(hostHeader);
-  const ipv6 = /^\[([^\]]+)\](?::\d+)?$/.exec(hostname);
-  if (ipv6) {
-    // Bracketed IPv6: "[::1]:4173" -> "::1".
-    hostname = ipv6[1];
-  } else if ((hostname.match(/:/g) || []).length <= 1) {
-    // "host:port" or bare "host" — strip a single trailing ":port" only. A value
-    // with more than one colon is a bare IPv6 literal (e.g. "::1") and is left
-    // intact rather than truncated at its first colon.
-    const colon = hostname.lastIndexOf(":");
-    if (colon > -1) {
-      hostname = hostname.slice(0, colon);
-    }
-  }
-  hostname = hostname.toLowerCase();
-  if (hostname === "localhost" || hostname === DEFAULT_LOCAL_HOSTNAME || hostname === "::1") {
-    return true;
-  }
-  // The entire 127.0.0.0/8 block is loopback.
-  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) {
-    return true;
-  }
-  // An explicitly configured non-default bind host is trusted by definition.
-  if (bindHost && hostname === String(bindHost).toLowerCase()) {
-    return true;
-  }
-  if (allowedHosts.some((allowedHost) => hostname === String(allowedHost).toLowerCase())) {
-    return true;
-  }
-  return false;
-}
-
-// Reflect ONLY a chrome-extension:// Origin (so the Local-to-Public extension can
-// read admin-API responses). Never a wildcard — random sites get no CORS grant,
-// and browser Private-Network-Access already blocks https→127.0.0.1 anyway.
-export function extensionCorsOrigin(originHeader) {
-  if (typeof originHeader === "string" && /^chrome-extension:\/\/[a-z]+$/.test(originHeader)) {
-    return originHeader;
-  }
-  return null;
-}
-
 export function createAdminHandler({
   store,
   configStore,
@@ -5165,13 +4568,18 @@ export function createAdminHandler({
   pagesPublisher,
   staticDir,
   getAdminBaseUrl,
+  getCommandBaseUrl = getAdminBaseUrl,
   getLocalPublicBaseUrl,
   tunnelManager,
   deployQueue,
+  mutationQueue = null,
   watchManager,
+  commandCapability = "",
   bindHost = DEFAULT_HOST,
   allowedHosts = []
 }) {
+  const csrfToken = randomBytes(32).toString("base64url");
+
   return async function adminHandler(req, res) {
     try {
       if (!isLoopbackHostHeader(req.headers.host, bindHost, allowedHosts)) {
@@ -5183,18 +4591,45 @@ export function createAdminHandler({
         return;
       }
 
-      // Chrome-extension CORS: stash the reflected origin for the senders, and
-      // answer the preflight directly.
-      const corsOrigin = extensionCorsOrigin(req.headers.origin);
+      const url = new URL(req.url, `http://${req.headers.host}`);
+      const origin = typeof req.headers.origin === "string" ? req.headers.origin : "";
+      const extensionOrigin = extensionCorsOrigin(origin);
+      const extensionMarked = req.headers["x-pagecast-extension"] === "1";
+      const extensionPreflight = Boolean(
+        extensionOrigin && req.method === "OPTIONS" && EXTENSION_API_ROUTES.has(url.pathname)
+      );
+      const isExtensionRequest = Boolean(
+        extensionOrigin && (extensionMarked || extensionPreflight)
+      );
+      const sameAdminOrigin = Boolean(origin && origin === requestOrigin(req));
+      const fetchSite = String(req.headers["sec-fetch-site"] || "").toLowerCase();
+
+      if (origin && !sameAdminOrigin && !isExtensionRequest) {
+        sendText(res, 403, "Forbidden: this browser origin cannot access the Pagecast admin API.");
+        return;
+      }
+      if (!isExtensionRequest && fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
+        sendText(res, 403, "Forbidden: cross-site admin requests are not allowed.");
+        return;
+      }
+      if (isExtensionRequest && !EXTENSION_API_ROUTES.has(url.pathname)) {
+        sendText(res, 403, "Forbidden: this Pagecast extension route is not allowed.");
+        return;
+      }
+
+      // Chrome-extension CORS is constrained to the three extension adapter
+      // routes; no extension origin can access general admin configuration.
+      const corsOrigin = isExtensionRequest ? extensionOrigin : null;
       if (corsOrigin) {
         res.__corsOrigin = corsOrigin;
       }
       if (req.method === "OPTIONS") {
         const headers = { "Cache-Control": "no-store" };
-        if (corsOrigin) {
-          headers["Access-Control-Allow-Origin"] = corsOrigin;
+        if (extensionOrigin && EXTENSION_API_ROUTES.has(url.pathname)) {
+          headers["Access-Control-Allow-Origin"] = extensionOrigin;
           headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
-          headers["Access-Control-Allow-Headers"] = "Content-Type";
+          headers["Access-Control-Allow-Headers"] =
+            "Content-Type, X-Pagecast-CSRF, X-Pagecast-Extension";
           headers.Vary = "Origin";
         }
         res.writeHead(204, headers);
@@ -5202,20 +4637,51 @@ export function createAdminHandler({
         return;
       }
 
-      const url = new URL(req.url, `http://${req.headers.host || DEFAULT_HOST}`);
+      if (url.pathname === "/api/session" && req.method === "GET") {
+        sendJson(res, 200, { csrfToken });
+        return;
+      }
 
       if (url.pathname.startsWith("/api/")) {
-        await handleApi(req, res, url, {
+        if (ADMIN_MUTATION_METHODS.has(req.method)) {
+          if (origin) {
+            const suppliedToken = req.headers["x-pagecast-csrf"];
+            if (!tokensMatch(suppliedToken, csrfToken)) {
+              sendText(res, 403, "Forbidden: the Pagecast admin session token is missing or stale.");
+              return;
+            }
+          } else if (!tokensMatch(req.headers["x-pagecast-capability"], commandCapability)) {
+            sendText(
+              res,
+              403,
+              "Forbidden: the local Pagecast command capability is missing or stale."
+            );
+            return;
+          }
+        }
+        const execute = () => handleApi(req, res, url, {
           store,
           configStore,
           cloudflareAuth,
           pagesPublisher,
           getAdminBaseUrl,
+          getCommandBaseUrl,
           getLocalPublicBaseUrl,
           tunnelManager,
           deployQueue,
-          watchManager
+          mutationQueue,
+          watchManager,
+          commandCapability
         });
+        if (
+          mutationQueue &&
+          ADMIN_MUTATION_METHODS.has(req.method) &&
+          url.pathname !== "/api/command"
+        ) {
+          await mutationQueue.enqueue(execute);
+        } else {
+          await execute();
+        }
         return;
       }
 
@@ -5226,29 +4692,12 @@ export function createAdminHandler({
 
       const previewMatch = /^\/preview\/([^/]+)(\/.*)?$/.exec(url.pathname);
       if (previewMatch) {
-        const id = decodeURIComponent(previewMatch[1]);
-        const tail = previewMatch[2] || "";
-        if (tail === "") {
-          res.writeHead(302, { Location: `/preview/${encodeURIComponent(id)}/` });
-          res.end();
-          return;
-        }
-
-        const rawAssetPath = tail === "/" ? "" : tail.slice(1);
-        const resolvedAsset = await store.resolveAsset(id, rawAssetPath);
-        if (resolvedAsset.statusCode !== 200) {
-          sendText(res, resolvedAsset.statusCode, resolvedAsset.message);
-          return;
-        }
-
-        // Markdown entries resolve with an in-memory rendered HTML body; serve it
-        // directly instead of streaming the raw .md file.
-        if (resolvedAsset.body !== undefined) {
-          sendHtmlBody(req, res, resolvedAsset);
-          return;
-        }
-
-        await sendFile(req, res, resolvedAsset);
+        const destination = new URL(
+          `${url.pathname}${url.search}`,
+          `${getLocalPublicBaseUrl()}/`
+        ).toString();
+        res.writeHead(302, { Location: destination, "Cache-Control": "no-store" });
+        res.end();
         return;
       }
 
@@ -5257,6 +4706,392 @@ export function createAdminHandler({
       sendError(res, error);
     }
   };
+}
+
+export async function executeDaemonCommand({
+  adminBaseUrl,
+  capability,
+  command,
+  payload = {},
+  fetchImpl = fetch
+} = {}) {
+  const baseUrl = stripTrailingSlash(String(adminBaseUrl || ""));
+  if (!baseUrl) {
+    throw appError("The Pagecast daemon command endpoint is not ready.", 503);
+  }
+  const sessionResponse = await fetchImpl(`${baseUrl}/api/session`, {
+    headers: { "X-Pagecast-Capability": capability }
+  });
+  if (!sessionResponse.ok) {
+    throw appError("Could not establish a Pagecast daemon session.", 503);
+  }
+  const session = await sessionResponse.json();
+  const csrfToken = String(session?.csrfToken || "");
+
+  async function request(pathname, { method = "GET", body } = {}) {
+    const response = await fetchImpl(`${baseUrl}${pathname}`, {
+      method,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Origin: baseUrl,
+        "X-Pagecast-CSRF": csrfToken,
+        "X-Pagecast-Capability": capability
+      },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    let result = null;
+    try {
+      result = await response.json();
+    } catch {
+      result = null;
+    }
+    if (!response.ok) {
+      throw appError(
+        result?.error?.message || result?.message || `Pagecast daemon command failed (${response.status}).`,
+        result?.error?.statusCode || response.status
+      );
+    }
+    return result;
+  }
+
+  if (command === "publish_report") {
+    // The daemon owns one transaction boundary for add/protect/publish. Sending
+    // three independent API mutations here lets unrelated writes interleave and
+    // gives callers a different result shape from the one-shot publisher.
+    return request("/api/command", {
+      method: "POST",
+      body: { command, payload }
+    });
+  }
+
+  if (command === "revoke_publication") {
+    return request(
+      `/api/publications/${encodeURIComponent(String(payload.token || ""))}/revoke`,
+      { method: "POST", body: {} }
+    );
+  }
+
+  if (command === "pages_status") {
+    const status = await request("/api/status");
+    return { config: status.config, cloudflare: status.cloudflare };
+  }
+
+  if (command === "feedback_setup") {
+    return request("/api/feedback/setup", {
+      method: "POST",
+      body: { accountId: payload.accountId }
+    });
+  }
+
+  if (command === "deployments_list") {
+    const result = await request("/api/deployments");
+    return {
+      deployments: result.deployments,
+      projectName: result.projectName,
+      baseUrl: result.baseUrl
+    };
+  }
+
+  if (command === "deployment_delete") {
+    const id = String(payload.id || "").trim();
+    if (!id) {
+      throw appError("A deployment id is required.", 400);
+    }
+    const force = payload.force === true ? "?force=1" : "";
+    return request(
+      `/api/deployments/${encodeURIComponent(id)}${force}`,
+      { method: "DELETE" }
+    );
+  }
+
+  if (command === "deployments_prune") {
+    const keep = Number(payload.keep);
+    if (!Number.isInteger(keep) || keep < 1) {
+      throw appError("`keep` must be an integer of at least 1.", 400);
+    }
+    return request("/api/deployments/prune", {
+      method: "POST",
+      body: { keep }
+    });
+  }
+
+  throw appError(`Unknown Pagecast daemon command: ${command || ""}`, 400);
+}
+
+function reportDeploymentTargets(store, report, currentPages) {
+  const targets = new Map();
+  for (const publication of store.activeSnapshotPublications(report)) {
+    const pagesConfig = pagesConfigForPublication(publication, currentPages);
+    const key = projectRefFilesystemKey(pagesConfig);
+    if (!targets.has(key)) {
+      targets.set(key, { publication, publications: [publication], pagesConfig });
+    } else {
+      targets.get(key).publications.push(publication);
+    }
+  }
+  return [...targets.values()];
+}
+
+async function deployReportTargetState({
+  store,
+  configStore,
+  pagesPublisher,
+  deployQueue,
+  report,
+  publication,
+  publications = [publication],
+  pagesConfig
+}) {
+  const currentPublications = [];
+  for (const candidate of publications) {
+    const current = store.findPublication(candidate.token);
+    if (!current) {
+      throw appError("Published link was not found.", 404);
+    }
+    report = current.report;
+    currentPublications.push(current.publication);
+  }
+  publication =
+    currentPublications.find((candidate) => candidate.token === publication.token) ||
+    currentPublications[0];
+  for (const candidate of currentPublications) {
+    rememberPublicationPagesTarget(candidate, pagesConfig);
+  }
+
+  let remoteSucceeded = false;
+  try {
+    const deployedUrl = await runPublicationMutation(deployQueue, () =>
+      pagesPublisher.syncPublication({
+        report,
+        publication,
+        publications: currentPublications,
+        pagesConfig
+      })
+    );
+    remoteSucceeded = true;
+    const deployedBaseUrl =
+      publicUrlOrigin(deployedUrl) ||
+      publicUrlOrigin(publication.publicUrl) ||
+      stripTrailingSlash(pagesConfig.baseUrl || "");
+    for (const candidate of currentPublications) {
+      if (deployedBaseUrl) {
+        candidate.publicUrl = joinUrl(
+          deployedBaseUrl,
+          `/p/${encodeURIComponent(candidate.slug || candidate.token)}/`
+        );
+      } else if (candidate.token === publication.token) {
+        candidate.publicUrl = deployedUrl;
+      }
+      await persistActualPublicationOrigin(candidate, configStore);
+      await store.syncSnapshot(candidate.token);
+    }
+    return publication;
+  } catch (error) {
+    if ((remoteSucceeded || error?.remoteSucceeded) && error && typeof error === "object") {
+      error.remoteSucceeded = true;
+    }
+    throw error;
+  }
+}
+
+async function updateReportPasswordProtection({
+  store,
+  configStore,
+  pagesPublisher,
+  deployQueue,
+  reportId,
+  enabled,
+  password,
+  hash
+}) {
+  const before = store.get(reportId);
+  if (!before) {
+    throw appError("Report was not found.", 404);
+  }
+  const previous = {
+    enabled: before.passwordProtected === true,
+    hash: before.passwordHash || null
+  };
+  const targets = reportDeploymentTargets(store, before, configStore.get().pages);
+  const operationEntries = targets.map(({ publication, pagesConfig }) => ({
+    type: "password_sync",
+    token: publication.token,
+    slug: publication.slug || publication.token,
+    projectRef: pagesConfig,
+    reportId,
+    desiredProtected: enabled === true
+  }));
+
+  if (operationEntries.length > 0) {
+    await store.beginOperations(operationEntries);
+  }
+  try {
+    await store.setPasswordProtection(reportId, { enabled, password, hash });
+  } catch (error) {
+    await store.clearOperations(operationEntries).catch(() => {});
+    throw error;
+  }
+
+  const remotelyChanged = [];
+  let currentTarget = null;
+  try {
+    for (const target of targets) {
+      currentTarget = target;
+      const report = store.get(reportId);
+      await deployReportTargetState({
+        store,
+        configStore,
+        pagesPublisher,
+        deployQueue,
+        report,
+        ...target
+      });
+      remotelyChanged.push(target);
+      await store.clearOperation("password_sync", target.publication.token);
+      currentTarget = null;
+    }
+    return store.get(reportId);
+  } catch (error) {
+    if (
+      currentTarget &&
+      error?.remoteSucceeded &&
+      !remotelyChanged.includes(currentTarget)
+    ) {
+      // The target changed remotely but local finalization failed. It belongs
+      // in the compensation set just like a fully returned target; otherwise a
+      // password disable could be reported as rolled back while remaining live.
+      remotelyChanged.push(currentTarget);
+    }
+    if (currentTarget) {
+      await store
+        .recordOperationFailure({
+          type: "password_sync",
+          token: currentTarget.publication.token,
+          slug: currentTarget.publication.slug || currentTarget.publication.token,
+          projectRef: currentTarget.pagesConfig,
+          remoteSucceeded:
+            error?.remoteSucceeded === true || remotelyChanged.includes(currentTarget),
+          error
+        })
+        .catch(() => {});
+    }
+
+    try {
+      await store.setPasswordProtection(reportId, {
+        enabled: previous.enabled,
+        hash: previous.hash
+      });
+    } catch (rollbackError) {
+      // The store rolls a rejected save back in memory, so the requested state
+      // remains authoritative. Do not run compensation from state that failed
+      // to persist; leave the existing forward-sync journal visible instead.
+      throw appError(
+        `Password protection could not be rolled back locally after a deployment error. Pagecast kept the requested state and its unfinished sync operations for recovery. (${rollbackError.message || rollbackError}; original error: ${error.message || error})`,
+        500
+      );
+    }
+
+    const compensationFailures = [];
+    for (const target of [...remotelyChanged].reverse()) {
+      const compensation = {
+        type: "password_compensate",
+        token: target.publication.token,
+        slug: target.publication.slug || target.publication.token,
+        projectRef: target.pagesConfig,
+        reportId,
+        desiredProtected: previous.enabled
+      };
+      try {
+        // Compensation is itself a remote side effect, so its durable intent
+        // must exist before the deploy begins.
+        await store.beginOperations([compensation]);
+      } catch (compensationJournalError) {
+        compensationFailures.push({
+          target,
+          error: compensationJournalError,
+          remoteSucceeded: false
+        });
+        continue;
+      }
+      try {
+        await deployReportTargetState({
+          store,
+          configStore,
+          pagesPublisher,
+          deployQueue,
+          report: store.get(reportId),
+          ...target
+        });
+        try {
+          await store.clearOperations([
+            compensation,
+            { type: "password_sync", token: target.publication.token }
+          ]);
+        } catch (cleanupError) {
+          // The previous password state is already restored remotely. Preserve
+          // that checkpoint so recovery repeats the safe state instead of
+          // downgrading a successfully re-protected target.
+          if (cleanupError && typeof cleanupError === "object") {
+            cleanupError.remoteSucceeded = true;
+          }
+          throw cleanupError;
+        }
+      } catch (compensationError) {
+        const remoteSucceeded = compensationError?.remoteSucceeded === true;
+        compensationFailures.push({
+          target,
+          error: compensationError,
+          remoteSucceeded
+        });
+        await store
+          .recordOperationFailure({
+            ...compensation,
+            remoteSucceeded,
+            error: compensationError
+          })
+          .catch(() => {});
+        if (remoteSucceeded) {
+          // The compensating remote state supersedes the original forward-sync
+          // intent. Keep only the local-finalization checkpoint when possible.
+          await store
+            .clearOperation("password_sync", target.publication.token)
+            .catch(() => {});
+        }
+      }
+    }
+
+    if (compensationFailures.length === 0) {
+      await store.clearOperations(operationEntries);
+      throw error;
+    }
+
+    if (compensationFailures.every((failure) => failure.remoteSucceeded)) {
+      // Every compensating deploy reached Cloudflare, so the persisted previous
+      // password state is still truthful. Keep the journal for the unfinished
+      // local finalization and retry the same safe state idempotently.
+      throw appError(
+        `Password protection was restored remotely, but Pagecast could not finish local recovery bookkeeping. The previous protection state remains active; retry the operation journal. (${error.message || error})`,
+        502
+      );
+    }
+
+    // Never claim a report is protected while any target may have lost its
+    // gate. Mixed remote state is represented conservatively as unprotected and
+    // the durable operation journal names every unfinished reconciliation.
+    try {
+      await store.setPasswordProtection(reportId, { enabled: false });
+    } catch (safetyStateError) {
+      throw appError(
+        `Password protection is mixed across remote targets, and Pagecast could not persist the conservative unprotected state. Treat the page as potentially unprotected and repair storage before retrying the operation journal. (${safetyStateError.message || safetyStateError}; original error: ${error.message || error})`,
+        500
+      );
+    }
+    throw appError(
+      `Password protection changed only on some targets and automatic compensation was incomplete. Pagecast now reports the page as unprotected; retry after resolving the operation journal. (${error.message || error})`,
+      502
+    );
+  }
 }
 
 async function handleApi(
@@ -5269,18 +5104,324 @@ async function handleApi(
     cloudflareAuth,
     pagesPublisher,
     getAdminBaseUrl,
+    getCommandBaseUrl,
     getLocalPublicBaseUrl,
     tunnelManager,
     deployQueue,
-    watchManager
+    mutationQueue,
+    watchManager,
+    commandCapability
   }
 ) {
   const options = reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl });
 
+  async function updatePasswordProtection(id, { enabled, password } = {}) {
+    return updateReportPasswordProtection({
+      store,
+      configStore,
+      pagesPublisher,
+      deployQueue,
+      reportId: id,
+      enabled: enabled === true,
+      password: typeof password === "string" ? password : ""
+    });
+  }
+
+  async function publishSnapshot(id, body = {}) {
+    const sourceReport = store.get(id);
+    if (sourceReport?.kind === "folder" && sourceReport.buildCommand) {
+      await store.buildReport(id);
+    }
+    const expiresAt = resolveExpiresAt({
+      expires: body.expires,
+      defaultExpiry: configStore.get().defaultExpiry
+    });
+    const draft = store.draftPublication(id, {
+      label: body.label,
+      kind: "snapshot",
+      expiresAt,
+      drop: body.drop === true
+    });
+    // An expiring or password-protected snapshot needs an edge gate built from
+    // committed snapshots. Its `pending` flag keeps it inactive until both the
+    // remote deploy and local finalization finish.
+    const gated = Boolean(expiresAt) || store.get(id).passwordProtected === true;
+    if (gated) {
+      await store.commitPublication(id, draft.publication);
+    }
+    const deployOnce = () => {
+      const pagesConfig = configStore.get().pages;
+      rememberPublicationPagesTarget(draft.publication, pagesConfig);
+      return (gated ? pagesPublisher.syncPublication : pagesPublisher.publish)({
+        report: store.get(id),
+        publication: draft.publication,
+        pagesConfig
+      });
+    };
+    const operation = {
+      type: "publish",
+      token: draft.publication.token,
+      slug: draft.publication.slug || draft.publication.token,
+      projectRef: configStore.get().pages,
+      reportId: id,
+      publication: structuredClone(draft.publication),
+      remoteSucceeded: false
+    };
+    await store.beginOperations([operation]);
+    try {
+      await deployQueue.enqueue(async () => {
+        try {
+          draft.publication.publicUrl = await deployOnce();
+        } catch (error) {
+          if (!isProvisionablePagesError(error)) {
+            throw error;
+          }
+          await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
+          draft.publication.publicUrl = await deployOnce();
+        }
+      });
+      await store.beginOperations([
+        {
+          ...operation,
+          projectRef: draft.publication.projectRef || configStore.get().pages,
+          publication: structuredClone(draft.publication),
+          publicUrl: draft.publication.publicUrl,
+          remoteSucceeded: true
+        }
+      ]);
+      await persistActualPublicationOrigin(draft.publication, configStore);
+      draft.publication.pending = false;
+      if (gated) {
+        await store.syncSnapshot(draft.publication.token);
+      } else {
+        await store.commitPublication(id, draft.publication);
+      }
+      await store.clearOperation("publish", draft.publication.token);
+    } catch (error) {
+      await store
+        .recordOperationFailure({
+          type: "publish",
+          token: operation.token,
+          slug: operation.slug,
+          projectRef: draft.publication.projectRef || configStore.get().pages,
+          error
+        })
+        .catch(() => {});
+      throw error;
+    }
+    return store.findPublication(draft.publication.token);
+  }
+
+  if (url.pathname === "/api/command" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    const payload = body.payload || {};
+    const runOwnedMutation = (operation) =>
+      mutationQueue ? mutationQueue.enqueue(operation) : operation();
+    if (body.command === "goal_status") {
+      const readGoal = () => ({ goal: configStore.get().goal });
+      const result = mutationQueue
+        ? await mutationQueue.enqueue(readGoal)
+        : readGoal();
+      sendJson(res, 200, result);
+      return;
+    }
+    if (body.command === "telemetry_status") {
+      sendJson(res, 200, { configEnabled: configStore.get().telemetry });
+      return;
+    }
+    if (body.command === "telemetry_set") {
+      if (typeof payload.enabled !== "boolean") {
+        throw appError("Telemetry enabled must be a boolean.", 400);
+      }
+      await runOwnedMutation(() =>
+        configStore.setTelemetry(payload.enabled, { notified: true })
+      );
+      sendJson(res, 200, { configEnabled: configStore.get().telemetry });
+      return;
+    }
+    if (body.command === "pages_setup") {
+      const result = await runOwnedMutation(() =>
+        setupCloudflarePagesWithContext({
+          ...payload,
+          configStore,
+          cloudflareAuth
+        })
+      );
+      sendJson(res, 200, result);
+      return;
+    }
+    if (body.command === "pages_projects_list") {
+      const result = await runOwnedMutation(() =>
+        listCloudflarePagesProjectsWithContext({
+          accountId: payload.accountId,
+          configStore,
+          cloudflareAuth
+        })
+      );
+      sendJson(res, 200, result);
+      return;
+    }
+    if (body.command === "pages_deploy_site") {
+      const result = await deployQueue.enqueue(() =>
+        deployCloudflarePagesSiteWithContext({
+          ...payload,
+          cloudflareAuth,
+          pagesPublisher
+        })
+      );
+      sendJson(res, 200, result);
+      return;
+    }
+    if (body.command === "deployments_list") {
+      const result = await deployQueue.enqueue(() =>
+        listCloudflarePagesDeploymentsWithContext({
+          accountId: payload.accountId,
+          configStore,
+          cloudflareAuth
+        })
+      );
+      sendJson(res, 200, result);
+      return;
+    }
+    if (body.command === "deployment_delete") {
+      const result = await deployQueue.enqueue(() =>
+        deleteCloudflarePagesDeploymentWithContext({
+          id: payload.id,
+          force: payload.force === true,
+          accountId: payload.accountId,
+          configStore,
+          cloudflareAuth
+        })
+      );
+      sendJson(res, 200, result);
+      return;
+    }
+    if (body.command === "deployments_prune") {
+      const result = await deployQueue.enqueue(() =>
+        pruneCloudflarePagesDeploymentsWithContext({
+          keep: payload.keep,
+          accountId: payload.accountId,
+          configStore,
+          cloudflareAuth
+        })
+      );
+      sendJson(res, 200, result);
+      return;
+    }
+    if (body.command === "publish_report") {
+      const publishReport = async () => {
+        const report = await store.addPath(String(payload.path || ""));
+        if (typeof payload.password === "string" && payload.password.trim()) {
+          await updatePasswordProtection(report.id, {
+            enabled: true,
+            password: payload.password
+          });
+        } else if (payload.disableProtection === true) {
+          await updatePasswordProtection(report.id, { enabled: false });
+        }
+        const published = await publishSnapshot(report.id, {
+          label: payload.label,
+          expires: payload.expires
+        });
+        return {
+          url: published.publication.publicUrl,
+          token: published.publication.token,
+          label: published.publication.label,
+          projectName: configStore.get().pages.projectName,
+          reportId: report.id,
+          passwordProtected: published.report.passwordProtected === true,
+          linkKind: classifyLinkKind({
+            slug: published.publication.slug || published.publication.token,
+            drop: published.publication.drop === true,
+            passwordProtected: published.report.passwordProtected === true
+          }),
+          expiresAt: published.publication.expiresAt || null
+        };
+      };
+      const result = mutationQueue
+        ? await mutationQueue.enqueue(publishReport)
+        : await publishReport();
+      sendJson(res, 200, result);
+      return;
+    }
+    if (body.command === "goal_publish") {
+      const file = String(body.payload?.file || "").trim();
+      if (!file) {
+        throw appError("Provide a path to the goal-progress file.", 400);
+      }
+      const publishGoal = async () => {
+        const credential = cloudflareCredentialStatus();
+        if (!credential.tokenConfigured && !(await cloudflareAuth.refreshSession()).loggedIn) {
+          throw appError(cloudflareAuthRequiredMessage(), 401);
+        }
+        const target = await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
+        if (target.cloudflare.needsAccountChoice) {
+          throw appError("Multiple Cloudflare accounts found. Choose one before publishing.", 409);
+        }
+        return publishGoalWithContext({
+          file,
+          requestedSlug: body.payload?.slug || "goal",
+          dataDir: store.dataDir,
+          store,
+          configStore,
+          pagesPublisher,
+          deployQueue
+        });
+      };
+      const result = mutationQueue
+        ? await mutationQueue.enqueue(publishGoal)
+        : await publishGoal();
+      sendJson(res, 200, result);
+      return;
+    }
+    if (body.command === "goal_stop") {
+      const stopGoal = async () => {
+        const goal = configStore.get().goal;
+        const match = goal?.token ? store.findActivePublication(goal.token) : null;
+        if (match) {
+          const credential = cloudflareCredentialStatus();
+          if (!credential.tokenConfigured && !(await cloudflareAuth.refreshSession()).loggedIn) {
+            throw appError(cloudflareAuthRequiredMessage(), 401);
+          }
+        }
+        return stopGoalWithContext({
+          store,
+          configStore,
+          pagesPublisher,
+          deployQueue
+        });
+      };
+      const result = mutationQueue
+        ? await mutationQueue.enqueue(stopGoal)
+        : await stopGoal();
+      sendJson(res, 200, result);
+      return;
+    }
+    const result = await executeDaemonCommand({
+      adminBaseUrl: getCommandBaseUrl(),
+      capability: commandCapability,
+      command: body.command,
+      payload: body.payload
+    });
+    sendJson(res, 200, result);
+    return;
+  }
+
   async function syncSnapshotPublication({ report, publication }) {
-    await deployQueue.enqueue(async () => {
-      const currentPages = configStore.get().pages;
-      let pagesConfig = pagesConfigForPublication(publication, currentPages);
+    const currentPages = configStore.get().pages;
+    let pagesConfig = pagesConfigForPublication(publication, currentPages);
+    await store.beginOperations([
+      {
+        type: "sync",
+        token: publication.token,
+        slug: publication.slug || publication.token,
+        projectRef: pagesConfig,
+        reportId: report.id
+      }
+    ]);
+    let remoteSucceeded = false;
+    try {
+      await deployQueue.enqueue(async () => {
       rememberPublicationPagesTarget(publication, pagesConfig);
       try {
         publication.publicUrl = await pagesPublisher.syncPublication({
@@ -5288,6 +5429,8 @@ async function handleApi(
           publication,
           pagesConfig
         });
+        remoteSucceeded = true;
+        await persistActualPublicationOrigin(publication, configStore);
       } catch (error) {
         const stillCurrentProject =
           pagesConfig.projectName === currentPages.projectName &&
@@ -5303,23 +5446,292 @@ async function handleApi(
           publication,
           pagesConfig
         });
+        remoteSucceeded = true;
+        await persistActualPublicationOrigin(publication, configStore);
       }
-    });
-    return store.syncSnapshot(publication.token);
+      });
+      const synced = await store.syncSnapshot(publication.token);
+      await store.clearOperation("sync", publication.token);
+      return synced;
+    } catch (error) {
+      if (remoteSucceeded && error && typeof error === "object") {
+        error.remoteSucceeded = true;
+      }
+      await store
+        .recordOperationFailure({
+          type: "sync",
+          token: publication.token,
+          slug: publication.slug || publication.token,
+          projectRef: pagesConfig,
+          error
+        })
+        .catch(() => {});
+      throw error;
+    }
   }
 
   async function revokeSnapshotPublications(publications) {
+    let revokedCount = 0;
     for (const publication of publications) {
       if (publication.revokedAt || publication.kind !== "snapshot") {
         continue;
       }
       const slug = publication.slug || publication.token;
+      const pagesConfig = pagesConfigForPublication(publication, configStore.get().pages);
+      await store.beginOperations([
+        {
+          type: "revoke",
+          token: publication.token,
+          slug,
+          projectRef: pagesConfig
+        }
+      ]);
       try {
-        const pagesConfig = pagesConfigForPublication(publication, configStore.get().pages);
         await deployQueue.enqueue(() => pagesPublisher.revoke([slug], pagesConfig));
+        const committed = await store.commitSuccessfulRevoke(publication.token);
+        if (committed.revoked) {
+          revokedCount += 1;
+        }
       } catch (error) {
-        console.warn(`Pagecast could not revoke ${slug} from Cloudflare: ${error?.message || error}`);
+        await store.recordOperationFailure({
+          type: "revoke",
+          token: publication.token,
+          slug,
+          projectRef: pagesConfig,
+          error
+        });
+        throw error;
       }
+    }
+    return revokedCount;
+  }
+
+  function operationPagesConfig(operation, publication = null) {
+    let publicationConfig = null;
+    if (publication) {
+      publicationConfig = pagesConfigForPublication(
+        publication,
+        configStore.get().pages
+      );
+    }
+    if (!operation.projectRef) {
+      if (publicationConfig) {
+        return publicationConfig;
+      }
+      throw appError("The operation does not identify its Cloudflare Pages target.", 409);
+    }
+
+    let operationRef;
+    try {
+      operationRef = normalizeProjectRef(operation.projectRef);
+    } catch (error) {
+      throw appError(
+        `The operation's Cloudflare Pages target is invalid. (${error.message || error})`,
+        409
+      );
+    }
+    if (publicationConfig && !projectRefEquals(operationRef, publicationConfig)) {
+      throw appError(
+        "The publication target changed after this operation was recorded. Retry the original action manually.",
+        409
+      );
+    }
+    return {
+      ...(publicationConfig || configStore.get().pages),
+      ...operationRef,
+      baseUrl: operationRef.baseUrl || publicationConfig?.baseUrl || ""
+    };
+  }
+
+  function operationPublication(operation, { allowRevoked = false } = {}) {
+    const match = allowRevoked
+      ? store.findPublication(operation.token)
+      : store.findActivePublication(operation.token);
+    if (!match) {
+      throw appError("The publication for this operation no longer exists.", 409);
+    }
+    if (match.publication.kind !== "snapshot") {
+      throw appError("Only snapshot publications can be recovered automatically.", 409);
+    }
+    if (operation.reportId && match.report.id !== operation.reportId) {
+      throw appError("The operation's publication now belongs to a different page.", 409);
+    }
+    return match;
+  }
+
+  async function retryTargetStateOperation(operation, { clearTypes = [operation.type] } = {}) {
+    const match = operationPublication(operation);
+    const pagesConfig = operationPagesConfig(operation, match.publication);
+    const target = reportDeploymentTargets(
+      store,
+      match.report,
+      configStore.get().pages
+    ).find(({ publications }) =>
+      publications.some((publication) => publication.token === operation.token)
+    );
+    await deployReportTargetState({
+      store,
+      configStore,
+      pagesPublisher,
+      deployQueue,
+      report: match.report,
+      publication: match.publication,
+      publications: target?.publications || [match.publication],
+      pagesConfig
+    });
+    await store.clearOperations(
+      clearTypes.map((type) => ({ type, token: operation.token }))
+    );
+    return store.findPublication(operation.token);
+  }
+
+  async function retryPublishOperation(operation) {
+    const report = store.get(operation.reportId);
+    if (!report) {
+      throw appError("The page for this publish operation no longer exists.", 409);
+    }
+    const existing = store.findPublication(operation.token);
+    if (existing && existing.report.id !== operation.reportId) {
+      throw appError("The publication token now belongs to a different page.", 409);
+    }
+    if (existing?.publication.revokedAt) {
+      throw appError("A revoked publication cannot be recovered as a publish.", 409);
+    }
+    // A crash may happen after the publication commit but before its journal
+    // clear. In that case the committed publication is already the source of
+    // truth and recovery only needs the atomic journal cleanup.
+    if (existing && existing.publication.pending !== true) {
+      return store.commitRecoveredPublish(operation.reportId, existing.publication);
+    }
+
+    const publication = structuredClone(operation.publication);
+    const pagesConfig = operationPagesConfig(operation, existing?.publication || null);
+    rememberPublicationPagesTarget(publication, pagesConfig);
+    publication.publicUrl = operation.publicUrl || publication.publicUrl || null;
+
+    if (operation.remoteSucceeded !== true) {
+      const gated =
+        existing?.publication.pending === true ||
+        report.passwordProtected === true ||
+        (typeof publication.expiresAt === "number" && publication.expiresAt > 0);
+      publication.publicUrl = await deployQueue.enqueue(() =>
+        (gated ? pagesPublisher.syncPublication : pagesPublisher.publish)({
+          report,
+          publication,
+          pagesConfig
+        })
+      );
+      // Persist the remote-success checkpoint before any local finalization.
+      // Retrying after this write must never publish a second link.
+      await store.beginOperations([
+        {
+          ...operation,
+          projectRef: publication.projectRef || pagesConfig,
+          publication: structuredClone(publication),
+          publicUrl: publication.publicUrl,
+          remoteSucceeded: true
+        }
+      ]);
+    } else if (!publication.publicUrl) {
+      throw appError("The remote publish checkpoint is missing its resulting URL.", 409);
+    }
+
+    await persistActualPublicationOrigin(publication, configStore);
+    publication.pending = false;
+    return store.commitRecoveredPublish(operation.reportId, publication);
+  }
+
+  async function retryRenameOperation(operation) {
+    const desiredSlug = normalizeCustomSlug(operation.slug);
+    const previousSlug = normalizeCustomSlug(operation.previousSlug);
+    let match = operationPublication(operation);
+    const currentSlug = match.publication.slug || match.publication.token;
+    if (currentSlug === previousSlug) {
+      await store.renameSlug(operation.token, desiredSlug);
+      match = operationPublication(operation);
+    } else if (currentSlug !== desiredSlug) {
+      throw appError(
+        "The publication path changed after this rename was recorded. Retry the rename manually.",
+        409
+      );
+    }
+
+    const pagesConfig = operationPagesConfig(operation, match.publication);
+    const canonicalUrl = await deployQueue.enqueue(() =>
+      pagesPublisher.renamePublication({
+        oldSlug: previousSlug,
+        newSlug: desiredSlug,
+        report: match.report,
+        publication: match.publication,
+        pagesConfig
+      })
+    );
+    match.publication.publicUrl = canonicalUrl;
+    await persistActualPublicationOrigin(match.publication, configStore);
+    await store.syncSnapshot(operation.token);
+    await store.clearOperation("rename", operation.token);
+    return store.findPublication(operation.token);
+  }
+
+  async function retryGoalSyncOperation(operation) {
+    const goal = configStore.get().goal;
+    if (!goal || goal.token !== operation.token) {
+      throw appError("This goal operation is no longer the active goal page.", 409);
+    }
+    const match = await retryTargetStateOperation(operation, { clearTypes: [] });
+    await configStore.setGoal({
+      ...goal,
+      url: match.publication.publicUrl,
+      file: operation.goalFile,
+      expiresAt: null,
+      updatedAt: nowIso()
+    });
+    await store.clearOperation("goal_sync", operation.token);
+    return match;
+  }
+
+  async function retryRevokeOperation(operation) {
+    const match = operationPublication(operation, { allowRevoked: true });
+    if (match.publication.revokedAt) {
+      return store.commitSuccessfulRevoke(operation.token);
+    }
+    const currentSlug = match.publication.slug || match.publication.token;
+    if (currentSlug !== operation.slug) {
+      throw appError(
+        "The publication path changed after this revoke was recorded. Revoke it from the page menu instead.",
+        409
+      );
+    }
+    const pagesConfig = operationPagesConfig(operation, match.publication);
+    await deployQueue.enqueue(() => pagesPublisher.revoke([operation.slug], pagesConfig));
+    return store.commitSuccessfulRevoke(operation.token);
+  }
+
+  async function retryJournalOperation(operation) {
+    switch (operation.type) {
+      case "publish":
+        return retryPublishOperation(operation);
+      case "sync":
+      case "auto_sync":
+      case "content_sync":
+        return retryTargetStateOperation(operation);
+      case "password_sync":
+      case "password_compensate":
+        // A partial password transaction deliberately leaves local state at its
+        // conservative fallback (currently unprotected). Recovery converges the
+        // unfinished target to that current state; it never resumes a stale
+        // plaintext password intent and never calls revoke.
+        return retryTargetStateOperation(operation, {
+          clearTypes: ["password_sync", "password_compensate"]
+        });
+      case "rename":
+        return retryRenameOperation(operation);
+      case "goal_sync":
+        return retryGoalSyncOperation(operation);
+      case "revoke":
+        return retryRevokeOperation(operation);
+      default:
+        throw appError("This operation cannot be retried automatically.", 409);
     }
   }
 
@@ -5343,8 +5755,9 @@ async function handleApi(
     const accountName =
       normalizeAccountName(activeAccount?.name || "") || normalizeAccountName(pages.accountName || "");
     sendJson(res, 200, {
-      admin: { ok: true },
+      admin: { ok: true, product: "pagecast", protocolVersion: 1 },
       public: { localBaseUrl: getLocalPublicBaseUrl() },
+      operations: formatOperationsForApi(store),
       cloudflare: {
         ...credential,
         loggedIn: session.loggedIn,
@@ -5352,7 +5765,8 @@ async function handleApi(
         accountName,
         accountId: pages.accountId || activeAccount?.id || "",
         projectName: pages.projectName,
-        baseUrl: pages.baseUrl
+        baseUrl: pages.baseUrl,
+        ...targetManagementState(configStore, pages)
       },
       config: configStore.getPublicConfig()
     });
@@ -5364,13 +5778,51 @@ async function handleApi(
     return;
   }
 
+  if (url.pathname === "/api/operations" && req.method === "GET") {
+    sendJson(res, 200, { operations: formatOperationsForApi(store) });
+    return;
+  }
+
+  const operationRetryMatch = /^\/api\/operations\/([^/]+)\/retry$/.exec(url.pathname);
+  if (operationRetryMatch && req.method === "POST") {
+    await readJsonBody(req);
+    const operationId = decodeURIComponent(operationRetryMatch[1]);
+    const operation = store.getOperation(operationId);
+    if (!operation) {
+      throw appError("Operation was not found.", 404);
+    }
+    const formatted = formatOperationForApi(operation);
+    if (formatted.recovery.mode !== "automatic") {
+      throw appError(formatted.recovery.manualReason, 409);
+    }
+    try {
+      await retryJournalOperation(operation);
+    } catch (error) {
+      // Publish can advance its durable remote-success checkpoint during this
+      // attempt. Record failure from the latest entry so that checkpoint is not
+      // accidentally overwritten with the stale request-time snapshot.
+      const latest = store.getOperation(operationId) || operation;
+      await store.recordOperationFailure({ ...latest, error }).catch(() => {});
+      throw error;
+    }
+    sendJson(res, 200, {
+      recovered: true,
+      operationId,
+      operations: formatOperationsForApi(store)
+    });
+    return;
+  }
+
   if (url.pathname === "/api/config/pages" && req.method === "POST") {
     const body = await readJsonBody(req);
     await configStore.updatePages({
       projectName: body.projectName,
       accountId: body.accountId,
       accountName: body.accountName,
-      baseUrl: body.baseUrl
+      baseUrl: body.baseUrl,
+      // Selecting identity and claiming management are separate decisions. Only
+      // an explicit true is an adoption signal; omission remains read/configure-only.
+      adoptExisting: body.adoptExisting === true
     });
     sendJson(res, 200, { config: configStore.getPublicConfig() });
     return;
@@ -5646,6 +6098,7 @@ async function handleApi(
       const result = await store.importPublishedPages(discovery.publications, {
         ...options,
         pagesBaseUrl: pages.baseUrl,
+        pagesConfig: pages,
         fetchImpl: pagesPublisher.fetchImpl
       });
       return { discovery, result };
@@ -5728,59 +6181,13 @@ async function handleApi(
   if (snapshotPublishMatch && req.method === "POST") {
     const body = await readJsonBody(req);
     const id = decodeURIComponent(snapshotPublishMatch[1]);
-    const sourceReport = store.get(id);
-    if (sourceReport?.kind === "folder" && sourceReport.buildCommand) {
-      await store.buildReport(id);
-    }
-    const expiresAt = resolveExpiresAt({ expires: body.expires, defaultExpiry: configStore.get().defaultExpiry });
-    const draft = store.draftPublication(id, { label: body.label, kind: "snapshot", expiresAt, drop: body.drop === true });
-    // An expiring or password-protected snapshot needs an edge gate built from
-    // COMMITTED snapshots, so commit before the first deploy (else it ships
-    // ungated until a later redeploy). Deploy in place (syncPublication) and
-    // revoke on failure. Plain permanent links keep the publish-then-commit path.
-    const gated = Boolean(expiresAt) || store.get(id).passwordProtected === true;
-    if (gated) {
-      await store.commitPublication(id, draft.publication);
-    }
-    const deployOnce = () => {
-      const pagesConfig = configStore.get().pages;
-      rememberPublicationPagesTarget(draft.publication, pagesConfig);
-      return (gated ? pagesPublisher.syncPublication : pagesPublisher.publish)({
-        report: store.get(id),
-        publication: draft.publication,
-        pagesConfig
-      });
-    };
-    try {
-      await deployQueue.enqueue(async () => {
-        try {
-          draft.publication.publicUrl = await deployOnce();
-        } catch (error) {
-          // Self-provision and retry once when the failure is a missing Pages
-          // project or account, so a snapshot can publish without first visiting
-          // the Cloudflare panel.
-          if (!isProvisionablePagesError(error)) {
-            throw error;
-          }
-          await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
-          draft.publication.publicUrl = await deployOnce();
-        }
-      });
-    } catch (error) {
-      if (gated) {
-        await store.revokePublication(draft.publication.token).catch(() => {});
-      }
-      throw error;
-    }
-    if (gated) {
-      await store.syncSnapshot(draft.publication.token);
-    } else {
-      await store.commitPublication(id, draft.publication);
-    }
-    const fresh = store.findPublication(draft.publication.token);
+    const fresh = await publishSnapshot(id, body);
     sendJson(res, 201, {
       report: store.formatReport(fresh.report, options),
-      publication: store.formatPublication(fresh.publication, options)
+      publication: store.formatPublication(fresh.publication, {
+        ...options,
+        passwordProtected: fresh.report.passwordProtected === true
+      })
     });
     return;
   }
@@ -5790,22 +6197,6 @@ async function handleApi(
   if (url.pathname === "/api/publish-local" && req.method === "POST") {
     const body = await readJsonBody(req);
     const report = await store.addPath(typeof body.path === "string" ? body.path : "");
-
-    // Deploy (or re-deploy) with the same self-provision retry the snapshot path
-    // uses, so a first-time user publishes without visiting the Cloudflare panel.
-    const deployWith = async (run) => {
-      await deployQueue.enqueue(async () => {
-        try {
-          await run();
-        } catch (error) {
-          if (!isProvisionablePagesError(error)) {
-            throw error;
-          }
-          await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
-          await run();
-        }
-      });
-    };
 
     // Reuse the latest active snapshot link if one exists (same URL), else publish
     // new. The stored publication is "active" when it has no revokedAt.
@@ -5819,40 +6210,13 @@ async function handleApi(
       const match = store.findActivePublication(latest.token);
       publication = (await syncSnapshotPublication(match)).publication;
     } else {
-      const expiresAt = resolveExpiresAt({ expires: body.expires, defaultExpiry: configStore.get().defaultExpiry });
-      const draft = store.draftPublication(report.id, { kind: "snapshot", expiresAt });
-      // An expiring or password-protected link needs an edge gate built from
-      // COMMITTED snapshots, so commit before the first deploy (else it ships
-      // ungated until a later redeploy). Deploy in place (syncPublication) and
-      // revoke on failure. Plain permanent links keep the publish-then-commit path.
-      const gated = Boolean(expiresAt) || store.get(report.id).passwordProtected === true;
-      if (gated) {
-        await store.commitPublication(report.id, draft.publication);
-      }
-      try {
-        await deployWith(async () => {
-          const pagesConfig = configStore.get().pages;
-          rememberPublicationPagesTarget(draft.publication, pagesConfig);
-          draft.publication.publicUrl = await (gated
-            ? pagesPublisher.syncPublication
-            : pagesPublisher.publish)({
-            report: store.get(report.id),
-            publication: draft.publication,
-            pagesConfig
-          });
-        });
-      } catch (error) {
-        if (gated) {
-          await store.revokePublication(draft.publication.token).catch(() => {});
-        }
-        throw error;
-      }
-      publication = gated
-        ? (await store.syncSnapshot(draft.publication.token)).publication
-        : (await store.commitPublication(report.id, draft.publication)).publication;
+      publication = (await publishSnapshot(report.id, { expires: body.expires })).publication;
     }
 
-    const formatted = store.formatPublication(publication, options);
+    const formatted = store.formatPublication(publication, {
+      ...options,
+      passwordProtected: store.get(report.id)?.passwordProtected === true
+    });
     sendJson(res, 201, {
       ok: true,
       url: formatted.publicUrl,
@@ -5860,6 +6224,54 @@ async function handleApi(
       localUrl: formatted.localUrl,
       updated: Boolean(latest),
       publication: formatted
+    });
+    return;
+  }
+
+  const targetAdoptionMatch = /^\/api\/publications\/([^/]+)\/target$/.exec(url.pathname);
+  if (targetAdoptionMatch && req.method === "POST") {
+    const body = await readJsonBody(req);
+    if (body.confirm !== true) {
+      throw appError("Set `confirm: true` to attach this legacy link to the selected project.", 400);
+    }
+    const token = decodeURIComponent(targetAdoptionMatch[1]);
+    if (!store.findPublication(token)) {
+      throw appError("Published link was not found.", 404);
+    }
+    const current = configStore.get().pages;
+    const selectedAccountId = body.accountId || current.accountId;
+    const selectedProjectName = body.projectName || current.projectName;
+    const changesIdentity =
+      selectedAccountId !== current.accountId || selectedProjectName !== current.projectName;
+    if (changesIdentity && !body.baseUrl) {
+      throw appError(
+        "A production baseUrl from the selected Cloudflare project is required when adopting a different account or project.",
+        400
+      );
+    }
+    let pagesConfig;
+    try {
+      pagesConfig = normalizeProjectRef({
+        accountId: selectedAccountId,
+        projectName: selectedProjectName,
+        baseUrl: body.baseUrl || current.baseUrl
+      });
+    } catch (error) {
+      if (error instanceof TypeError) {
+        throw appError(error.message, 400);
+      }
+      throw error;
+    }
+    const adopted = await store.adoptPublicationTarget(token, pagesConfig);
+    await configStore.claimManagedTarget(pagesConfig);
+    await pagesPublisher.migrateLegacyStaging({ publications: [adopted.publication] });
+    sendJson(res, 200, {
+      report: store.formatReport(adopted.report, options),
+      publication: store.formatPublication(adopted.publication, {
+        ...options,
+        passwordProtected: adopted.report.passwordProtected === true
+      }),
+      projectRef: pagesConfig
     });
     return;
   }
@@ -5880,7 +6292,10 @@ async function handleApi(
     const { report, publication } = await syncSnapshotPublication(existing);
     sendJson(res, 200, {
       report: store.formatReport(report, options),
-      publication: store.formatPublication(publication, options)
+      publication: store.formatPublication(publication, {
+        ...options,
+        passwordProtected: report.passwordProtected === true
+      })
     });
     return;
   }
@@ -5909,13 +6324,18 @@ async function handleApi(
     try {
       await syncSnapshotPublication(existing);
     } catch (error) {
-      await store.setPublicationExpiry(token, previousExpiresAt).catch(() => {});
+      if (!error?.remoteSucceeded) {
+        await store.setPublicationExpiry(token, previousExpiresAt).catch(() => {});
+      }
       throw error;
     }
     const refreshed = store.findPublication(token);
     sendJson(res, 200, {
       report: store.formatReport(refreshed.report, options),
-      publication: store.formatPublication(refreshed.publication, options)
+      publication: store.formatPublication(refreshed.publication, {
+        ...options,
+        passwordProtected: refreshed.report.passwordProtected === true
+      })
     });
     return;
   }
@@ -5930,6 +6350,7 @@ async function handleApi(
     }
     const previous = {
       slug: existing.publication.slug || existing.publication.token,
+      drop: existing.publication.drop === true,
       publicUrl: existing.publication.publicUrl,
       publicationUpdatedAt: existing.publication.updatedAt,
       reportUpdatedAt: existing.report.updatedAt,
@@ -5937,10 +6358,22 @@ async function handleApi(
     };
     // Validate + reserve the slug (throws 400/409) before any deploy work.
     const { oldSlug, newSlug } = await store.renameSlug(token, body.slug);
+    let remoteSucceeded = false;
+    let renamePagesConfig = null;
     try {
       if (oldSlug !== newSlug && existing.publication.kind === "snapshot") {
-        await deployQueue.enqueue(() => {
-          const pagesConfig = pagesConfigForPublication(existing.publication, configStore.get().pages);
+        const pagesConfig = pagesConfigForPublication(existing.publication, configStore.get().pages);
+        renamePagesConfig = pagesConfig;
+        await store.beginOperations([
+          {
+            type: "rename",
+            token,
+            slug: newSlug,
+            projectRef: pagesConfig,
+            previousSlug: oldSlug
+          }
+        ]);
+        const canonicalUrl = await deployQueue.enqueue(() => {
           rememberPublicationPagesTarget(existing.publication, pagesConfig);
           return pagesPublisher.renamePublication({
             oldSlug,
@@ -5950,15 +6383,36 @@ async function handleApi(
             pagesConfig
           });
         });
+        remoteSucceeded = true;
+        existing.publication.publicUrl = canonicalUrl;
+        await persistActualPublicationOrigin(existing.publication, configStore);
+        await store.syncSnapshot(token);
+        await store.clearOperation("rename", token);
       }
     } catch (error) {
-      await store.restorePublicationSlug(token, previous).catch(() => {});
+      if (renamePagesConfig) {
+        await store
+          .recordOperationFailure({
+            type: "rename",
+            token,
+            slug: newSlug,
+            projectRef: renamePagesConfig,
+            error
+          })
+          .catch(() => {});
+      }
+      if (!remoteSucceeded) {
+        await store.restorePublicationSlug(token, previous).catch(() => {});
+      }
       throw error;
     }
     const refreshed = store.findPublication(token);
     sendJson(res, 200, {
       report: store.formatReport(refreshed.report, options),
-      publication: store.formatPublication(refreshed.publication, options)
+      publication: store.formatPublication(refreshed.publication, {
+        ...options,
+        passwordProtected: refreshed.report.passwordProtected === true
+      })
     });
     return;
   }
@@ -5970,10 +6424,12 @@ async function handleApi(
     if (!reportBeforeRevoke) {
       throw appError("Report was not found.", 404);
     }
-    await revokeSnapshotPublications(reportBeforeRevoke.publications || []);
-    const { report, revokedCount } = await store.revokeAll(id);
+    const snapshotRevokedCount = await revokeSnapshotPublications(
+      reportBeforeRevoke.publications || []
+    );
+    const { report, revokedCount: locallyRevokedCount } = await store.revokeAll(id);
     sendJson(res, 200, {
-      revokedCount,
+      revokedCount: snapshotRevokedCount + locallyRevokedCount,
       report: store.formatReport(report, options)
     });
     return;
@@ -5984,13 +6440,20 @@ async function handleApi(
     const id = decodeURIComponent(deleteMatch[1]);
     const reportBeforeDelete = store.get(id);
     if (reportBeforeDelete) {
-      if (watchManager) {
-        watchManager.unregister(id);
-      }
       await revokeSnapshotPublications(reportBeforeDelete.publications || []);
     }
     const removed = await store.remove(id);
-    sendJson(res, removed ? 200 : 404, { removed });
+    if (removed && watchManager) {
+      watchManager.unregister(id);
+    }
+    const pendingDeletion = removed
+      ? store.listPendingDeletions().find((entry) => entry.reportId === id)
+      : null;
+    sendJson(res, removed ? 200 : 404, {
+      removed,
+      cleanupPending: Boolean(pendingDeletion),
+      cleanupError: pendingDeletion?.error || null
+    });
     return;
   }
 
@@ -6003,11 +6466,20 @@ async function handleApi(
     }
     if (!existing.publication.revokedAt && existing.publication.kind === "snapshot") {
       await revokeSnapshotPublications([existing.publication]);
+    } else if (existing.publication.revokedAt) {
+      // A prior remote success may have committed revokedAt before a later local
+      // cleanup failed. Retrying must still clear any durable revoke journal.
+      await store.commitSuccessfulRevoke(token);
+    } else {
+      await store.revokePublication(token);
     }
-    const { report, publication } = await store.revokePublication(token);
+    const { report, publication } = store.findPublication(token);
     sendJson(res, 200, {
       report: store.formatReport(report, options),
-      publication: store.formatPublication(publication, options)
+      publication: store.formatPublication(publication, {
+        ...options,
+        passwordProtected: report.passwordProtected === true
+      })
     });
     return;
   }
@@ -6030,11 +6502,56 @@ async function handleApi(
   if (contentMatch && req.method === "PUT") {
     const body = await readJsonBody(req);
     const id = decodeURIComponent(contentMatch[1]);
-    const report = await store.writeContent(id, body.html);
-    // Push the edit live to every active snapshot of this report (same URL).
-    const snapshots = store.activeSnapshotPublications(report);
-    for (const publication of snapshots) {
-      await syncSnapshotPublication({ report, publication });
+    const before = store.get(id);
+    if (!before) {
+      throw appError("Report was not found.", 404);
+    }
+    const targets = reportDeploymentTargets(store, before, configStore.get().pages);
+    const operationsForEdit = targets.map(({ publication, pagesConfig }) => ({
+      type: "content_sync",
+      token: publication.token,
+      slug: publication.slug || publication.token,
+      projectRef: pagesConfig,
+      reportId: id
+    }));
+    if (operationsForEdit.length > 0) {
+      await store.beginOperations(operationsForEdit);
+    }
+    try {
+      await store.writeContent(id, body.html);
+    } catch (error) {
+      await store.clearOperations(operationsForEdit).catch(() => {});
+      throw error;
+    }
+    // Local content is the durable desired state. Each target has a write-ahead
+    // journal entry before the first remote side effect; a partial failure stays
+    // visible and is idempotently retried by saving again.
+    for (const target of targets) {
+      try {
+        await deployReportTargetState({
+          store,
+          configStore,
+          pagesPublisher,
+          deployQueue,
+          report: store.get(id),
+          ...target
+        });
+        await store.clearOperation("content_sync", target.publication.token);
+      } catch (error) {
+        await store
+          .recordOperationFailure({
+            type: "content_sync",
+            token: target.publication.token,
+            slug: target.publication.slug || target.publication.token,
+            projectRef: target.pagesConfig,
+            error
+          })
+          .catch(() => {});
+        throw appError(
+          `Content was saved locally, but one or more publication targets still need to sync. Retry Save after resolving the operation journal. (${error.message || error})`,
+          error.statusCode || 502
+        );
+      }
     }
     sendJson(res, 200, { report: store.formatReport(store.get(id), options) });
     return;
@@ -6060,35 +6577,11 @@ async function handleApi(
   if (passwordMatch && req.method === "POST") {
     const body = await readJsonBody(req);
     const id = decodeURIComponent(passwordMatch[1]);
-    // Capture prior protection state so we can roll back if a deploy fails —
-    // persisted state must never claim a protection status the live site lacks.
-    const beforeState = store.get(id);
-    const prevPasswordState = beforeState
-      ? { passwordProtected: beforeState.passwordProtected === true, passwordHash: beforeState.passwordHash || null }
-      : null;
-    const report = await store.setPasswordProtection(id, {
+    const report = await updatePasswordProtection(id, {
       enabled: body.enabled === true,
       password: typeof body.password === "string" ? body.password : ""
     });
-    // Redeploy active snapshots so the edge gate turns on/off in place at the
-    // same URL. Content is unchanged; only the generated middleware differs.
-    const snapshots = store.activeSnapshotPublications(report);
-    try {
-      for (const publication of snapshots) {
-        await syncSnapshotPublication({ report, publication });
-      }
-    } catch (error) {
-      if (prevPasswordState) {
-        await store
-          .setPasswordProtection(id, {
-            enabled: prevPasswordState.passwordProtected,
-            hash: prevPasswordState.passwordHash
-          })
-          .catch(() => {});
-      }
-      throw error;
-    }
-    sendJson(res, 200, { report: store.formatReport(store.get(id), options) });
+    sendJson(res, 200, { report: store.formatReport(report, options) });
     return;
   }
 
@@ -6132,6 +6625,14 @@ function closeServer(server) {
   });
 }
 
+async function closeListeningServers(servers, closeImpl = closeServer) {
+  const unique = [...new Set(servers.filter((server) => server?.listening))];
+  const results = await Promise.allSettled(unique.map((server) => closeImpl(server)));
+  return results
+    .filter((result) => result.status === "rejected")
+    .map((result) => result.reason);
+}
+
 function isPortInUse(error) {
   return error && error.code === "EADDRINUSE";
 }
@@ -6149,6 +6650,7 @@ function localPortCandidates(adminPort, publicPort) {
 
 export async function startServers({
   host = process.env.HOST || DEFAULT_HOST,
+  allowLoopbackProxy = process.env.PAGECAST_ALLOW_LOOPBACK_PROXY === "1",
   adminPort,
   publicPort,
   displayHost,
@@ -6161,12 +6663,28 @@ export async function startServers({
   cloudflareLoginTimeoutMs = DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS,
   cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
   pagesDeploySpawnImpl = spawn,
-  pagesDeployTimeoutMs = 180000
+  pagesDeployTimeoutMs = 180000,
+  serverFactory = createServer,
+  serverCloseImpl = closeServer
 } = {}) {
-  const store = createReportStore({ dataDir, recoverFetchImpl: fetchImpl });
-  await store.init();
-  const configStore = createConfigStore({ dataDir });
-  await configStore.init();
+  assertSafeAdminBind(host, { allowLoopbackProxy });
+  const commandCapability = randomBytes(32).toString("base64url");
+  const workspaceLease = new WorkspaceLease(dataDir);
+  await workspaceLease.acquire({ capability: commandCapability, role: "daemon" });
+  let activePublicServer = null;
+  let activeAdminServer = null;
+  let activeTunnelManager = null;
+  let activeWatchManager = null;
+  let activeDeployQueue = null;
+  let activeMutationQueue = null;
+  try {
+    const store = createReportStore({ dataDir, recoverFetchImpl: fetchImpl });
+    await store.init();
+    const configStore = createConfigStore({ dataDir });
+    await configStore.init();
+  for (const projectRef of store.listProjectRefs()) {
+    await configStore.claimManagedTarget(projectRef);
+  }
   const localConfig = configStore.get().local;
   const explicitAdminPort = adminPort !== undefined || process.env.PORT;
   const explicitPublicPort = publicPort !== undefined || process.env.PUBLIC_PORT;
@@ -6190,25 +6708,38 @@ export async function startServers({
     spawnImpl: pagesDeploySpawnImpl,
     fetchImpl,
     timeoutMs: pagesDeployTimeoutMs,
-    getRedirects: () => store.listRedirects(),
+    getRedirects: (pagesConfig) => store.listRedirects(pagesConfig),
     getFeedback: () => configStore.get().feedback,
     getBadge: () => configStore.get().badge,
-    getProtectedPublications: () => store.protectedPublicationManifest(),
+    getProtectedPublications: (pagesConfig) => store.protectedPublicationManifest(pagesConfig),
+    getPublications: (pagesConfig) => store.listPublications(pagesConfig),
     getAuthCookieSecret: () => configStore.get().authCookieSecret,
-    getSyncToken: () => configStore.get().syncSecret
+    getSyncToken: () => configStore.get().syncSecret,
+    getOwnerId: () => configStore.getOwnerId(),
+    isTargetManaged: (projectRef) => configStore.isTargetManaged(projectRef),
+    claimTargetManaged: (projectRef) => configStore.claimManagedTarget(projectRef)
+  });
+  await pagesPublisher.migrateLegacyStaging({
+    publications: store.listPublications(),
+    redirects: store.listRedirects()
   });
   const deployQueue = createDeployQueue();
+  const mutationQueue = createDeployQueue();
+  activeDeployQueue = deployQueue;
+  activeMutationQueue = mutationQueue;
   const watchManager = createWatchManager({
     store,
     pagesPublisher,
     configStore,
     deployQueue,
+    mutationQueue,
     // Auto-sync runs in the background; surface failures (e.g. expired Cloudflare
     // auth) instead of swallowing them, so a silently-broken watch is visible.
     onError: (error) => {
       console.warn(`Pagecast auto-sync failed: ${error?.message || error}`);
     }
   });
+  activeWatchManager = watchManager;
   for (const report of store.listAutoSyncReports()) {
     watchManager.register(report.id);
   }
@@ -6222,19 +6753,25 @@ export async function startServers({
   // `hostForUrl` brackets IPv6 literals (e.g. ::1) so URLs stay well-formed:
   // http://[::1]:4173, not http://::1:4173.
   const urlHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-  const externalUrlHost =
-    urlHost === "127.0.0.1" || urlHost === "::1" ? displayHostname : urlHost;
-  const hostForUrl = externalUrlHost.includes(":") ? `[${externalUrlHost}]` : externalUrlHost;
+  // Keep an explicit IPv6 loopback bind as [::1]. Replacing it with a friendly
+  // alias can resolve back to IPv4 and miss an IPv6-only listener.
+  const externalUrlHost = urlHost === "127.0.0.1" ? displayHostname : urlHost;
+  const internalHostForUrl = urlHost.includes(":") ? `[${urlHost}]` : urlHost;
+  const displayHostForUrl = externalUrlHost.includes(":")
+    ? `[${externalUrlHost}]`
+    : externalUrlHost;
 
   let lastPortError = null;
   for (const [candidateAdminPort, candidatePublicPort] of localPortCandidates(resolvedAdminPort, resolvedPublicPort)) {
-    const publicServer = createServer(createPublicHandler({ store }));
+    const publicServer = serverFactory(createPublicHandler({ store }));
     let actualPublicPort = candidatePublicPort;
     try {
       await listen(publicServer, { host, port: candidatePublicPort });
+      activePublicServer = publicServer;
       actualPublicPort = publicServer.address().port;
     } catch (error) {
-      await closeServer(publicServer).catch(() => {});
+      await serverCloseImpl(publicServer).catch(() => {});
+      activePublicServer = null;
       if (fallbackAllowed && isPortInUse(error)) {
         lastPortError = error;
         continue;
@@ -6242,15 +6779,18 @@ export async function startServers({
       throw error;
     }
 
-    const localPublicBaseUrl = `http://${hostForUrl}:${actualPublicPort}`;
+    const internalPublicUrl = `http://${internalHostForUrl}:${actualPublicPort}`;
+    const displayPublicUrl = `http://${displayHostForUrl}:${actualPublicPort}`;
     let adminBaseUrl = null;
+    let commandBaseUrl = null;
     const tunnelManager = new TunnelManager({
-      localUrl: localPublicBaseUrl,
+      localUrl: internalPublicUrl,
       spawnImpl,
       timeoutMs: tunnelTimeoutMs
     });
+    activeTunnelManager = tunnelManager;
 
-    const adminServer = createServer(
+    const adminServer = serverFactory(
       createAdminHandler({
         store,
         configStore,
@@ -6258,10 +6798,13 @@ export async function startServers({
         pagesPublisher,
         staticDir,
         getAdminBaseUrl: () => adminBaseUrl,
-        getLocalPublicBaseUrl: () => localPublicBaseUrl,
+        getCommandBaseUrl: () => commandBaseUrl,
+        getLocalPublicBaseUrl: () => displayPublicUrl,
         tunnelManager,
         deployQueue,
+        mutationQueue,
         watchManager,
+        commandCapability,
         bindHost: urlHost,
         allowedHosts: [displayHostname]
       })
@@ -6269,8 +6812,21 @@ export async function startServers({
 
     try {
       await listen(adminServer, { host, port: candidateAdminPort });
+      activeAdminServer = adminServer;
     } catch (error) {
-      await closeServer(publicServer).catch(() => {});
+      try {
+        await serverCloseImpl(publicServer);
+      } catch (closeError) {
+        // Keep the listener registered for outer cleanup and retain the
+        // workspace lease if that cleanup also fails. Continuing to another
+        // port pair here would leave two public listeners and an unowned writer.
+        throw new AggregateError(
+          [error, closeError],
+          "The admin port was unavailable and the public listener could not be closed."
+        );
+      }
+      activePublicServer = null;
+      activeTunnelManager = null;
       if (fallbackAllowed && isPortInUse(error)) {
         lastPortError = error;
         continue;
@@ -6279,8 +6835,15 @@ export async function startServers({
     }
 
     const actualAdminPort = adminServer.address().port;
-    const adminUrl = `http://${hostForUrl}:${actualAdminPort}`;
-    adminBaseUrl = adminUrl;
+    const adminUrl = `http://${internalHostForUrl}:${actualAdminPort}`;
+    const displayAdminUrl = `http://${displayHostForUrl}:${actualAdminPort}`;
+    adminBaseUrl = displayAdminUrl;
+    commandBaseUrl = adminUrl;
+    // Node clients and one-shot adapters must never depend on a friendly alias
+    // being present in the host resolver (pagecast.localhost is not resolved by
+    // Node on every supported OS). The runtime descriptor is machine transport,
+    // while displayAdminUrl is the browser-facing address.
+    await workspaceLease.updateRuntime({ adminUrl });
     if (fallbackAllowed) {
       await configStore.setLocalRuntime({
         hostname: displayHostname,
@@ -6289,6 +6852,7 @@ export async function startServers({
       });
     }
 
+    let closePromise = null;
     return {
       adminServer,
       publicServer,
@@ -6298,18 +6862,88 @@ export async function startServers({
       pagesPublisher,
       tunnelManager,
       deployQueue,
+      mutationQueue,
       watchManager,
+      commandCapability,
+      workspaceLease,
       adminUrl,
-      publicUrl: localPublicBaseUrl,
-      async close() {
-        watchManager.closeAll();
-        await tunnelManager.stop();
-        await Promise.all([closeServer(adminServer), closeServer(publicServer)]);
+      publicUrl: internalPublicUrl,
+      displayAdminUrl,
+      displayPublicUrl,
+      close() {
+        closePromise ||= (async () => {
+          const errors = [];
+          try {
+            watchManager.closeAll();
+          } catch (error) {
+            errors.push(error);
+          }
+          const closingServers = closeListeningServers(
+            [adminServer, publicServer],
+            serverCloseImpl
+          );
+          try {
+            await tunnelManager.stop();
+          } catch (error) {
+            errors.push(error);
+          }
+          const serverErrors = await closingServers;
+          errors.push(...serverErrors);
+          await mutationQueue.drain();
+          await deployQueue.drain();
+          if (serverErrors.length === 0) {
+            activeAdminServer = null;
+            activePublicServer = null;
+            activeTunnelManager = null;
+            activeWatchManager = null;
+            activeDeployQueue = null;
+            activeMutationQueue = null;
+            try {
+              await workspaceLease.release();
+            } catch (error) {
+              errors.push(error);
+            }
+          }
+          if (errors.length > 0) {
+            throw new AggregateError(errors, "Pagecast did not shut down cleanly.");
+          }
+        })();
+        return closePromise;
       }
     };
   }
 
-  throw lastPortError || appError("Could not find an available local Pagecast port.", 500);
+    throw lastPortError || appError("Could not find an available local Pagecast port.", 500);
+  } catch (error) {
+    const cleanupErrors = [];
+    try {
+      activeWatchManager?.closeAll();
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    try {
+      await activeTunnelManager?.stop();
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    const serverErrors = await closeListeningServers(
+      [activeAdminServer, activePublicServer],
+      serverCloseImpl
+    );
+    cleanupErrors.push(...serverErrors);
+    await activeMutationQueue?.drain();
+    await activeDeployQueue?.drain();
+    if (serverErrors.length === 0) {
+      await workspaceLease.release().catch((cleanupError) => cleanupErrors.push(cleanupError));
+    }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        "Pagecast startup failed and cleanup was incomplete."
+      );
+    }
+    throw error;
+  }
 }
 
 async function createHeadlessCloudflareContext({
@@ -6323,6 +6957,11 @@ async function createHeadlessCloudflareContext({
 } = {}) {
   const configStore = createConfigStore({ dataDir });
   await configStore.init();
+  if (store) {
+    for (const projectRef of store.listProjectRefs()) {
+      await configStore.claimManagedTarget(projectRef);
+    }
+  }
   const cloudflareAuth = createCloudflareAuthManager({
     spawnImpl: cloudflareAuthSpawnImpl,
     listTimeoutMs: cloudflareListTimeoutMs
@@ -6339,11 +6978,46 @@ async function createHeadlessCloudflareContext({
     // A store is passed whenever the caller deploys the /p/ site, so a headless
     // re-deploy regenerates (rather than wipes) the edge gate for protected
     // reports. Site-only deploys (deploySite) pass none and never touch it.
-    getProtectedPublications: store ? () => store.protectedPublicationManifest() : () => [],
+    getRedirects: store ? (pagesConfig) => store.listRedirects(pagesConfig) : () => [],
+    getProtectedPublications: store
+      ? (pagesConfig) => store.protectedPublicationManifest(pagesConfig)
+      : () => [],
+    getPublications: store ? (pagesConfig) => store.listPublications(pagesConfig) : () => [],
     getAuthCookieSecret: () => configStore.get().authCookieSecret,
-    getSyncToken: () => configStore.get().syncSecret
+    getSyncToken: () => configStore.get().syncSecret,
+    getOwnerId: () => configStore.getOwnerId(),
+    isTargetManaged: (projectRef) => configStore.isTargetManaged(projectRef),
+    claimTargetManaged: (projectRef) => configStore.claimManagedTarget(projectRef)
   });
   return { configStore, cloudflareAuth, pagesPublisher };
+}
+
+async function runCoordinatedHeadlessOperation(
+  {
+    dataDir,
+    routeToDaemon = true,
+    command = "",
+    payload = {},
+    commandFetchImpl = fetch
+  },
+  operation
+) {
+  if (routeToDaemon !== false && command) {
+    const routed = await tryInvokeLiveCommand(dataDir, command, payload, {
+      fetchImpl: commandFetchImpl
+    });
+    if (routed !== null) {
+      return routed;
+    }
+  }
+
+  const lease = new WorkspaceLease(dataDir);
+  await lease.acquire({ capability: randomBytes(32).toString("base64url") });
+  try {
+    return await operation();
+  } finally {
+    await lease.release();
+  }
 }
 
 async function applyPagesSelection({ configStore, projectName, accountId, accountName, baseUrl }) {
@@ -6374,6 +7048,7 @@ async function ensureHeadlessPagesTarget({
   baseUrl,
   branch = DEFAULT_PAGES_BRANCH,
   autoCreate = true,
+  adoptExisting = false,
   loginIfNeeded = false
 } = {}) {
   await applyPagesSelection({ configStore, projectName, accountId, accountName, baseUrl });
@@ -6393,6 +7068,7 @@ async function ensureHeadlessPagesTarget({
     cloudflareAuth,
     configStore,
     autoCreate,
+    adoptExisting,
     branch
   });
 
@@ -6409,7 +7085,54 @@ async function ensureHeadlessPagesTarget({
   return target;
 }
 
-export async function setupCloudflarePages({
+export async function setupCloudflarePages(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  return runCoordinatedHeadlessOperation(
+    {
+      dataDir,
+      routeToDaemon: options.routeToDaemon,
+      command: "pages_setup",
+      payload: {
+        projectName: options.projectName,
+        accountId: options.accountId,
+        accountName: options.accountName,
+        baseUrl: options.baseUrl,
+        branch: options.branch
+      },
+      commandFetchImpl: options.commandFetchImpl || fetch
+    },
+    () => setupCloudflarePagesOneShot({ ...options, dataDir })
+  );
+}
+
+async function setupCloudflarePagesWithContext({
+  configStore,
+  cloudflareAuth,
+  projectName,
+  accountId,
+  accountName,
+  baseUrl,
+  branch = DEFAULT_PAGES_BRANCH
+} = {}) {
+  const target = await ensureHeadlessPagesTarget({
+    configStore,
+    cloudflareAuth,
+    projectName,
+    accountId,
+    accountName,
+    baseUrl,
+    branch,
+    autoCreate: true,
+    adoptExisting: true,
+    loginIfNeeded: true
+  });
+  return {
+    config: configStore.getPublicConfig(),
+    cloudflare: target.cloudflare
+  };
+}
+
+async function setupCloudflarePagesOneShot({
   projectName,
   accountId,
   accountName,
@@ -6424,26 +7147,34 @@ export async function setupCloudflarePages({
     cloudflareAuthSpawnImpl,
     cloudflareListTimeoutMs
   });
-  const target = await ensureHeadlessPagesTarget({
+  return setupCloudflarePagesWithContext({
     configStore,
     cloudflareAuth,
     projectName,
     accountId,
     accountName,
     baseUrl,
-    branch,
-    autoCreate: true,
-    loginIfNeeded: true
+    branch
   });
-  return {
-    config: configStore.getPublicConfig(),
-    cloudflare: target.cloudflare
-  };
 }
 
 // Provision the feedback Worker + KV on the user's account and persist the
 // resulting config. Reuses an existing stats token/namespace on re-run.
-export async function setupCloudflareFeedback({
+export async function setupCloudflareFeedback(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  return runCoordinatedHeadlessOperation(
+    {
+      dataDir,
+      routeToDaemon: options.routeToDaemon,
+      command: "feedback_setup",
+      payload: { accountId: options.accountId },
+      commandFetchImpl: options.commandFetchImpl || fetch
+    },
+    () => setupCloudflareFeedbackOneShot({ ...options, dataDir })
+  );
+}
+
+async function setupCloudflareFeedbackOneShot({
   accountId,
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
@@ -6480,7 +7211,20 @@ export async function setupCloudflareFeedback({
   return { config, feedback: config.feedback };
 }
 
-export async function getCloudflarePagesStatus({
+export async function getCloudflarePagesStatus(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  return runCoordinatedHeadlessOperation(
+    {
+      dataDir,
+      routeToDaemon: options.routeToDaemon,
+      command: "pages_status",
+      commandFetchImpl: options.commandFetchImpl || fetch
+    },
+    () => getCloudflarePagesStatusOneShot({ ...options, dataDir })
+  );
+}
+
+async function getCloudflarePagesStatusOneShot({
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
   cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS
@@ -6511,23 +7255,32 @@ export async function getCloudflarePagesStatus({
       accountName,
       accountId: pages.accountId || activeAccount?.id || "",
       projectName: pages.projectName,
-      baseUrl: pages.baseUrl
+      baseUrl: pages.baseUrl,
+      ...targetManagementState(configStore, pages)
     }
   };
 }
 
-export async function listCloudflarePagesProjects({
+export async function listCloudflarePagesProjects(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  return runCoordinatedHeadlessOperation(
+    {
+      dataDir,
+      routeToDaemon: options.routeToDaemon,
+      command: "pages_projects_list",
+      payload: { accountId: options.accountId },
+      commandFetchImpl: options.commandFetchImpl || fetch
+    },
+    () => listCloudflarePagesProjectsOneShot({ ...options, dataDir })
+  );
+}
+
+async function listCloudflarePagesProjectsWithContext({
   accountId,
-  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
-  cloudflareAuthSpawnImpl = spawn,
-  cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS
+  configStore,
+  cloudflareAuth
 } = {}) {
-  const { configStore, cloudflareAuth } = await createHeadlessCloudflareContext({
-    dataDir,
-    cloudflareAuthSpawnImpl,
-    cloudflareListTimeoutMs
-  });
-  const current = await applyPagesSelection({ configStore, accountId });
+  const current = configStore.get();
   const credential = cloudflareCredentialStatus();
   const envAccountId = normalizeAccountIdSafe(process.env.CLOUDFLARE_ACCOUNT_ID);
   let selectedAccountId = normalizeAccountIdSafe(accountId || envAccountId || current.pages.accountId);
@@ -6556,14 +7309,14 @@ export async function listCloudflarePagesProjects({
   return {
     projects,
     accountId: selectedAccountId,
-    selectedProject: chooseWranglerPagesProject(projects, configStore.get().pages)
+    selectedProject: chooseWranglerPagesProject(projects, {
+      ...current.pages,
+      accountId: selectedAccountId
+    })
   };
 }
 
-// Resolve a headless Cloudflare context for deployment-history commands: the
-// configured project + a usable account id, with the same auth/account guards
-// as listCloudflarePagesProjects (401 when signed out, 409 when ambiguous).
-async function resolveHeadlessDeploymentContext({
+async function listCloudflarePagesProjectsOneShot({
   accountId,
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
@@ -6574,7 +7327,15 @@ async function resolveHeadlessDeploymentContext({
     cloudflareAuthSpawnImpl,
     cloudflareListTimeoutMs
   });
-  const current = await applyPagesSelection({ configStore, accountId });
+  return listCloudflarePagesProjectsWithContext({ accountId, configStore, cloudflareAuth });
+}
+
+async function resolveDeploymentContextWithContext({
+  accountId,
+  configStore,
+  cloudflareAuth
+} = {}) {
+  const current = configStore.get();
   const pages = current.pages;
   if (!pages.projectName) {
     throw appError("No Cloudflare Pages project configured. Run `npx pagecast pages setup` first.", 400);
@@ -6602,18 +7363,26 @@ async function resolveHeadlessDeploymentContext({
   return { cloudflareAuth, pages, accountId: selectedAccountId };
 }
 
-export async function listCloudflarePagesDeployments({
+export async function listCloudflarePagesDeployments(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  return runCoordinatedHeadlessOperation(
+    {
+      dataDir,
+      routeToDaemon: options.routeToDaemon,
+      command: "deployments_list",
+      payload: { accountId: options.accountId },
+      commandFetchImpl: options.commandFetchImpl || fetch
+    },
+    () => listCloudflarePagesDeploymentsOneShot({ ...options, dataDir })
+  );
+}
+
+async function listCloudflarePagesDeploymentsWithContext({
   accountId,
-  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
-  cloudflareAuthSpawnImpl = spawn,
-  cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS
+  configStore,
+  cloudflareAuth
 } = {}) {
-  const ctx = await resolveHeadlessDeploymentContext({
-    accountId,
-    dataDir,
-    cloudflareAuthSpawnImpl,
-    cloudflareListTimeoutMs
-  });
+  const ctx = await resolveDeploymentContextWithContext({ accountId, configStore, cloudflareAuth });
   const deployments = await ctx.cloudflareAuth.listDeployments({
     projectName: ctx.pages.projectName,
     accountId: ctx.accountId
@@ -6625,24 +7394,46 @@ export async function listCloudflarePagesDeployments({
   };
 }
 
-export async function deleteCloudflarePagesDeployment({
-  id,
-  force = false,
+async function listCloudflarePagesDeploymentsOneShot({
   accountId,
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
   cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS
 } = {}) {
-  const deployId = String(id || "").trim();
-  if (!deployId) {
-    throw appError("A deployment id is required.", 400);
-  }
-  const ctx = await resolveHeadlessDeploymentContext({
-    accountId,
+  const { configStore, cloudflareAuth } = await createHeadlessCloudflareContext({
     dataDir,
     cloudflareAuthSpawnImpl,
     cloudflareListTimeoutMs
   });
+  return listCloudflarePagesDeploymentsWithContext({ accountId, configStore, cloudflareAuth });
+}
+
+export async function deleteCloudflarePagesDeployment(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  return runCoordinatedHeadlessOperation(
+    {
+      dataDir,
+      routeToDaemon: options.routeToDaemon,
+      command: "deployment_delete",
+      payload: { id: options.id, force: options.force === true, accountId: options.accountId },
+      commandFetchImpl: options.commandFetchImpl || fetch
+    },
+    () => deleteCloudflarePagesDeploymentOneShot({ ...options, dataDir })
+  );
+}
+
+async function deleteCloudflarePagesDeploymentWithContext({
+  id,
+  force = false,
+  accountId,
+  configStore,
+  cloudflareAuth
+} = {}) {
+  const deployId = String(id || "").trim();
+  if (!deployId) {
+    throw appError("A deployment id is required.", 400);
+  }
+  const ctx = await resolveDeploymentContextWithContext({ accountId, configStore, cloudflareAuth });
   const current = flagLiveDeployment(
     await ctx.cloudflareAuth.listDeployments({ projectName: ctx.pages.projectName, accountId: ctx.accountId }),
     { baseUrl: ctx.pages.baseUrl }
@@ -6664,23 +7455,53 @@ export async function deleteCloudflarePagesDeployment({
   return { id: deployId, deleted: true };
 }
 
-export async function pruneCloudflarePagesDeployments({
-  keep,
+async function deleteCloudflarePagesDeploymentOneShot({
+  id,
+  force = false,
   accountId,
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
   cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS
 } = {}) {
-  const keepCount = Number(keep);
-  if (!Number.isInteger(keepCount) || keepCount < 1) {
-    throw appError("`keep` must be an integer of at least 1.", 400);
-  }
-  const ctx = await resolveHeadlessDeploymentContext({
-    accountId,
+  const { configStore, cloudflareAuth } = await createHeadlessCloudflareContext({
     dataDir,
     cloudflareAuthSpawnImpl,
     cloudflareListTimeoutMs
   });
+  return deleteCloudflarePagesDeploymentWithContext({
+    id,
+    force,
+    accountId,
+    configStore,
+    cloudflareAuth
+  });
+}
+
+export async function pruneCloudflarePagesDeployments(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  return runCoordinatedHeadlessOperation(
+    {
+      dataDir,
+      routeToDaemon: options.routeToDaemon,
+      command: "deployments_prune",
+      payload: { keep: options.keep, accountId: options.accountId },
+      commandFetchImpl: options.commandFetchImpl || fetch
+    },
+    () => pruneCloudflarePagesDeploymentsOneShot({ ...options, dataDir })
+  );
+}
+
+async function pruneCloudflarePagesDeploymentsWithContext({
+  keep,
+  accountId,
+  configStore,
+  cloudflareAuth
+} = {}) {
+  const keepCount = Number(keep);
+  if (!Number.isInteger(keepCount) || keepCount < 1) {
+    throw appError("`keep` must be an integer of at least 1.", 400);
+  }
+  const ctx = await resolveDeploymentContextWithContext({ accountId, configStore, cloudflareAuth });
   const flagged = flagLiveDeployment(
     await ctx.cloudflareAuth.listDeployments({ projectName: ctx.pages.projectName, accountId: ctx.accountId }),
     { baseUrl: ctx.pages.baseUrl }
@@ -6705,43 +7526,109 @@ export async function pruneCloudflarePagesDeployments({
   return { pruned: deleted.length, kept: keepCount, deleted, failed };
 }
 
-export async function deployCloudflarePagesSite({
+async function pruneCloudflarePagesDeploymentsOneShot({
+  keep,
+  accountId,
+  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
+  cloudflareAuthSpawnImpl = spawn,
+  cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS
+} = {}) {
+  const { configStore, cloudflareAuth } = await createHeadlessCloudflareContext({
+    dataDir,
+    cloudflareAuthSpawnImpl,
+    cloudflareListTimeoutMs
+  });
+  return pruneCloudflarePagesDeploymentsWithContext({
+    keep,
+    accountId,
+    configStore,
+    cloudflareAuth
+  });
+}
+
+export async function deployCloudflarePagesSite(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  return runCoordinatedHeadlessOperation(
+    {
+      dataDir,
+      routeToDaemon: options.routeToDaemon,
+      command: "pages_deploy_site",
+      payload: {
+        sourceDir: options.sourceDir,
+        projectName: options.projectName,
+        accountId: options.accountId,
+        accountName: options.accountName,
+        baseUrl: options.baseUrl,
+        branch: options.branch
+      },
+      commandFetchImpl: options.commandFetchImpl || fetch
+    },
+    () => deployCloudflarePagesSiteOneShot({ ...options, dataDir })
+  );
+}
+
+async function deployCloudflarePagesSiteWithContext({
   sourceDir,
   projectName,
   accountId,
   accountName,
   baseUrl,
   branch = DEFAULT_PAGES_BRANCH,
-  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
-  cloudflareAuthSpawnImpl = spawn,
-  pagesDeploySpawnImpl = spawn,
-  cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
-  pagesDeployTimeoutMs = 180000
+  cloudflareAuth,
+  pagesPublisher
 } = {}) {
   if (!projectName) {
     throw appError("Provide --project for direct Pages site deploys.", 400);
   }
   const normalizedBranch = normalizePagesBranch(branch);
   const normalizedSourceDir = await normalizeLocalFolderPath(sourceDir);
-  const { configStore, cloudflareAuth, pagesPublisher } = await createHeadlessCloudflareContext({
-    dataDir,
-    cloudflareAuthSpawnImpl,
-    pagesDeploySpawnImpl,
-    cloudflareListTimeoutMs,
-    pagesDeployTimeoutMs
-  });
-  await ensureHeadlessPagesTarget({
-    configStore,
-    cloudflareAuth,
-    projectName,
-    accountId,
-    accountName,
-    baseUrl,
-    branch: normalizedBranch,
-    autoCreate: true,
-    loginIfNeeded: false
-  });
-  const pagesConfig = configStore.get().pages;
+  const normalizedProjectName = normalizePagesProjectName(projectName);
+  const credential = cloudflareCredentialStatus();
+  const envAccountId = normalizeAccountIdSafe(process.env.CLOUDFLARE_ACCOUNT_ID);
+  let selectedAccountId = normalizeAccountIdSafe(accountId || envAccountId);
+  let selectedAccountName = normalizeAccountName(accountName || "");
+  if (!credential.tokenConfigured) {
+    const session = await cloudflareAuth.refreshSession();
+    if (!session.loggedIn) {
+      throw appError(cloudflareAuthRequiredMessage(), 401);
+    }
+    if (!selectedAccountId && session.accounts.length === 1) {
+      selectedAccountId = session.accounts[0].id;
+      selectedAccountName = normalizeAccountName(session.accounts[0].name || selectedAccountName);
+    }
+    if (!selectedAccountId && session.accounts.length > 1) {
+      throw appError("Multiple Cloudflare accounts found. Re-run with `--account <account-id>`.", 409);
+    }
+  }
+  if (!selectedAccountId) {
+    throw appError("Direct Pages deploy requires an explicit Cloudflare account ID.", 400);
+  }
+  let projects = await cloudflareAuth.listProjects({ accountId: selectedAccountId });
+  let project = projects.find(
+    (entry) =>
+      entry.name === normalizedProjectName &&
+      (!entry.accountId || entry.accountId === selectedAccountId)
+  );
+  if (!project) {
+    await cloudflareAuth.ensureProject({
+      projectName: normalizedProjectName,
+      accountId: selectedAccountId,
+      branch: normalizedBranch
+    });
+    projects = await cloudflareAuth.listProjects({ accountId: selectedAccountId });
+    project = projects.find(
+      (entry) =>
+        entry.name === normalizedProjectName &&
+        (!entry.accountId || entry.accountId === selectedAccountId)
+    );
+  }
+  const pagesConfig = {
+    projectName: normalizedProjectName,
+    accountId: selectedAccountId,
+    accountName: selectedAccountName || normalizeAccountName(project?.accountName || ""),
+    baseUrl: normalizePagesBaseUrl(baseUrl || project?.baseUrl, normalizedProjectName),
+    branch: normalizedBranch
+  };
   const deployment = await pagesPublisher.deploySite({
     sourceDir: normalizedSourceDir,
     pagesConfig,
@@ -6759,12 +7646,72 @@ export async function deployCloudflarePagesSite({
   };
 }
 
+async function deployCloudflarePagesSiteOneShot({
+  sourceDir,
+  projectName,
+  accountId,
+  accountName,
+  baseUrl,
+  branch = DEFAULT_PAGES_BRANCH,
+  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
+  cloudflareAuthSpawnImpl = spawn,
+  pagesDeploySpawnImpl = spawn,
+  cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
+  pagesDeployTimeoutMs = 180000
+} = {}) {
+  const { cloudflareAuth, pagesPublisher } = await createHeadlessCloudflareContext({
+    dataDir,
+    cloudflareAuthSpawnImpl,
+    pagesDeploySpawnImpl,
+    cloudflareListTimeoutMs,
+    pagesDeployTimeoutMs
+  });
+  return deployCloudflarePagesSiteWithContext({
+    sourceDir,
+    projectName,
+    accountId,
+    accountName,
+    baseUrl,
+    branch,
+    cloudflareAuth,
+    pagesPublisher
+  });
+}
+
 // Headless one-shot snapshot publish for the CLI / agent skill. Reuses the same
 // store, config, auth, and publisher wiring as the server, auto-provisioning the
 // Cloudflare account and Pages project, and returns the public URL. Throws a
 // structured (statusCode-bearing) error when the user is not signed in, so the
 // caller can turn it into clear guidance instead of a stack trace.
-export async function publishReportSnapshot({
+export async function publishReportSnapshot(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  if (options.routeToDaemon !== false) {
+    const routed = await tryInvokeLiveCommand(
+      dataDir,
+      "publish_report",
+      {
+        path: options.path,
+        label: options.label,
+        password: options.password,
+        disableProtection: options.disableProtection === true,
+        expires: options.expires
+      },
+      { fetchImpl: options.commandFetchImpl || fetch }
+    );
+    if (routed !== null) {
+      return routed;
+    }
+  }
+  const lease = new WorkspaceLease(dataDir);
+  await lease.acquire({ capability: randomBytes(32).toString("base64url") });
+  try {
+    return await publishReportSnapshotOneShot({ ...options, dataDir });
+  } finally {
+    await lease.release();
+  }
+}
+
+async function publishReportSnapshotOneShot({
   path: reportPath,
   label,
   password,
@@ -6814,9 +7761,24 @@ export async function publishReportSnapshot({
   // --password sets/replaces protection; --no-password removes it. Otherwise any
   // existing protection on a reused report is left untouched.
   if (typeof password === "string" && password.trim()) {
-    await store.setPasswordProtection(report.id, { enabled: true, password });
+    await updateReportPasswordProtection({
+      store,
+      configStore,
+      pagesPublisher,
+      deployQueue: null,
+      reportId: report.id,
+      enabled: true,
+      password
+    });
   } else if (disableProtection) {
-    await store.setPasswordProtection(report.id, { enabled: false });
+    await updateReportPasswordProtection({
+      store,
+      configStore,
+      pagesPublisher,
+      deployQueue: null,
+      reportId: report.id,
+      enabled: false
+    });
   }
 
   const draft = store.draftPublication(report.id, {
@@ -6824,32 +7786,57 @@ export async function publishReportSnapshot({
     kind: "snapshot",
     expiresAt: resolveExpiresAt({ expires, defaultExpiry: configStore.get().defaultExpiry })
   });
-  // A snapshot that's password-protected OR expiring needs an edge gate, whose
-  // manifest is built from COMMITTED snapshots — so commit before the first
-  // deploy (no window where the page is served ungated). Revoke on deploy
-  // failure so we don't leave a dangling active publication with no URL.
-  if (store.get(report.id).passwordProtected || draft.publication.expiresAt) {
+  const gated = Boolean(store.get(report.id).passwordProtected || draft.publication.expiresAt);
+  const pagesConfig = configStore.get().pages;
+  rememberPublicationPagesTarget(draft.publication, pagesConfig);
+  const operation = {
+    type: "publish",
+    token: draft.publication.token,
+    slug: draft.publication.slug || draft.publication.token,
+    projectRef: pagesConfig,
+    reportId: report.id,
+    publication: structuredClone(draft.publication),
+    remoteSucceeded: false
+  };
+  await store.beginOperations([operation]);
+  if (gated) {
     await store.commitPublication(report.id, draft.publication);
-    try {
-      rememberPublicationPagesTarget(draft.publication, configStore.get().pages);
-      draft.publication.publicUrl = await pagesPublisher.syncPublication({
-        report: store.get(report.id),
-        publication: draft.publication,
-        pagesConfig: configStore.get().pages
-      });
-    } catch (error) {
-      await store.revokePublication(draft.publication.token).catch(() => {});
-      throw error;
-    }
-    await store.syncSnapshot(draft.publication.token);
-  } else {
-    rememberPublicationPagesTarget(draft.publication, configStore.get().pages);
-    draft.publication.publicUrl = await pagesPublisher.publish({
-      report: draft.report,
+  }
+  try {
+    draft.publication.publicUrl = await (gated
+      ? pagesPublisher.syncPublication
+      : pagesPublisher.publish)({
+      report: store.get(report.id),
       publication: draft.publication,
-      pagesConfig: configStore.get().pages
+      pagesConfig
     });
-    await store.commitPublication(report.id, draft.publication);
+    await store.beginOperations([
+      {
+        ...operation,
+        publication: structuredClone(draft.publication),
+        publicUrl: draft.publication.publicUrl,
+        remoteSucceeded: true
+      }
+    ]);
+    await persistActualPublicationOrigin(draft.publication, configStore);
+    draft.publication.pending = false;
+    if (gated) {
+      await store.syncSnapshot(draft.publication.token);
+    } else {
+      await store.commitPublication(report.id, draft.publication);
+    }
+    await store.clearOperation("publish", draft.publication.token);
+  } catch (error) {
+    await store
+      .recordOperationFailure({
+        type: "publish",
+        token: operation.token,
+        slug: operation.slug,
+        projectRef: pagesConfig,
+        error
+      })
+      .catch(() => {});
+    throw error;
   }
 
   return {
@@ -6859,11 +7846,38 @@ export async function publishReportSnapshot({
     projectName: configStore.get().pages.projectName,
     reportId: report.id,
     passwordProtected: store.get(report.id).passwordProtected === true,
+    linkKind: classifyLinkKind({
+      slug: draft.publication.slug || draft.publication.token,
+      drop: draft.publication.drop === true,
+      passwordProtected: store.get(report.id).passwordProtected === true
+    }),
     expiresAt: draft.publication.expiresAt || null
   };
 }
 
-export async function revokeReportPublication({
+export async function revokeReportPublication(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  if (options.routeToDaemon !== false) {
+    const routed = await tryInvokeLiveCommand(
+      dataDir,
+      "revoke_publication",
+      { token: options.token },
+      { fetchImpl: options.commandFetchImpl || fetch }
+    );
+    if (routed !== null) {
+      return routed;
+    }
+  }
+  const lease = new WorkspaceLease(dataDir);
+  await lease.acquire({ capability: randomBytes(32).toString("base64url") });
+  try {
+    return await revokeReportPublicationOneShot({ ...options, dataDir });
+  } finally {
+    await lease.release();
+  }
+}
+
+async function revokeReportPublicationOneShot({
   token,
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
@@ -6900,24 +7914,356 @@ export async function revokeReportPublication({
       }
     }
     const pagesConfig = pagesConfigForPublication(existing.publication, configStore.get().pages);
-    await pagesPublisher.revoke(
-      [existing.publication.slug || existing.publication.token],
-      pagesConfig
-    );
+    const slug = existing.publication.slug || existing.publication.token;
+    await store.beginOperations([
+      { type: "revoke", token: publicationToken, slug, projectRef: pagesConfig }
+    ]);
+    try {
+      await pagesPublisher.revoke([slug], pagesConfig);
+      await store.commitSuccessfulRevoke(publicationToken);
+    } catch (error) {
+      await store.recordOperationFailure({
+        type: "revoke",
+        token: publicationToken,
+        slug,
+        projectRef: pagesConfig,
+        error
+      });
+      throw error;
+    }
   }
 
-  const { report, publication } = await store.revokePublication(publicationToken);
+  // This is also the retry path for a remotely-revoked publication whose later
+  // local cleanup failed. The atomic helper clears any stale revoke journal even
+  // when revokedAt is already present.
+  const { report, publication } = await store.commitSuccessfulRevoke(publicationToken);
   return {
     report: store.formatReport(report, {}),
-    publication: store.formatPublication(publication, {})
+    publication: store.formatPublication(publication, {
+      passwordProtected: report.passwordProtected === true
+    })
   };
+}
+
+async function runPublicationMutation(deployQueue, mutation) {
+  return deployQueue ? deployQueue.enqueue(mutation) : mutation();
+}
+
+async function publishGoalWithContext({
+  file,
+  requestedSlug = "goal",
+  dataDir,
+  store,
+  configStore,
+  pagesPublisher,
+  deployQueue = null
+}) {
+  const absFile = path.resolve(file);
+  const goalSrcDir = path.join(dataDir, "goal-src");
+  const isHtml = /\.html?$/i.test(absFile);
+  const entryName = isHtml ? "index.html" : "goal.md";
+  const stagedSource = path.join(goalSrcDir, entryName);
+  await fs.rm(goalSrcDir, { recursive: true, force: true });
+  await fs.mkdir(goalSrcDir, { recursive: true });
+  await fs.copyFile(absFile, stagedSource);
+
+  const existing = configStore.get().goal;
+  if (existing?.token) {
+    const match = store.findActivePublication(existing.token);
+    if (match && match.publication.kind === "snapshot") {
+      const pagesConfig = pagesConfigForPublication(
+        match.publication,
+        configStore.get().pages
+      );
+      await store.beginOperations([
+        {
+          type: "goal_sync",
+          token: existing.token,
+          slug: match.publication.slug || match.publication.token,
+          projectRef: pagesConfig,
+          reportId: match.report.id,
+          goalFile: absFile
+        }
+      ]);
+      try {
+        const url = await runPublicationMutation(deployQueue, () =>
+          pagesPublisher.syncPublication({
+            report: match.report,
+            publication: match.publication,
+            pagesConfig
+          })
+        );
+        match.publication.publicUrl = url;
+        await persistActualPublicationOrigin(match.publication, configStore);
+        await store.syncSnapshot(existing.token);
+        const next = await configStore.setGoal({
+          ...existing,
+          url,
+          file: absFile,
+          expiresAt: null,
+          updatedAt: nowIso()
+        });
+        await store.clearOperation("goal_sync", existing.token);
+        return {
+          url,
+          slug: next.goal.slug,
+          token: existing.token,
+          started: false,
+          recreated: false,
+          linkKind: classifyLinkKind({
+            slug: match.publication.slug || match.publication.token,
+            drop: match.publication.drop === true,
+            passwordProtected: match.report.passwordProtected === true
+          }),
+          expiresAt: null
+        };
+      } catch (error) {
+        await store
+          .recordOperationFailure({
+            type: "goal_sync",
+            token: existing.token,
+            slug: match.publication.slug || match.publication.token,
+            projectRef: pagesConfig,
+            error
+          })
+          .catch(() => {});
+        throw error;
+      }
+    }
+  }
+
+  const report = await store.addPath(stagedSource);
+  const draft = store.draftPublication(report.id, { label: "goal", kind: "snapshot" });
+  const pagesConfig = configStore.get().pages;
+  rememberPublicationPagesTarget(draft.publication, pagesConfig);
+  const publishOperation = {
+    type: "publish",
+    token: draft.publication.token,
+    slug: draft.publication.slug || draft.publication.token,
+    projectRef: pagesConfig,
+    reportId: report.id,
+    publication: structuredClone(draft.publication),
+    remoteSucceeded: false
+  };
+  await store.beginOperations([publishOperation]);
+  let url;
+  try {
+    url = await runPublicationMutation(deployQueue, () =>
+      pagesPublisher.publish({
+        report: draft.report,
+        publication: draft.publication,
+        pagesConfig
+      })
+    );
+    draft.publication.publicUrl = url;
+    await store.beginOperations([
+      {
+        ...publishOperation,
+        publication: structuredClone(draft.publication),
+        publicUrl: url,
+        remoteSucceeded: true
+      }
+    ]);
+    await persistActualPublicationOrigin(draft.publication, configStore);
+    draft.publication.pending = false;
+    await store.commitPublication(report.id, draft.publication);
+    await store.clearOperation("publish", draft.publication.token);
+  } catch (error) {
+    await store
+      .recordOperationFailure({
+        type: "publish",
+        token: publishOperation.token,
+        slug: publishOperation.slug,
+        projectRef: pagesConfig,
+        error
+      })
+      .catch(() => {});
+    throw error;
+  }
+
+  let slug = draft.publication.token;
+  let rename = null;
+  const previous = {
+    slug: draft.publication.slug || draft.publication.token,
+    drop: draft.publication.drop === true,
+    publicUrl: url,
+    publicationUpdatedAt: draft.publication.updatedAt,
+    reportUpdatedAt: draft.report.updatedAt,
+    redirects: store.listRedirects()
+  };
+  try {
+    rename = await store.renameSlug(draft.publication.token, requestedSlug);
+  } catch (error) {
+    if (error.statusCode !== 400 && error.statusCode !== 409) {
+      throw error;
+    }
+  }
+  if (rename && rename.oldSlug !== rename.newSlug) {
+    const renameOperation = {
+      type: "rename",
+      token: draft.publication.token,
+      slug: rename.newSlug,
+      projectRef: pagesConfig,
+      previousSlug: rename.oldSlug,
+      reportId: report.id
+    };
+    await store.beginOperations([renameOperation]);
+    try {
+      url = await runPublicationMutation(deployQueue, () =>
+        pagesPublisher.renamePublication({
+          oldSlug: rename.oldSlug,
+          newSlug: rename.newSlug,
+          report: draft.report,
+          publication: draft.publication,
+          pagesConfig
+        })
+      );
+      draft.publication.publicUrl = url;
+      await persistActualPublicationOrigin(draft.publication, configStore);
+      await store.syncSnapshot(draft.publication.token);
+      await store.clearOperation("rename", draft.publication.token);
+      slug = rename.newSlug;
+    } catch (error) {
+      await store
+        .recordOperationFailure({ ...renameOperation, error })
+        .catch(() => {});
+      if (error?.remoteSucceeded) {
+        throw error;
+      }
+      await store.restorePublicationSlug(draft.publication.token, previous).catch(() => {});
+      let revokeCommitted = false;
+      try {
+        await store.beginOperations([
+          {
+            type: "revoke",
+            token: draft.publication.token,
+            slug: previous.slug,
+            projectRef: pagesConfig
+          }
+        ]);
+        await runPublicationMutation(deployQueue, () =>
+          pagesPublisher.revoke([previous.slug], pagesConfig)
+        );
+        await store.commitSuccessfulRevoke(draft.publication.token);
+        await store.clearOperation("rename", draft.publication.token);
+        revokeCommitted = true;
+        await store.remove(report.id);
+      } catch (cleanupError) {
+        // Only a failed/uncertain revoke needs a retry journal and recovery goal.
+        // If revoke already committed, a later report-removal failure leaves a
+        // visible revoked report that can be deleted normally; recording another
+        // revoke would create a dead-link journal entry that cannot help cleanup.
+        if (!revokeCommitted) {
+          await store.recordOperationFailure({
+            type: "revoke",
+            token: draft.publication.token,
+            slug: previous.slug,
+            projectRef: pagesConfig,
+            error: cleanupError
+          });
+          const startedAt = existing?.startedAt || nowIso();
+          await configStore.setGoal({
+            token: draft.publication.token,
+            slug: previous.slug,
+            url: previous.publicUrl,
+            file: absFile,
+            startedAt,
+            updatedAt: nowIso()
+          });
+        }
+      }
+      throw error;
+    }
+  }
+
+  const startedAt = existing?.startedAt || nowIso();
+  await configStore.setGoal({
+    token: draft.publication.token,
+    slug,
+    url,
+    file: absFile,
+    expiresAt: null,
+    startedAt,
+    updatedAt: nowIso()
+  });
+  return {
+    url,
+    slug,
+    token: draft.publication.token,
+    started: true,
+    recreated: Boolean(existing?.token),
+    linkKind: classifyLinkKind({
+      slug,
+      drop: draft.publication.drop === true,
+      passwordProtected: draft.report.passwordProtected === true
+    }),
+    expiresAt: null
+  };
+}
+
+async function stopGoalWithContext({ store, configStore, pagesPublisher, deployQueue = null }) {
+  const goal = configStore.get().goal;
+  if (!goal?.token) {
+    return { stopped: false, url: null };
+  }
+  const match = store.findActivePublication(goal.token);
+  if (match) {
+    const pagesConfig = pagesConfigForPublication(match.publication, configStore.get().pages);
+    await store.beginOperations([
+      {
+        type: "revoke",
+        token: goal.token,
+        slug: goal.slug || goal.token,
+        projectRef: pagesConfig
+      }
+    ]);
+    try {
+      await runPublicationMutation(deployQueue, () =>
+        pagesPublisher.revoke([goal.slug || goal.token], pagesConfig)
+      );
+      await store.commitSuccessfulRevoke(goal.token);
+    } catch (error) {
+      await store.recordOperationFailure({
+        type: "revoke",
+        token: goal.token,
+        slug: goal.slug || goal.token,
+        projectRef: pagesConfig,
+        error
+      });
+      throw error;
+    }
+  }
+  await configStore.setGoal(null);
+  return { stopped: true, url: goal.url };
 }
 
 // Publish (or update in place) the live goal-progress page. Idempotent: the first
 // call publishes <file> and records it in config.goal; later calls re-sync the
 // SAME slug/URL with the file's new content (never minting a new link). Stop with
 // stopGoalProgress. Designed for headless agent use (`npx pagecast goal publish`).
-export async function publishGoalProgress({
+export async function publishGoalProgress(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  if (options.routeToDaemon !== false) {
+    const routed = await tryInvokeLiveCommand(
+      dataDir,
+      "goal_publish",
+      { file: options.file, slug: options.slug || "goal" },
+      { fetchImpl: options.commandFetchImpl || fetch }
+    );
+    if (routed !== null) {
+      return routed;
+    }
+  }
+  const lease = new WorkspaceLease(dataDir);
+  await lease.acquire({ capability: randomBytes(32).toString("base64url") });
+  try {
+    return await publishGoalProgressOneShot({ ...options, dataDir });
+  } finally {
+    await lease.release();
+  }
+}
+
+async function publishGoalProgressOneShot({
   file,
   slug: requestedSlug = "goal",
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
@@ -6929,8 +8275,6 @@ export async function publishGoalProgress({
   if (!file) {
     throw appError("Provide a path to the goal-progress file.", 400);
   }
-  const absFile = path.resolve(file);
-
   const store = createReportStore({ dataDir });
   await store.init();
   const { configStore, cloudflareAuth, pagesPublisher } = await createHeadlessCloudflareContext({
@@ -6960,100 +8304,57 @@ export async function publishGoalProgress({
     );
   }
 
-  const pagesConfig = () => configStore.get().pages;
-  const existing = configStore.get().goal;
-
-  // Stage the goal page from an ISOLATED copy, never the user's folder: a goal
-  // file written in the project root would otherwise drag every sibling (and
-  // potentially private files) into the published page. We copy just the file
-  // into .pagecast/goal-src/ and publish that.
-  const goalSrcDir = path.join(dataDir, "goal-src");
-  const isHtml = /\.html?$/i.test(absFile);
-  const entryName = isHtml ? "index.html" : "goal.md";
-  const stagedSource = path.join(goalSrcDir, entryName);
-  await fs.rm(goalSrcDir, { recursive: true, force: true });
-  await fs.mkdir(goalSrcDir, { recursive: true });
-  await fs.copyFile(absFile, stagedSource);
-
-  // UPDATE: the recorded goal page is still active — re-sync the same slug/URL.
-  if (existing?.token) {
-    const match = store.findActivePublication(existing.token);
-    if (match && match.publication.kind === "snapshot") {
-      const url = await pagesPublisher.syncPublication({
-        report: match.report,
-        publication: match.publication,
-        pagesConfig: pagesConfig()
-      });
-      await store.syncSnapshot(existing.token);
-      const next = await configStore.setGoal({
-        ...existing,
-        url,
-        file: absFile,
-        updatedAt: nowIso()
-      });
-      return {
-        url,
-        slug: next.goal.slug,
-        token: existing.token,
-        started: false,
-        recreated: false
-      };
-    }
-    // Recorded link was revoked/removed out-of-band — fall through and recreate.
-  }
-
-  // START: publish the isolated copy as a snapshot, then try a vanity slug.
-  const report = await store.addPath(stagedSource);
-  const draft = store.draftPublication(report.id, { label: "goal", kind: "snapshot" });
-  let url = await pagesPublisher.publish({
-    report: draft.report,
-    publication: draft.publication,
-    pagesConfig: pagesConfig()
+  return publishGoalWithContext({
+    file,
+    requestedSlug,
+    dataDir,
+    store,
+    configStore,
+    pagesPublisher
   });
-  await store.commitPublication(report.id, draft.publication);
-
-  let slug = draft.publication.token;
-  try {
-    const { oldSlug, newSlug } = await store.renameSlug(draft.publication.token, requestedSlug);
-    if (oldSlug !== newSlug) {
-      url = await pagesPublisher.renamePublication({
-        oldSlug,
-        newSlug,
-        report: draft.report,
-        publication: draft.publication,
-        pagesConfig: pagesConfig()
-      });
-      slug = newSlug;
-    }
-  } catch {
-    // Vanity slug taken/reserved/invalid — keep the random token slug.
-  }
-
-  const startedAt = existing?.startedAt || nowIso();
-  await configStore.setGoal({
-    token: draft.publication.token,
-    slug,
-    url,
-    file: absFile,
-    startedAt,
-    updatedAt: nowIso()
-  });
-  return {
-    url,
-    slug,
-    token: draft.publication.token,
-    started: true,
-    recreated: Boolean(existing?.token)
-  };
 }
 
-export async function getGoalStatus({ dataDir = path.join(PROJECT_ROOT, ".pagecast") } = {}) {
+export async function getGoalStatus(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  if (options.routeToDaemon !== false) {
+    const routed = await tryInvokeLiveCommand(
+      dataDir,
+      "goal_status",
+      {},
+      { fetchImpl: options.commandFetchImpl || fetch }
+    );
+    if (routed !== null) {
+      return routed;
+    }
+  }
   const configStore = createConfigStore({ dataDir });
-  await configStore.init();
+  await configStore.init({ persist: false });
   return { goal: configStore.get().goal };
 }
 
-export async function stopGoalProgress({
+export async function stopGoalProgress(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  if (options.routeToDaemon !== false) {
+    const routed = await tryInvokeLiveCommand(
+      dataDir,
+      "goal_stop",
+      {},
+      { fetchImpl: options.commandFetchImpl || fetch }
+    );
+    if (routed !== null) {
+      return routed;
+    }
+  }
+  const lease = new WorkspaceLease(dataDir);
+  await lease.acquire({ capability: randomBytes(32).toString("base64url") });
+  try {
+    return await stopGoalProgressOneShot({ ...options, dataDir });
+  } finally {
+    await lease.release();
+  }
+}
+
+async function stopGoalProgressOneShot({
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
   pagesDeploySpawnImpl = spawn,
@@ -7077,20 +8378,18 @@ export async function stopGoalProgress({
   const match = store.findActivePublication(goal.token);
   if (match) {
     const credential = cloudflareCredentialStatus();
-    if (credential.tokenConfigured || (await cloudflareAuth.refreshSession()).loggedIn) {
-      await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
-      await pagesPublisher.revoke([goal.slug || goal.token], configStore.get().pages);
+    if (!credential.tokenConfigured && !(await cloudflareAuth.refreshSession()).loggedIn) {
+      throw appError(cloudflareAuthRequiredMessage(), 401);
     }
-    await store.revokePublication(goal.token);
+    await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
   }
-  await configStore.setGoal(null);
-  return { stopped: true, url: goal.url };
+  return stopGoalWithContext({ store, configStore, pagesPublisher });
 }
 
 async function main() {
   const runtime = await startServers();
-  console.log(`Pagecast admin: ${runtime.adminUrl}`);
-  console.log(`Local published-page server: ${runtime.publicUrl}`);
+  console.log(`Pagecast admin: ${runtime.displayAdminUrl || runtime.adminUrl}`);
+  console.log(`Local published-page server: ${runtime.displayPublicUrl || runtime.publicUrl}`);
   console.log("Press Ctrl-C to stop.");
 
   const shutdown = async () => {
@@ -7101,7 +8400,7 @@ async function main() {
   process.once("SIGTERM", shutdown);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
     console.error(error);
     process.exit(1);

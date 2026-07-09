@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }} / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ["20.19.0", 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up pnpm
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        with:
+          version: 10
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Verify pinned Wrangler runtime
+        run: >-
+          node --input-type=module -e "import { spawnSync } from 'node:child_process'; import { createWranglerInvocation } from './src/platform.js'; const invocation = createWranglerInvocation(['--version'], { env: process.env }); const result = spawnSync(invocation.command, invocation.args, { stdio: 'inherit', shell: process.platform === 'win32' && invocation.command === 'npx' }); process.exit(result.status ?? 1);"
+      - name: Install web dependencies
+        run: pnpm -C web install --frozen-lockfile --ignore-scripts
+      - name: Build, syntax, and type checks
+        run: |
+          pnpm -C web run build
+          npm run check
+          pnpm -C web exec tsc --noEmit
+      - name: Test
+        run: npm test
+
+  artifact:
+    name: Build, package, and container proof
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up pnpm
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        with:
+          version: 10
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
+      - name: Build committed dashboard
+        run: npm run build
+      - name: Reject generated bundle drift
+        run: git diff --exit-code -- public
+      - name: Pack, install, and smoke-test the shipped package
+        shell: bash
+        run: |
+          pack_json="$RUNNER_TEMP/pagecast-pack.json"
+          npm pack --ignore-scripts --json > "$pack_json"
+          package_file="$(node -e 'const fs=require("fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8"))[0].filename)' "$pack_json")"
+          smoke_dir="$(mktemp -d)"
+          npm install --prefix "$smoke_dir" --ignore-scripts --no-audit --no-fund "./$package_file"
+          (cd "$smoke_dir" && node --input-type=module -e 'import("pagecast").then((api) => { if (typeof api.startServers !== "function") process.exit(1) })')
+          "$smoke_dir/node_modules/.bin/pagecast" --help | grep -q "pagecast publish"
+          rm -rf "$smoke_dir" "$package_file"
+      - name: Build container
+        run: docker build --check . && docker build -t pagecast:ci .
+      - name: Verify container uses baked Wrangler offline
+        shell: bash
+        run: |
+          docker run --rm --network none --entrypoint node pagecast:ci --input-type=module -e 'import { spawnSync } from "node:child_process"; import { createWranglerInvocation } from "file:///app/src/platform.js"; const invocation = createWranglerInvocation(["--version"], { env: process.env }); if (invocation.command !== "wrangler") throw new Error(`Expected baked Wrangler, got ${invocation.command}`); const result = spawnSync(invocation.command, invocation.args, { stdio: "inherit" }); process.exit(result.status ?? 1);'

@@ -2,10 +2,11 @@
 import path from "node:path";
 import process from "node:process";
 import { execFile, spawn } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { promises as fs, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createInterface } from "node:readline/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
@@ -38,6 +39,12 @@ import {
   pfRulesTargetPortMatches
 } from "./local-system.js";
 import { startMcpStdioServer } from "./mcp.js";
+import { resolvePathArgument } from "./path-token.js";
+import {
+  WorkspaceLease,
+  readRuntimeDescriptor,
+  tryInvokeLiveCommand
+} from "./state-coordinator.js";
 import { classifyCommand, createReporter, resolveTelemetry } from "./telemetry.js";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -70,24 +77,39 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function isPagecastAdminStatus(value) {
+  return (
+    value?.admin?.ok === true &&
+    value.admin.product === "pagecast" &&
+    value.admin.protocolVersion === 1
+  );
+}
+
 async function dashboardReady(url) {
   try {
     const response = await fetch(`${url}/api/status`, {
       signal: AbortSignal.timeout(750)
     });
-    return response.ok;
+    if (!response.ok) return false;
+    return isPagecastAdminStatus(await response.json());
   } catch {
     return false;
   }
 }
 
-async function waitForDashboard(url, { timeoutMs = 5000 } = {}) {
+export async function waitForDashboard(
+  urlOrResolver,
+  { timeoutMs = 5000, intervalMs = 150, dashboardReadyImpl = dashboardReady } = {}
+) {
+  const resolveUrl =
+    typeof urlOrResolver === "function" ? urlOrResolver : async () => urlOrResolver;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (await dashboardReady(url)) {
+    const currentUrl = await resolveUrl();
+    if (currentUrl && (await dashboardReadyImpl(currentUrl))) {
       return true;
     }
-    await sleep(150);
+    await sleep(intervalMs);
   }
   return false;
 }
@@ -202,13 +224,40 @@ async function fileExists(filePath) {
   }
 }
 
-async function configuredLocalUrls() {
-  const store = createConfigStore({ dataDir });
-  await store.init();
+export async function configuredLocalUrls({
+  workspaceDataDir = dataDir,
+  env = process.env
+} = {}) {
+  const store = createConfigStore({ dataDir: workspaceDataDir });
+  await store.init({ persist: false });
   const { local } = store.get();
+  const runtime = await readRuntimeDescriptor(workspaceDataDir);
+  let runtimeAdminUrl = null;
+  try {
+    runtimeAdminUrl = runtime?.adminUrl ? new URL(runtime.adminUrl) : null;
+  } catch {
+    runtimeAdminUrl = null;
+  }
+  const runtimeHost = runtimeAdminUrl?.hostname.replace(/^\[|\]$/g, "") || "";
+  const configuredBindHost = String(env.HOST || "127.0.0.1").trim();
+  const transportHost =
+    runtimeHost ||
+    (configuredBindHost === "0.0.0.0" || configuredBindHost === "::"
+      ? "127.0.0.1"
+      : configuredBindHost);
+  const transportHostForUrl = transportHost.includes(":")
+    ? `[${transportHost.replace(/^\[|\]$/g, "")}]`
+    : transportHost;
+  const displayHost = runtimeHost && runtimeHost !== "127.0.0.1" ? runtimeHost : local.hostname;
+  const displayHostForUrl = displayHost.includes(":")
+    ? `[${displayHost.replace(/^\[|\]$/g, "")}]`
+    : displayHost;
+  const adminPort = runtimeAdminUrl?.port || local.adminPort;
   return {
-    adminUrl: `http://${local.hostname}:${local.adminPort}`,
-    publicUrl: `http://${local.hostname}:${local.publicPort}`
+    adminUrl: runtime?.adminUrl || `http://${transportHostForUrl}:${local.adminPort}`,
+    publicUrl: `http://${transportHostForUrl}:${local.publicPort}`,
+    displayAdminUrl: `http://${displayHostForUrl}:${adminPort}`,
+    displayPublicUrl: `http://${displayHostForUrl}:${local.publicPort}`
   };
 }
 
@@ -322,9 +371,10 @@ async function portlessLocalUrlInstalled({ targetPort } = {}) {
 
 async function preferredAdminUrl(urls) {
   const adminPort = adminPortFromUrl(urls.adminUrl);
+  const displayAdminUrl = urls.displayAdminUrl || urls.adminUrl;
   return adminPort && (await portlessLocalUrlInstalled({ targetPort: adminPort }))
     ? PORTLESS_LOCAL_URL
-    : urls.adminUrl;
+    : displayAdminUrl;
 }
 
 // First-run notice (stderr, so it never pollutes --json stdout).
@@ -333,7 +383,7 @@ function printTelemetryNotice() {
     [
       "Pagecast collects anonymous usage stats (which command ran, version, OS) to guide development.",
       "No file contents, paths, URLs, or account info are ever sent.",
-      "Opt out anytime: `pagecast telemetry disable`, or set PAGECAST_TELEMETRY=0 / DO_NOT_TRACK=1.",
+      "Telemetry is enabled by your saved preference or PAGECAST_TELEMETRY=1. Disable it anytime with `pagecast telemetry disable`.",
       ""
     ].join("\n")
   );
@@ -344,8 +394,10 @@ function printTelemetryNotice() {
 // telemetry can never break or slow a command.
 async function setupTelemetry() {
   const noop = { record: async () => false, enabled: false };
+  const lease = new WorkspaceLease(dataDir);
   let store;
   try {
+    await lease.acquire({ capability: randomBytes(32).toString("base64url") });
     store = createConfigStore({ dataDir });
     await store.init();
     const cfg = store.get();
@@ -361,6 +413,8 @@ async function setupTelemetry() {
     return createReporter({ enabled: true, version: packageVersion, anonId, env: process.env });
   } catch {
     return noop;
+  } finally {
+    await lease.release().catch(() => {});
   }
 }
 
@@ -376,6 +430,7 @@ const VALUE_FLAGS = new Set([
   "mode",
   "output",
   "password",
+  "path-token",
   "port",
   "project",
   "project-name",
@@ -551,12 +606,18 @@ async function serve(args = []) {
     adminPort: port ? Number(port) : undefined,
     publicPort: publicPort ? Number(publicPort) : undefined
   });
-  const adminUrl = await preferredAdminUrl({ adminUrl: runtime.adminUrl });
+  const displayAdminUrl = runtime.displayAdminUrl || runtime.adminUrl;
+  const adminUrl = await preferredAdminUrl({
+    adminUrl: runtime.adminUrl,
+    displayAdminUrl
+  });
   console.log(`Pagecast admin: ${adminUrl}`);
   if (adminUrl !== runtime.adminUrl) {
     console.log(`Internal admin server: ${runtime.adminUrl}`);
   }
-  console.log(`Local published-page server: ${runtime.publicUrl}`);
+  console.log(
+    `Local published-page server: ${runtime.displayPublicUrl || runtime.publicUrl}`
+  );
   if (parsed.flags.has("no-open")) {
     console.log("Running quietly. Press Ctrl-C to stop.");
   } else {
@@ -608,7 +669,7 @@ async function background(args = []) {
       })}\n`,
       "utf8"
     );
-    const ready = await waitForDashboard(urls.adminUrl);
+    const ready = await waitForDashboard(async () => (await configuredLocalUrls()).adminUrl);
     const refreshed = await configuredLocalUrls();
     const adminUrl = await preferredAdminUrl(refreshed);
     console.log(
@@ -710,7 +771,10 @@ async function installBackgroundService() {
 
   await launchctl(["bootstrap", state.domain, state.plistPath]);
   await launchctl(["kickstart", "-k", state.target], { ignoreError: true });
-  const ready = await waitForDashboard(urls.adminUrl, { timeoutMs: 7000 });
+  const ready = await waitForDashboard(
+    async () => (await configuredLocalUrls()).adminUrl,
+    { timeoutMs: 7000 }
+  );
   console.log(`Persistent service installed: ${state.plistPath}`);
   console.log(
     ready
@@ -754,7 +818,7 @@ async function localUrl(args = []) {
 
 async function installLocalUrl({ yes = false } = {}) {
   const store = createConfigStore({ dataDir });
-  await store.init();
+  await store.init({ persist: false });
   const { local } = store.get();
   if (!yes) {
     const ok = await confirmPrompt(
@@ -843,7 +907,9 @@ async function publish(args) {
   const password = optionValue(parsed, "password");
   const disableProtection = parsed.flags.has("no-password");
   const expires = optionValue(parsed, "expires"); // e.g. 7d, 12h, never (empty = default)
-  const reportPath = parsed.positionals[0];
+  const pathToken = Object.prototype.hasOwnProperty.call(parsed.options, "path-token")
+    ? parsed.options["path-token"]
+    : undefined;
 
   if (passwordProvided && disableProtection) {
     printError({ message: "Use either --password or --no-password, not both.", statusCode: 400 }, json);
@@ -858,6 +924,10 @@ async function publish(args) {
   }
 
   try {
+    const reportPath = resolvePathArgument({
+      positionalPath: parsed.positionals[0],
+      pathToken
+    });
     const result = await publishReportSnapshot({
       path: reportPath,
       label,
@@ -1089,13 +1159,24 @@ async function goal(args) {
 
   try {
     if (subcommand === "publish") {
-      const file = parsed.positionals[0];
+      const pathToken = Object.prototype.hasOwnProperty.call(parsed.options, "path-token")
+        ? parsed.options["path-token"]
+        : undefined;
+      const file = resolvePathArgument({
+        positionalPath: parsed.positionals[0],
+        pathToken
+      });
       const slug = optionValue(parsed, "slug") || "goal";
       const result = await publishGoalProgress({ file, slug, dataDir });
       if (json) {
         console.log(JSON.stringify({ ok: true, ...result }));
       } else {
         console.log(`${result.started ? "Goal page live" : "Goal page updated"}: ${result.url}`);
+        console.log(
+          result.expiresAt
+            ? `Expires: ${new Date(result.expiresAt).toISOString()}`
+            : "Expires: never"
+        );
         if (result.recreated) {
           console.log("(The previous link was gone, so a new URL was created.)");
         }
@@ -1138,16 +1219,38 @@ async function telemetry(args) {
   const [subcommand, ...rest] = args;
   const parsed = parseFlags(rest);
   const json = wantsJson(parsed);
-  const store = createConfigStore({ dataDir });
-  await store.init();
+  const isStatus = !subcommand || subcommand === "status";
+  const isMutation = subcommand === "enable" || subcommand === "disable";
+  if (!isStatus && !isMutation) {
+    console.error(`Unknown telemetry command: ${subcommand}\n`);
+    usage();
+    process.exitCode = 1;
+    return;
+  }
 
-  if (!subcommand || subcommand === "status") {
-    const cfg = store.get();
-    const { enabled, reason } = resolveTelemetry({ configEnabled: cfg.telemetry, env: process.env });
+  const command = isStatus ? "telemetry_status" : "telemetry_set";
+  const payload = isStatus ? {} : { enabled: subcommand === "enable" };
+  let result = await tryInvokeLiveCommand(dataDir, command, payload);
+  if (result === null) {
+    const lease = new WorkspaceLease(dataDir);
+    await lease.acquire({ capability: randomBytes(32).toString("base64url") });
+    try {
+      const store = createConfigStore({ dataDir });
+      await store.init();
+      if (isMutation) {
+        await store.setTelemetry(payload.enabled, { notified: true });
+      }
+      result = { configEnabled: store.get().telemetry };
+    } finally {
+      await lease.release();
+    }
+  }
+
+  const configEnabled = result.configEnabled;
+  const { enabled, reason } = resolveTelemetry({ configEnabled, env: process.env });
+  if (isStatus) {
     if (json) {
-      console.log(
-        JSON.stringify({ ok: true, telemetry: { enabled, reason, configEnabled: cfg.telemetry } })
-      );
+      console.log(JSON.stringify({ ok: true, telemetry: { enabled, reason, configEnabled } }));
     } else {
       console.log(`Telemetry: ${enabled ? "enabled" : "disabled"} (${reason})`);
       console.log(
@@ -1157,29 +1260,16 @@ async function telemetry(args) {
     return;
   }
 
-  if (subcommand === "enable" || subcommand === "disable") {
-    const next = subcommand === "enable";
-    await store.setTelemetry(next);
-    // An explicit choice counts as acknowledging the notice.
-    await store.markTelemetryNotified();
-    // Report the EFFECTIVE state, not just the saved preference: env settings
-    // (DO_NOT_TRACK / PAGECAST_TELEMETRY / CI) can still override it, so a bare
-    // "enabled" could contradict what `telemetry status` reports next.
-    const { enabled, reason } = resolveTelemetry({ configEnabled: next, env: process.env });
-    if (json) {
-      console.log(JSON.stringify({ ok: true, telemetry: { configEnabled: next, enabled, reason } }));
-    } else {
-      console.log(`Telemetry preference saved: ${next ? "enabled" : "disabled"}.`);
-      if (enabled !== next) {
-        console.log(`Effective state: ${enabled ? "enabled" : "disabled"} (${reason} overrides the saved preference).`);
-      }
+  if (json) {
+    console.log(JSON.stringify({ ok: true, telemetry: { configEnabled, enabled, reason } }));
+  } else {
+    console.log(`Telemetry preference saved: ${configEnabled ? "enabled" : "disabled"}.`);
+    if (enabled !== configEnabled) {
+      console.log(
+        `Effective state: ${enabled ? "enabled" : "disabled"} (${reason} overrides the saved preference).`
+      );
     }
-    return;
   }
-
-  console.error(`Unknown telemetry command: ${subcommand}\n`);
-  usage();
-  process.exit(1);
 }
 
 function usage() {
@@ -1195,6 +1285,7 @@ function usage() {
       "  pagecast local-url install|remove|status [--yes]     Manage the no-port local URL redirect (macOS)",
       "  pagecast publish <path> [--password <pw>|--no-password] [--expires <7d|12h|never>] [--json]",
       "                                                        Publish an HTML/Markdown snapshot",
+      "  pagecast publish --path-token <token> [publish options]   Publish an opaque hook-selected path",
       "  pagecast publish site <dir> --project <name> [--json] Deploy a static folder to Pages",
       "  pagecast pages setup [--project <name>] [--json]      Connect and prepare Cloudflare Pages",
       "  pagecast pages status [--json]                        Show Cloudflare Pages configuration",
@@ -1205,7 +1296,8 @@ function usage() {
       "  pagecast pages deployments prune --keep <N> [--yes] [--json]  Keep the N newest, remove the rest",
       "  pagecast feedback setup [--account <id>] [--json]     Set up reactions + view analytics",
       "  pagecast feedback status [--json]                     Show feedback configuration",
-      "  pagecast goal publish <file> [--slug goal] [--json]   Publish/update a live goal-progress page",
+      "  pagecast goal publish <file>|--path-token <token> [--slug goal] [--json]",
+      "                                                        Publish/update a live goal-progress page",
       "  pagecast goal status [--json]                         Show the current goal page",
       "  pagecast goal stop [--json]                           Take the goal page offline",
       "  pagecast mcp [stdio] [--data-dir <dir>]                Run a local stdio MCP server",
@@ -1294,7 +1386,20 @@ async function run() {
   process.exit(1);
 }
 
-run().catch((error) => {
-  console.error(error.message || error);
-  process.exit(1);
-});
+function isDirectInvocation() {
+  if (!process.argv[1]) return false;
+  try {
+    // npm's POSIX bin is a symlink. Compare the real target so normal
+    // `npx pagecast` execution is direct, while importing cli.js stays inert.
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return import.meta.url === pathToFileURL(process.argv[1]).href;
+  }
+}
+
+if (isDirectInvocation()) {
+  run().catch((error) => {
+    console.error(error.message || error);
+    process.exit(1);
+  });
+}

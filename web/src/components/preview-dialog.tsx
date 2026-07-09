@@ -41,6 +41,8 @@ export function PreviewDialog({
             <iframe
               src={src}
               title={`Preview of ${report.name}`}
+              sandbox="allow-downloads allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-same-origin allow-scripts"
+              referrerPolicy="no-referrer"
               className="h-full w-full border-0"
             />
           ) : (

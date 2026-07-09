@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
@@ -21,6 +22,7 @@ import {
   getGoalStatus,
   injectBadge,
   injectFeedbackWidget,
+  assertSafeAdminBind,
   parseKvNamespaceId,
   parseWorkerDevUrl,
   publishGoalProgress,
@@ -44,10 +46,45 @@ import {
   publishReportSnapshot,
   revokeReportPublication,
   setupCloudflarePages,
-  startServers
+  startServers as startPagecastServers
 } from "../src/server.js";
 
 import { markdownToHtml, renderMarkdownBody } from "../src/markdown.js";
+import { PAGECAST_EXTENSION_ID } from "../src/admin-security.js";
+
+// Integration requests use the same private workspace capability as real
+// no-Origin CLI/MCP clients. Security-boundary tests exercise missing/stale
+// credentials explicitly; feature tests should authenticate rather than rely
+// on an unauthenticated test-only server path.
+const nativeFetch = globalThis.fetch;
+const adminCapabilities = new Map();
+const mutationMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+async function startServers(options) {
+  const runtime = await startPagecastServers(options);
+  adminCapabilities.set(new URL(runtime.adminUrl).origin, runtime.commandCapability);
+  return runtime;
+}
+
+async function fetch(input, init = {}) {
+  let url;
+  try {
+    url = new URL(input instanceof Request ? input.url : String(input));
+  } catch {
+    return nativeFetch(input, init);
+  }
+  const capability = adminCapabilities.get(url.origin);
+  const method = String(init.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+  if (!capability || !url.pathname.startsWith("/api/") || !mutationMethods.has(method)) {
+    return nativeFetch(input, init);
+  }
+  const headers = new Headers(input instanceof Request ? input.headers : undefined);
+  new Headers(init.headers || {}).forEach((value, key) => headers.set(key, value));
+  if (!headers.has("Origin") && !headers.has("X-Pagecast-Capability")) {
+    headers.set("X-Pagecast-Capability", capability);
+  }
+  return nativeFetch(input, { ...init, headers });
+}
 
 // Builds a configurable Wrangler fake-spawn that answers whoami, project list,
 // and project create from per-command handlers. Each handler returns
@@ -81,6 +118,24 @@ function makeWranglerFake(handlers) {
 
 async function makeTempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "pagecast-test-"));
+}
+
+async function adoptTestPagesTarget(
+  dataDir,
+  {
+    projectName = "pagecast",
+    accountId = "abcdef0123456789abcdef0123456789",
+    baseUrl = `https://${projectName}.pages.dev`
+  } = {}
+) {
+  const configStore = createConfigStore({ dataDir });
+  await configStore.init();
+  await configStore.updatePages({
+    projectName,
+    accountId,
+    baseUrl,
+    adoptExisting: true
+  });
 }
 
 test("path reports resolve entry and sibling assets with traversal guards", async () => {
@@ -716,7 +771,7 @@ test("Auth manager deletes a deployment, adding --force only when requested", as
   const plain = captured.find((item) => item.args.includes("delete"));
   assert.deepEqual(plain.args, [
     "--yes",
-    "wrangler",
+    "wrangler@4.86.0",
     "pages",
     "deployment",
     "delete",
@@ -801,7 +856,7 @@ test("Deployments API lists, protects the live deploy, deletes, and prunes", asy
     const configResponse = await fetch(`${runtime.adminUrl}/api/config/pages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectName: "pagecasthq", accountId })
+      body: JSON.stringify({ projectName: "pagecasthq", accountId, adoptExisting: true })
     });
     assert.equal(configResponse.status, 200);
 
@@ -942,7 +997,7 @@ test("Cloudflare login runs Wrangler OAuth and saves the detected Pages project"
     assert.deepEqual(capturedCommands.map((item) => item.args), [
       [
         "--yes",
-        "wrangler",
+        "wrangler@4.86.0",
         "login",
         "--scopes",
         "account:read",
@@ -951,7 +1006,7 @@ test("Cloudflare login runs Wrangler OAuth and saves the detected Pages project"
         "--scopes",
         "pages:write"
       ],
-      ["--yes", "wrangler", "pages", "project", "list", "--json"]
+      ["--yes", "wrangler@4.86.0", "pages", "project", "list", "--json"]
     ]);
     assert.equal(data.cloudflare.authenticated, true);
     assert.equal(data.cloudflare.projectCount, 2);
@@ -1023,7 +1078,8 @@ test("Cloudflare project refresh falls back when Wrangler does not support JSON 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         projectName: "pagecast",
-        accountId: "0123456789abcdef0123456789abcdef"
+        accountId: "0123456789abcdef0123456789abcdef",
+        adoptExisting: true
       })
     });
     assert.equal(configResponse.status, 200);
@@ -1038,12 +1094,12 @@ test("Cloudflare project refresh falls back when Wrangler does not support JSON 
     assert.deepEqual(capturedCommands, [
       {
         command: "npx",
-        args: ["--yes", "wrangler", "pages", "project", "list", "--json"],
+        args: ["--yes", "wrangler@4.86.0", "pages", "project", "list", "--json"],
         accountId: "0123456789abcdef0123456789abcdef"
       },
       {
         command: "npx",
-        args: ["--yes", "wrangler", "pages", "project", "list"],
+        args: ["--yes", "wrangler@4.86.0", "pages", "project", "list"],
         accountId: "0123456789abcdef0123456789abcdef"
       }
     ]);
@@ -1102,7 +1158,8 @@ test("snapshot publications deploy to Cloudflare Pages and revoke from the stage
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         projectName: "team-reports",
-        accountId: "0123456789abcdef0123456789abcdef"
+        accountId: "0123456789abcdef0123456789abcdef",
+        adoptExisting: true
       })
     });
     assert.equal(configResponse.status, 200);
@@ -1135,7 +1192,7 @@ test("snapshot publications deploy to Cloudflare Pages and revoke from the stage
     assert.equal(deployCommands[0].command, "npx");
     assert.deepEqual(deployCommands[0].args, [
       "--yes",
-      "wrangler",
+      "wrangler@4.86.0",
       "pages",
       "deploy",
       ".",
@@ -1144,17 +1201,22 @@ test("snapshot publications deploy to Cloudflare Pages and revoke from the stage
       "--branch",
       "main"
     ]);
-    // Deploy runs from inside pages-site (path arg "."), so wrangler finds the
-    // generated functions/ + _routes.json (it resolves them relative to cwd).
-    assert.equal(deployCommands[0].cwd, path.join(dataDir, "pages-site"));
+    // Deploy runs from a fresh target-scoped operation root (path arg "."), so
+    // Wrangler sees a complete desired site without mutating committed state.
+    assert.ok(
+      deployCommands[0].cwd.startsWith(
+        path.join(dataDir, "targets", ".operations", `${TEST_PAGES_ACCOUNT_ID}--team-reports`)
+      )
+    );
     // The account is passed via CLOUDFLARE_ACCOUNT_ID env, not an --account-id
     // flag (which `wrangler pages deploy` does not accept).
     assert.equal(deployCommands[0].accountId, "0123456789abcdef0123456789abcdef");
 
-    const stagedDir = path.join(dataDir, "pages-site", "p", publishData.publication.token);
-    await assert.rejects(() => fs.stat(path.join(dataDir, "pages-site", "index.html")), /ENOENT/);
-    assert.match(await fs.readFile(path.join(dataDir, "pages-site", "404.html"), "utf8"), /Not found/);
-    assert.match(await fs.readFile(path.join(dataDir, "pages-site", "_headers"), "utf8"), /no-store/);
+    const committedSite = managedSiteRoot(dataDir);
+    const stagedDir = path.join(committedSite, "p", publishData.publication.token);
+    await assert.rejects(() => fs.stat(path.join(committedSite, "index.html")), /ENOENT/);
+    assert.match(await fs.readFile(path.join(committedSite, "404.html"), "utf8"), /Not found/);
+    assert.match(await fs.readFile(path.join(committedSite, "_headers"), "utf8"), /no-store/);
     assert.match(await fs.readFile(path.join(stagedDir, "index.html"), "utf8"), /Snapshot/);
     assert.equal(await fs.readFile(path.join(stagedDir, "style.css"), "utf8"), "body { color: blue; }");
     assert.equal(await fs.readFile(path.join(stagedDir, "assets", "data.json"), "utf8"), "{}");
@@ -1206,16 +1268,18 @@ test("draft reports preview locally and only published versions are public", asy
     const addData = await addResponse.json();
     assert.match(addData.report.localUrl, /^http:\/\/pagecast\.localhost:\d+\/preview\/.+\/$/);
     assert.equal(addData.report.publications.length, 0);
+    const displayPreview = new URL(addData.report.localUrl);
+    const internalPreview = new URL(displayPreview.pathname, runtime.publicUrl);
 
-    const reportResponse = await fetch(addData.report.localUrl);
+    const reportResponse = await fetch(internalPreview);
     assert.equal(reportResponse.status, 200);
     assert.match(await reportResponse.text(), /HTTP Report/);
 
-    const assetResponse = await fetch(new URL("style.css", addData.report.localUrl));
+    const assetResponse = await fetch(new URL("style.css", internalPreview));
     assert.equal(assetResponse.status, 200);
     assert.equal(await assetResponse.text(), "body { color: green; }");
 
-    const hiddenResponse = await fetch(new URL(".env", addData.report.localUrl));
+    const hiddenResponse = await fetch(new URL(".env", internalPreview));
     assert.equal(hiddenResponse.status, 403);
 
     const publicDraftResponse = await fetch(`${runtime.publicUrl}/r/${addData.report.id}/`);
@@ -1326,6 +1390,8 @@ test("Cloudflare connect auto-detects one account and auto-creates the Pages pro
     assert.equal(data.cloudflare.selectedProject.name, "pagecast");
     assert.equal(data.config.pages.accountId, "abcdef0123456789abcdef0123456789");
     assert.equal(data.config.pages.accountName, "Personal");
+    assert.equal(data.cloudflare.managed, true);
+    assert.equal(data.cloudflare.requiresAdoption, false);
 
     // The project create command actually ran with the resolved account.
     const createCall = captured.find((item) => item.args.includes("create"));
@@ -1385,6 +1451,8 @@ test("Headless publishReportSnapshot auto-provisions and returns a public URL", 
     return child;
   }
 
+  await adoptTestPagesTarget(dataDir);
+
   const result = await publishReportSnapshot({
     path: reportPath,
     dataDir,
@@ -1396,6 +1464,7 @@ test("Headless publishReportSnapshot auto-provisions and returns a public URL", 
 
   assert.match(result.url, /^https:\/\/pagecast\.pages\.dev\/p\/.+\/$/);
   assert.equal(result.projectName, "pagecast");
+  assert.equal(result.linkKind, "unlisted");
   assert.ok(deployCommands.length >= 1, "expected a Pages deploy");
 });
 
@@ -1535,7 +1604,13 @@ test("Headless Pages site deploy wraps Wrangler with project, branch, and accoun
     pagesDeployTimeoutMs: 1000
   });
 
-  const stagingRoot = path.join(dataDir, "pages-deploy", "pagecasthq");
+  const stagingRoot = path.join(
+    dataDir,
+    "pages-deploy",
+    "direct",
+    `${accountId}--pagecasthq`,
+    "main"
+  );
   assert.equal(result.url, "https://pagecasthq.pages.dev");
   assert.equal(result.deploymentUrl, "https://7a52d6ea.pagecasthq.pages.dev");
   assert.equal(result.projectName, "pagecasthq");
@@ -1546,7 +1621,7 @@ test("Headless Pages site deploy wraps Wrangler with project, branch, and accoun
       command: "npx",
       args: [
         "--yes",
-        "wrangler",
+        "wrangler@4.86.0",
         "pages",
         "deploy",
         ".",
@@ -1649,7 +1724,8 @@ test("Pagecast marketing project refuses publication-only deploys", async () => 
         pagesConfig: {
           projectName: "pagecasthq",
           accountId: "90e4c638bea527f464ec6fa7caebfd4e",
-          baseUrl: "https://pagecasthq.pages.dev"
+          baseUrl: "https://pagecasthq.pages.dev",
+          adoptExisting: true
         }
       }),
     /Refusing to deploy pagecasthq\.pages\.dev without index\.html, og-image\.png/
@@ -1767,7 +1843,7 @@ test("Headless Pages setup logs in and creates the requested Pages project", asy
   assert.equal(createCall.accountId, accountId);
   assert.deepEqual(createCall.args, [
     "--yes",
-    "wrangler",
+    "wrangler@4.86.0",
     "pages",
     "project",
     "create",
@@ -1858,6 +1934,8 @@ test("Publish uses the REAL Cloudflare subdomain from the deploy output (name co
     });
     return child;
   }
+
+  await adoptTestPagesTarget(dataDir);
 
   const result = await publishReportSnapshot({
     path: reportPath,
@@ -2010,6 +2088,24 @@ test("Cloudflare connect detects an existing session when wrangler lacks --json 
     assert.equal(data.cloudflare.authenticated, true);
     assert.equal(data.cloudflare.account.id, "abcdef0123456789abcdef0123456789");
     assert.equal(data.cloudflare.selectedProject.name, "pagecast");
+    assert.equal(data.cloudflare.managed, false);
+    assert.equal(data.cloudflare.requiresAdoption, true);
+
+    const adoptResponse = await fetch(`${runtime.adminUrl}/api/config/pages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectName: data.config.pages.projectName,
+        accountId: data.config.pages.accountId,
+        accountName: data.config.pages.accountName,
+        baseUrl: data.config.pages.baseUrl,
+        adoptExisting: true
+      })
+    });
+    assert.equal(adoptResponse.status, 200);
+    const status = await (await fetch(`${runtime.adminUrl}/api/status`)).json();
+    assert.equal(status.cloudflare.managed, true);
+    assert.equal(status.cloudflare.requiresAdoption, false);
     // The critical regression assertion: no re-login was attempted.
     assert.ok(
       !captured.some((item) => item.args.includes("login")),
@@ -2082,6 +2178,32 @@ test("Cloudflare logout clears selected account and session cache", async () => 
 
 // --- Helpers for the v3 feature tests -------------------------------------
 
+const TEST_PAGES_ACCOUNT_ID = "0123456789abcdef0123456789abcdef";
+
+function managedSiteRoot(
+  dataDir,
+  projectName = "team-reports",
+  accountId = TEST_PAGES_ACCOUNT_ID
+) {
+  return path.join(dataDir, "targets", `${accountId}--${projectName}`, "last-deployed");
+}
+
+function managedSnapshotRoot(
+  dataDir,
+  token,
+  projectName = "team-reports",
+  accountId = TEST_PAGES_ACCOUNT_ID
+) {
+  return path.join(
+    dataDir,
+    "targets",
+    `${accountId}--${projectName}`,
+    "snapshots",
+    `token-${createHash("sha256").update(String(token), "utf8").digest("hex")}`,
+    "content"
+  );
+}
+
 // An instrumented Pages-deploy fake that records every deploy invocation and
 // tracks concurrency so tests can assert that deploys never overlap. `delayMs`
 // keeps each deploy "in flight" long enough for an overlap to be observable if
@@ -2135,7 +2257,8 @@ async function configurePages(adminUrl, projectName = "team-reports") {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       projectName,
-      accountId: "0123456789abcdef0123456789abcdef"
+      accountId: TEST_PAGES_ACCOUNT_ID,
+      adoptExisting: true
     })
   });
   assert.equal(response.status, 200);
@@ -2230,7 +2353,7 @@ test("snapshot sync updates the same URL in place without a new publication", as
     const publication = await publishSnapshot(runtime.adminUrl, report.id);
     assert.equal(state.deployCount, 1);
 
-    const stagedIndex = path.join(dataDir, "pages-site", "p", publication.slug, "index.html");
+    const stagedIndex = path.join(managedSiteRoot(dataDir), "p", publication.slug, "index.html");
     assert.match(await fs.readFile(stagedIndex, "utf8"), /Before sync/);
 
     // Mutate the source, then sync the SAME publication.
@@ -2278,7 +2401,7 @@ test("Cloudflare sync imports missing staged Pages links into the dashboard", as
 
   try {
     await configurePages(runtime.adminUrl);
-    const stagedRoot = path.join(dataDir, "pages-site", "p", "claude-page");
+    const stagedRoot = path.join(managedSiteRoot(dataDir), "p", "claude-page");
     await fs.mkdir(stagedRoot, { recursive: true });
     await fs.writeFile(
       path.join(stagedRoot, "index.html"),
@@ -2439,7 +2562,7 @@ test("Cloudflare sync recovers a public Pages root when no manifest exists", asy
 
   try {
     await configurePages(runtime.adminUrl);
-    const staleRoot = path.join(dataDir, "pages-site", "p", "old-staged-link");
+    const staleRoot = path.join(managedSiteRoot(dataDir), "p", "old-staged-link");
     await fs.mkdir(staleRoot, { recursive: true });
     await fs.writeFile(
       path.join(staleRoot, "index.html"),
@@ -2583,7 +2706,13 @@ test("custom slug rename moves the folder, writes a 301 redirect, and validates"
   const reportPath = path.join(reportDir, "report.html");
   await fs.writeFile(reportPath, "<h1>Slugged</h1>");
 
-  const { fakeDeploy } = makeInstrumentedDeploy();
+  const { fakeSpawn: fakeDeploy } = makeWranglerFake((_args, captured) => ({
+    code: 0,
+    output:
+      captured.length === 1
+        ? "https://abcdef12.team-reports.pages.dev"
+        : "https://abcdef12.assigned-renamed.pages.dev"
+  }));
   const runtime = await startServers({
     adminPort: 0,
     publicPort: 0,
@@ -2598,6 +2727,8 @@ test("custom slug rename moves the folder, writes a 301 redirect, and validates"
     const report = await addPathReport(runtime.adminUrl, reportPath);
     const publication = await publishSnapshot(runtime.adminUrl, report.id);
     const oldSlug = publication.slug;
+    assert.equal(publication.drop, false, "generated capability links start unlisted");
+    assert.equal(publication.linkKind, "unlisted");
 
     const renameResponse = await fetch(
       `${runtime.adminUrl}/api/publications/${publication.token}/slug`,
@@ -2610,9 +2741,23 @@ test("custom slug rename moves the folder, writes a 301 redirect, and validates"
     assert.equal(renameResponse.status, 200);
     const renameData = await renameResponse.json();
     assert.equal(renameData.publication.slug, "quarterly-review");
-    assert.match(renameData.publication.publicUrl, /\/p\/quarterly-review\/$/);
+    assert.equal(renameData.publication.linkKind, "drop");
+    assert.equal(
+      renameData.publication.drop,
+      true,
+      "choosing a word-only vanity URL explicitly classifies the link as a drop"
+    );
+    assert.equal(
+      renameData.publication.publicUrl,
+      "https://assigned-renamed.pages.dev/p/quarterly-review/"
+    );
+    assert.equal(
+      runtime.configStore.get().pages.baseUrl,
+      "https://assigned-renamed.pages.dev",
+      "the rename result becomes the canonical target origin"
+    );
 
-    const siteRoot = path.join(dataDir, "pages-site");
+    const siteRoot = managedSiteRoot(dataDir);
     assert.ok(await fs.stat(path.join(siteRoot, "p", "quarterly-review", "index.html")));
     await assert.rejects(() => fs.stat(path.join(siteRoot, "p", oldSlug)), /ENOENT/);
 
@@ -2668,6 +2813,41 @@ test("custom slug rename moves the folder, writes a 301 redirect, and validates"
       }
     );
     assert.equal(invalidResponse.status, 400);
+
+    const digitVanityResponse = await fetch(
+      `${runtime.adminUrl}/api/publications/${publication.token}/slug`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: "quarterly-2026" })
+      }
+    );
+    assert.equal(digitVanityResponse.status, 200);
+    const digitVanity = await digitVanityResponse.json();
+    assert.equal(digitVanity.publication.slug, "quarterly-2026");
+    assert.equal(
+      digitVanity.publication.drop,
+      true,
+      "digit-bearing vanity URLs without 128 capability bits are drops"
+    );
+
+    const strongCustomSlug = `audited-${"a".repeat(32)}`;
+    const strongCapabilityResponse = await fetch(
+      `${runtime.adminUrl}/api/publications/${second.token}/slug`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slug: strongCustomSlug })
+      }
+    );
+    assert.equal(strongCapabilityResponse.status, 200);
+    const strongCapability = await strongCapabilityResponse.json();
+    assert.equal(strongCapability.publication.slug, strongCustomSlug);
+    assert.equal(
+      strongCapability.publication.drop,
+      false,
+      "a custom URL with a valid 128-bit capability remains unlisted"
+    );
   } finally {
     await runtime.close();
   }
@@ -2740,6 +2920,11 @@ test("custom slug rename rolls back when the publish deploy fails", async () => 
       (item) => item.token === publication.token
     );
     assert.equal(refreshedPublication.slug, oldSlug);
+    assert.equal(
+      refreshedPublication.drop,
+      false,
+      "a failed vanity rename restores the original unlisted classification"
+    );
     assert.equal(refreshedPublication.publicUrl, publication.publicUrl);
 
     const oldUrlResponse = await fetch(`${runtime.publicUrl}/p/${oldSlug}/`);
@@ -2811,7 +2996,15 @@ test("custom slug rename rollback restores redirect-chain rewrites", async () =>
     );
     assert.equal(firstRename.status, 200);
     assert.deepEqual(runtime.store.listRedirects(), [
-      { from: `/p/${oldSlug}/`, to: "/p/stable-slug/" }
+      {
+        from: `/p/${oldSlug}/`,
+        to: "/p/stable-slug/",
+        projectRef: {
+          accountId: TEST_PAGES_ACCOUNT_ID,
+          projectName: "team-reports",
+          baseUrl: "https://team-reports.pages.dev"
+        }
+      }
     ]);
 
     const secondRename = await fetch(
@@ -2824,7 +3017,15 @@ test("custom slug rename rollback restores redirect-chain rewrites", async () =>
     );
     assert.equal(secondRename.status, 502);
     assert.deepEqual(runtime.store.listRedirects(), [
-      { from: `/p/${oldSlug}/`, to: "/p/stable-slug/" }
+      {
+        from: `/p/${oldSlug}/`,
+        to: "/p/stable-slug/",
+        projectRef: {
+          accountId: TEST_PAGES_ACCOUNT_ID,
+          projectName: "team-reports",
+          baseUrl: "https://team-reports.pages.dev"
+        }
+      }
     ]);
   } finally {
     await runtime.close();
@@ -2880,7 +3081,7 @@ test("editing a path report writes a working copy and leaves the source untouche
 
     // A subsequent snapshot stages from the working copy (plus the injected badge).
     const publication = await publishSnapshot(runtime.adminUrl, report.id);
-    const stagedIndex = path.join(dataDir, "pages-site", "p", publication.slug, "index.html");
+    const stagedIndex = path.join(managedSiteRoot(dataDir), "p", publication.slug, "index.html");
     const staged = await fs.readFile(stagedIndex, "utf8");
     assert.ok(staged.includes(editedHtml), "staged content reflects the working-copy edit");
     assert.match(staged, /data-pagecast-badge/);
@@ -2918,7 +3119,16 @@ test("missing local source reports expose a clear source-missing state", async (
     const contentData = await contentResponse.json();
     assert.match(contentData.error.message, /Source file is missing/);
 
-    const previewResponse = await fetch(`${runtime.adminUrl}/preview/${report.id}/`);
+    const previewPath = `/preview/${report.id}/`;
+    const adminPreview = await fetch(`${runtime.adminUrl}${previewPath}`, {
+      redirect: "manual"
+    });
+    assert.equal(adminPreview.status, 302);
+    assert.equal(
+      new URL(adminPreview.headers.get("location")).origin,
+      new URL(runtime.displayPublicUrl).origin
+    );
+    const previewResponse = await fetch(`${runtime.publicUrl}${previewPath}`);
     assert.equal(previewResponse.status, 410);
     assert.match(await previewResponse.text(), /Source file is missing/);
   } finally {
@@ -3030,7 +3240,11 @@ test("missing published source falls back to its active public URL when no stage
     const report = await addPathReport(runtime.adminUrl, reportPath);
     const publication = await publishSnapshot(runtime.adminUrl, report.id);
     await fs.rm(reportPath);
-    await fs.rm(path.join(dataDir, "pages-site", "p", publication.slug), {
+    await fs.rm(path.join(managedSiteRoot(dataDir), "p", publication.slug), {
+      recursive: true,
+      force: true
+    });
+    await fs.rm(managedSnapshotRoot(dataDir, publication.token), {
       recursive: true,
       force: true
     });
@@ -3081,10 +3295,58 @@ test("editing content with an active snapshot pushes the edit live via the same 
     assert.equal(putResponse.status, 200);
     assert.equal(state.deployCount, 2, "editing with an active snapshot redeploys");
 
-    const stagedIndex = path.join(dataDir, "pages-site", "p", publication.slug, "index.html");
+    const stagedIndex = path.join(managedSiteRoot(dataDir), "p", publication.slug, "index.html");
     assert.match(await fs.readFile(stagedIndex, "utf8"), /v1 edited/);
   } finally {
     await runtime.close();
+  }
+});
+
+test("editing content refreshes every active link on one target in a single deploy", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportPath = path.join(tempDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>shared-v0</h1>", "utf8");
+
+  const { fakeDeploy, state } = makeInstrumentedDeploy();
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    pagesDeploySpawnImpl: fakeDeploy,
+    pagesDeployTimeoutMs: 1000
+  });
+  try {
+    await configurePages(runtime.adminUrl, "shared-content");
+    const report = await addPathReport(runtime.adminUrl, reportPath);
+    const first = await publishSnapshot(runtime.adminUrl, report.id);
+    const second = await publishSnapshot(runtime.adminUrl, report.id);
+    const baseline = state.deployCount;
+
+    const response = await fetch(`${runtime.adminUrl}/api/reports/${report.id}/content`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html: "<h1>shared-v1</h1>" })
+    });
+    assert.equal(response.status, 200);
+    assert.equal(state.deployCount, baseline + 1, "one target should receive one complete deploy");
+    for (const publication of [first, second]) {
+      const html = await fs.readFile(
+        path.join(
+          managedSiteRoot(dataDir, "shared-content"),
+          "p",
+          publication.slug,
+          "index.html"
+        ),
+        "utf8"
+      );
+      assert.match(html, /shared-v1/, `${publication.label} must receive the saved content`);
+    }
+    assert.deepEqual(runtime.store.listOperations(), []);
+  } finally {
+    await runtime.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
 
@@ -3116,12 +3378,23 @@ test("editing content syncs older pages.dev links to their own Pages project", a
       slug: "legacy-page",
       label: "legacy",
       publicUrl: "https://legacy-project.pages.dev/p/legacy-page/",
-      pagesProjectName: "",
-      pagesBaseUrl: "",
+      pagesProjectName: "legacy-project",
+      pagesAccountId: TEST_PAGES_ACCOUNT_ID,
+      pagesBaseUrl: "https://legacy-project.pages.dev",
+      projectRef: {
+        accountId: TEST_PAGES_ACCOUNT_ID,
+        projectName: "legacy-project",
+        baseUrl: "https://legacy-project.pages.dev"
+      },
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
       revokedAt: null,
       expiresAt: null
+    });
+    await runtime.configStore.claimManagedTarget({
+      accountId: TEST_PAGES_ACCOUNT_ID,
+      projectName: "legacy-project",
+      baseUrl: "https://legacy-project.pages.dev"
     });
 
     const putResponse = await fetch(`${runtime.adminUrl}/api/reports/${report.id}/content`, {
@@ -3142,6 +3415,118 @@ test("editing content syncs older pages.dev links to their own Pages project", a
     assert.equal(legacy.publicUrl, "https://legacy-project.pages.dev/p/legacy-page/");
   } finally {
     await runtime.close();
+  }
+});
+
+test("multi-target content edits stay durable and retry only from an explicit failed sync", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportPath = path.join(tempDir, "report.html");
+  const targetA = {
+    accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    projectName: "content-alpha",
+    baseUrl: "https://content-alpha.pages.dev"
+  };
+  const targetB = {
+    accountId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    projectName: "content-beta",
+    baseUrl: "https://content-beta.pages.dev"
+  };
+  await fs.writeFile(reportPath, "<h1>content-v0</h1>", "utf8");
+
+  const config = createConfigStore({ dataDir });
+  await config.init();
+  await config.updatePages({ ...targetA, adoptExisting: true });
+  await config.claimManagedTarget(targetB);
+  const seeded = createReportStore({ dataDir });
+  await seeded.init();
+  const report = await seeded.addPath(reportPath);
+  for (const target of [targetA, targetB]) {
+    const draft = seeded.draftPublication(report.id, { label: target.projectName });
+    Object.assign(draft.publication, {
+      pagesProjectName: target.projectName,
+      pagesAccountId: target.accountId,
+      pagesBaseUrl: target.baseUrl,
+      projectRef: target,
+      publicUrl: `${target.baseUrl}/p/${draft.publication.slug}/`,
+      pending: false
+    });
+    await seeded.commitPublication(report.id, draft.publication);
+  }
+
+  const deployedProjects = [];
+  let deployCount = 0;
+  function failSecondTargetOnce(_command, args) {
+    deployCount += 1;
+    const current = deployCount;
+    const projectIndex = args.indexOf("--project-name");
+    const projectName = args[projectIndex + 1];
+    deployedProjects.push(projectName);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = (signal = "SIGTERM") => child.emit("exit", null, signal);
+    setImmediate(() => {
+      if (current === 2) {
+        child.stderr.emit("data", Buffer.from("simulated second-target content failure"));
+        child.emit("exit", 1, null);
+      } else {
+        child.stdout.emit("data", Buffer.from(`https://${projectName}.pages.dev`));
+        child.emit("exit", 0, null);
+      }
+    });
+    return child;
+  }
+
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    pagesDeploySpawnImpl: failSecondTargetOnce,
+    pagesDeployTimeoutMs: 1000
+  });
+  try {
+    const editedHtml = "<h1>content-v1</h1>";
+    const first = await fetch(`${runtime.adminUrl}/api/reports/${report.id}/content`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html: editedHtml })
+    });
+    assert.equal(first.status, 502);
+    assert.match((await first.json()).error.message, /saved locally.*still need to sync/i);
+    assert.deepEqual(deployedProjects, ["content-alpha", "content-beta"]);
+    assert.equal(
+      (await fetch(`${runtime.adminUrl}/api/reports/${report.id}/content`).then((res) => res.json()))
+        .html,
+      editedHtml,
+      "the desired content remains durable after a partial remote failure"
+    );
+    assert.deepEqual(
+      runtime.store.listOperations().map(({ type, projectRef, status }) => ({
+        type,
+        projectName: projectRef.projectName,
+        status
+      })),
+      [{ type: "content_sync", projectName: "content-beta", status: "failed" }]
+    );
+
+    const retry = await fetch(`${runtime.adminUrl}/api/reports/${report.id}/content`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html: editedHtml })
+    });
+    assert.equal(retry.status, 200);
+    assert.deepEqual(deployedProjects, [
+      "content-alpha",
+      "content-beta",
+      "content-alpha",
+      "content-beta"
+    ]);
+    assert.deepEqual(runtime.store.listOperations(), []);
+  } finally {
+    await runtime.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
 
@@ -3204,6 +3589,73 @@ test("auto-sync redeploys on source change and stops when toggled off", async ()
     assert.equal(healthz.status, 200);
   } finally {
     await runtime.close();
+  }
+});
+
+test("auto-sync refreshes every active link on one target in a single deploy", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportPath = path.join(tempDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>watch-shared-0</h1>", "utf8");
+
+  const { fakeDeploy, state } = makeInstrumentedDeploy();
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    pagesDeploySpawnImpl: fakeDeploy,
+    pagesDeployTimeoutMs: 1000
+  });
+  try {
+    await configurePages(runtime.adminUrl, "shared-watch");
+    const report = await addPathReport(runtime.adminUrl, reportPath);
+    const first = await publishSnapshot(runtime.adminUrl, report.id);
+    const second = await publishSnapshot(runtime.adminUrl, report.id);
+    const enabled = await fetch(`${runtime.adminUrl}/api/reports/${report.id}/auto-sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: true })
+    });
+    assert.equal(enabled.status, 200);
+    const baseline = state.deployCount;
+
+    await fs.writeFile(reportPath, "<h1>watch-shared-1</h1>", "utf8");
+    const refreshed = await pollUntil(async () => {
+      if (state.deployCount <= baseline) {
+        return false;
+      }
+      try {
+        const files = await Promise.all(
+          [first, second].map((publication) =>
+            fs.readFile(
+              path.join(
+                managedSiteRoot(dataDir, "shared-watch"),
+                "p",
+                publication.slug,
+                "index.html"
+              ),
+              "utf8"
+            )
+          )
+        );
+        return files.every((html) => html.includes("watch-shared-1"));
+      } catch {
+        return false;
+      }
+    }, { timeoutMs: 6000 });
+    assert.ok(refreshed, "the shared-target watcher should refresh every link");
+    assert.equal(state.deployCount, baseline + 1, "one target should receive one complete deploy");
+    for (const publication of [first, second]) {
+      const html = await fs.readFile(
+        path.join(managedSiteRoot(dataDir, "shared-watch"), "p", publication.slug, "index.html"),
+        "utf8"
+      );
+      assert.match(html, /watch-shared-1/);
+    }
+  } finally {
+    await runtime.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
 
@@ -3323,9 +3775,9 @@ test("reorder respects ids, appends new reports, and rejects unknown ids", async
   }
 });
 
-// --- 1a: v2 -> v3 migration -----------------------------------------------
+// --- 1a: v2 -> v4 migration -----------------------------------------------
 
-test("legacy version-2 reports.json migrates to v3 with backfilled fields", async () => {
+test("legacy version-2 reports.json migrates to v4 with backfilled fields", async () => {
   const tempDir = await makeTempDir();
   const dataDir = path.join(tempDir, "data");
   const reportDir = path.join(tempDir, "legacy");
@@ -3374,19 +3826,27 @@ test("legacy version-2 reports.json migrates to v3 with backfilled fields", asyn
   const report = reports[0];
   // Backfilled report fields.
   assert.equal(report.autoSync, false);
+  assert.equal(report.publications[0].linkKind, "legacy");
   assert.equal(report.sourceMode, "source-tracked");
   assert.equal(typeof report.order, "number");
 
   const publication = report.publications[0];
   // slug backfills to token.
   assert.equal(publication.slug, legacyToken);
+  assert.equal(
+    publication.drop,
+    false,
+    "loading an existing word-only URL does not retroactively turn it into a drop"
+  );
   assert.equal(publication.updatedAt, publication.createdAt);
 
-  // Force a save via a no-op mutation to confirm v3 is written to disk.
+  // Force a save via a no-op mutation to confirm v4 is written to disk.
   await store.reorder([report.id]);
   const reSaved = JSON.parse(await fs.readFile(path.join(dataDir, "reports.json"), "utf8"));
-  assert.equal(reSaved.version, 3);
+  assert.equal(reSaved.version, 4);
   assert.ok(Array.isArray(reSaved.redirects));
+  assert.ok(Array.isArray(reSaved.operations));
+  assert.ok(Array.isArray(reSaved.pendingDeletions));
 
   // The slug (== token) still resolves through the public asset resolver.
   const resolved = await store.resolvePublishedAsset(legacyToken, "");
@@ -3535,7 +3995,16 @@ test("markdown path report previews as rendered HTML over HTTP", async () => {
 
   try {
     const report = await addPathReport(runtime.adminUrl, reportPath);
-    const response = await fetch(`${runtime.adminUrl}/preview/${report.id}/`);
+    const previewPath = `/preview/${report.id}/`;
+    const adminPreview = await fetch(`${runtime.adminUrl}${previewPath}`, {
+      redirect: "manual"
+    });
+    assert.equal(adminPreview.status, 302);
+    assert.equal(
+      new URL(adminPreview.headers.get("location")).origin,
+      new URL(runtime.displayPublicUrl).origin
+    );
+    const response = await fetch(`${runtime.publicUrl}${previewPath}`);
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type") || "", /text\/html/);
     const html = await response.text();
@@ -3569,7 +4038,7 @@ test("publishing a markdown report stages rendered HTML, not raw markdown", asyn
     const report = await addPathReport(runtime.adminUrl, reportPath);
     const publication = await publishSnapshot(runtime.adminUrl, report.id);
 
-    const stagedIndex = path.join(dataDir, "pages-site", "p", publication.slug, "index.html");
+    const stagedIndex = path.join(managedSiteRoot(dataDir), "p", publication.slug, "index.html");
     const staged = await fs.readFile(stagedIndex, "utf8");
     // Staged index.html is the RENDERED markdown, not the raw .md source.
     assert.match(staged, /^<!doctype html>/i);
@@ -3611,9 +4080,7 @@ test("isLoopbackHostHeader allows loopback and rejects rebound foreign hosts", (
     "pagecast.localhost",
     "[::1]:4173",
     "::1",
-    "127.5.5.5:80",
-    undefined,
-    ""
+    "127.5.5.5:80"
   ]) {
     assert.equal(isLoopbackHostHeader(ok, "127.0.0.1"), true, `expected allow: ${ok}`);
   }
@@ -3623,15 +4090,20 @@ test("isLoopbackHostHeader allows loopback and rejects rebound foreign hosts", (
     "evil.example:4173",
     "attacker.com",
     "169.254.169.254",
-    "192.168.1.50:4173"
+    "192.168.1.50:4173",
+    undefined,
+    ""
   ]) {
     assert.equal(isLoopbackHostHeader(bad, "127.0.0.1"), false, `expected reject: ${bad}`);
   }
-  // An explicitly configured bind host is trusted.
-  assert.equal(isLoopbackHostHeader("0.0.0.0:4173", "0.0.0.0"), true);
-  // A configured local display hostname is trusted only when explicitly allowed.
-  assert.equal(isLoopbackHostHeader("pagecast:4173", "127.0.0.1", ["pagecast"]), true);
-  assert.equal(isLoopbackHostHeader("pagecast:4173", "127.0.0.1"), false);
+  // A wildcard bind never makes the wildcard Host trustworthy.
+  assert.equal(isLoopbackHostHeader("0.0.0.0:4173", "0.0.0.0"), false);
+  // Explicit allowlists cannot turn a foreign DNS name into a loopback origin.
+  assert.equal(
+    isLoopbackHostHeader("dev.pagecast.localhost:4173", "127.0.0.1", ["dev.pagecast.localhost"]),
+    true
+  );
+  assert.equal(isLoopbackHostHeader("attacker.example:4173", "127.0.0.1", ["attacker.example"]), false);
 });
 
 test("startServers falls back from an occupied persisted port and saves the working pair", async () => {
@@ -3657,8 +4129,18 @@ test("startServers falls back from an occupied persisted port and saves the work
     const adminPort = Number(new URL(runtime.adminUrl).port);
     const publicPort = Number(new URL(runtime.publicUrl).port);
     assert.notEqual(adminPort, blockedPort);
-    assert.equal(runtime.adminUrl, `http://pagecast.localhost:${adminPort}`);
-    assert.equal(runtime.publicUrl, `http://pagecast.localhost:${publicPort}`);
+    assert.equal(runtime.adminUrl, `http://127.0.0.1:${adminPort}`);
+    assert.equal(runtime.publicUrl, `http://127.0.0.1:${publicPort}`);
+    assert.equal(runtime.displayAdminUrl, `http://pagecast.localhost:${adminPort}`);
+    assert.equal(runtime.displayPublicUrl, `http://pagecast.localhost:${publicPort}`);
+    const runtimeDescriptor = JSON.parse(
+      await fs.readFile(path.join(dataDir, "runtime.json"), "utf8")
+    );
+    assert.equal(
+      runtimeDescriptor.adminUrl,
+      runtime.adminUrl,
+      "Node adapters receive the resolver-independent transport URL"
+    );
 
     const persistedStore = createConfigStore({ dataDir });
     await persistedStore.init();
@@ -3679,6 +4161,7 @@ test("admin server rejects requests with a non-loopback Host header (DNS rebindi
   const runtime = await startServers({
     adminPort: 0,
     publicPort: 0,
+    displayHost: "attacker.example",
     dataDir,
     staticDir: path.resolve("public")
   });
@@ -3698,8 +4181,11 @@ test("admin server rejects requests with a non-loopback Host header (DNS rebindi
     });
 
   try {
+    assert.equal(new URL(runtime.adminUrl).hostname, "127.0.0.1");
+    assert.equal(new URL(runtime.displayAdminUrl).hostname, "pagecast.localhost");
     // A rebound attacker domain is blocked before reaching any handler.
     assert.equal(await callWithHost("evil.example"), 403);
+    assert.equal(await callWithHost("attacker.example"), 403);
     // The legitimate loopback Host is served normally.
     assert.notEqual(await callWithHost("127.0.0.1"), 403);
   } finally {
@@ -3708,11 +4194,29 @@ test("admin server rejects requests with a non-loopback Host header (DNS rebindi
   }
 });
 
-test("a wildcard bind host (0.0.0.0, e.g. in Docker) yields friendly loopback URLs and does not trust Host: 0.0.0.0", async () => {
+test("wildcard and routable admin binds are rejected unless the wildcard is an explicit loopback proxy", async () => {
+  assert.throws(
+    () => assertSafeAdminBind("0.0.0.0"),
+    /without explicit loopback-proxy mode/
+  );
+  assert.throws(
+    () => assertSafeAdminBind("::"),
+    /without explicit loopback-proxy mode/
+  );
+  assert.throws(
+    () => assertSafeAdminBind("192.0.2.10", { allowLoopbackProxy: true }),
+    /non-loopback host/
+  );
+  assert.doesNotThrow(() => assertSafeAdminBind("127.0.0.1"));
+  assert.doesNotThrow(() => assertSafeAdminBind("0.0.0.0", { allowLoopbackProxy: true }));
+});
+
+test("an explicit wildcard loopback-proxy bind yields friendly URLs and keeps the Host allowlist", async () => {
   const { request } = await import("node:http");
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-wildcard-"));
   const runtime = await startServers({
     host: "0.0.0.0",
+    allowLoopbackProxy: true,
     adminPort: 0,
     publicPort: 0,
     dataDir,
@@ -3736,8 +4240,10 @@ test("a wildcard bind host (0.0.0.0, e.g. in Docker) yields friendly loopback UR
   try {
     // Client-facing URLs must use a loopback host, never the wildcard bind
     // address (browsers, incl. Chrome 128+, refuse to connect to 0.0.0.0).
-    assert.match(runtime.adminUrl, /^http:\/\/pagecast\.localhost:\d+$/);
-    assert.match(runtime.publicUrl, /^http:\/\/pagecast\.localhost:\d+$/);
+    assert.match(runtime.adminUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.match(runtime.publicUrl, /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.match(runtime.displayAdminUrl, /^http:\/\/pagecast\.localhost:\d+$/);
+    assert.match(runtime.displayPublicUrl, /^http:\/\/pagecast\.localhost:\d+$/);
     // The wildcard bind must NOT make `Host: 0.0.0.0` a trusted loopback host.
     assert.equal(await callWithHost("0.0.0.0"), 403);
     // Real loopback Hosts still pass.
@@ -3796,7 +4302,8 @@ test("config store persists and clears feedback settings", async () => {
   });
   // Trailing slash is normalized away.
   assert.equal(updated.feedback.url, "https://pagecast-feedback.acme.workers.dev");
-  assert.equal(updated.feedback.statsToken, "secret");
+  assert.equal(Object.hasOwn(updated.feedback, "statsToken"), false);
+  assert.equal(store.get().feedback.statsToken, "secret");
 
   // Reloading from disk keeps it.
   const reopened = createConfigStore({ dataDir: dir });
@@ -4042,6 +4549,32 @@ test("updatePages preserves an already-provisioned feedback config", async () =>
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test("updatePages never carries a prior account target origin into a new target", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-cfg-target-switch-"));
+  const store = createConfigStore({ dataDir: dir });
+  await store.init();
+  await store.updatePages({
+    projectName: "alpha-project",
+    accountId: "a".repeat(32),
+    accountName: "Alpha account",
+    baseUrl: "https://alpha.example.test"
+  });
+
+  const switched = await store.updatePages({
+    projectName: "beta-project",
+    accountId: "b".repeat(32)
+  });
+  assert.deepEqual(switched.pages, {
+    projectName: "beta-project",
+    accountId: "b".repeat(32),
+    accountName: "",
+    branch: "main",
+    baseUrl: "https://beta-project.pages.dev"
+  });
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
 test("status auto-detects an existing Wrangler login on the first poll", async () => {
   const tempDir = await makeTempDir();
   const dataDir = path.join(tempDir, "data");
@@ -4160,6 +4693,7 @@ test("goal publish is idempotent: update re-syncs the SAME url, never a new link
   const goalFile = path.join(tempDir, "pagecast-goal.md");
   await fs.writeFile(goalFile, "# Goal\n\nStatus: started\n");
   const { authSpawn, fakeDeploy } = makeHeadlessFakes();
+  await adoptTestPagesTarget(dataDir);
   const opts = {
     file: goalFile,
     dataDir,
@@ -4173,14 +4707,28 @@ test("goal publish is idempotent: update re-syncs the SAME url, never a new link
   const first = await publishGoalProgress(opts);
   assert.equal(first.started, true);
   assert.equal(first.slug, "goal");
+  assert.equal(first.linkKind, "drop");
+  assert.equal(first.expiresAt, null, "goal-progress pages remain permanent by design");
   assert.match(first.url, /\/p\/goal\/$/);
-  const stagedIndex = path.join(dataDir, "pages-site", "p", "goal", "index.html");
+  const stagedIndex = path.join(
+    managedSiteRoot(dataDir, "pagecast", "abcdef0123456789abcdef0123456789"),
+    "p",
+    "goal",
+    "index.html"
+  );
   assert.match(await fs.readFile(stagedIndex, "utf8"), /Status: started/);
 
   // config.goal recorded the page.
   const status = await getGoalStatus({ dataDir });
   assert.equal(status.goal.url, first.url);
   assert.equal(status.goal.slug, "goal");
+  assert.equal(status.goal.expiresAt, null);
+
+  const storedGoal = createReportStore({ dataDir });
+  await storedGoal.init();
+  const goalPublication = storedGoal.findPublication(first.token)?.publication;
+  assert.equal(goalPublication.drop, true, "the word-only goal vanity URL is an explicit drop");
+  assert.equal(goalPublication.expiresAt, null);
 
   // Edit the file, then call again — SAME url/token, fresh content, no new link.
   await fs.writeFile(goalFile, "# Goal\n\nStatus: 80% done\n");
@@ -4188,6 +4736,7 @@ test("goal publish is idempotent: update re-syncs the SAME url, never a new link
   assert.equal(second.started, false);
   assert.equal(second.url, first.url);
   assert.equal(second.token, first.token);
+  assert.equal(second.expiresAt, null);
   assert.match(await fs.readFile(stagedIndex, "utf8"), /80% done/);
 
   // The shared-page badge is present on the goal page too.
@@ -4200,6 +4749,7 @@ test("goal stop revokes the page and clears config.goal", async () => {
   const goalFile = path.join(tempDir, "pagecast-goal.md");
   await fs.writeFile(goalFile, "# Goal\n");
   const { authSpawn, fakeDeploy } = makeHeadlessFakes();
+  await adoptTestPagesTarget(dataDir);
   const opts = {
     file: goalFile,
     dataDir,
@@ -4241,8 +4791,8 @@ test("config.goal persists and survives pages/feedback updates", async () => {
   const after = await store.updatePages({ projectName: "proj" });
   assert.equal(after.goal?.url, "https://pagecast.pages.dev/p/goal/");
   // A feedback update must not wipe it either.
-  const after2 = await store.updateFeedback(null);
-  assert.equal(after2.goal?.url, "https://pagecast.pages.dev/p/goal/");
+  await store.updateFeedback(null);
+  assert.equal(store.get().goal?.url, "https://pagecast.pages.dev/p/goal/");
 
   await fs.rm(dir, { recursive: true, force: true });
 });
@@ -4279,6 +4829,7 @@ test("POST /api/publish-local publishes a local file and updates the same URL on
     await configurePages(runtime.adminUrl);
 
     // First publish — a plain absolute path.
+    const publishedAt = Date.now();
     const r1 = await post(reportPath);
     assert.equal(r1.status, 201);
     const d1 = await r1.json();
@@ -4286,6 +4837,10 @@ test("POST /api/publish-local publishes a local file and updates the same URL on
     assert.match(d1.url, /^https:\/\/team-reports\.pages\.dev\/p\/.+\/$/);
     assert.equal(d1.updated, false);
     assert.match(d1.localUrl, /\/p\/.+\/$/);
+    assert.ok(
+      d1.publication.expiresAt >= publishedAt + 30 * 86_400_000 - 5000,
+      "the extension adapter returns the effective default expiry"
+    );
 
     // Re-publish the SAME file — same URL/slug, updated:true (no new link).
     await fs.writeFile(reportPath, "<h1>Local to public v2</h1>");
@@ -4293,6 +4848,7 @@ test("POST /api/publish-local publishes a local file and updates the same URL on
     assert.equal(d2.updated, true);
     assert.equal(d2.url, d1.url);
     assert.equal(d2.slug, d1.slug);
+    assert.equal(d2.publication.expiresAt, d1.publication.expiresAt);
 
     // A file:// URL works too (server decodes it).
     const second = path.join(filesDir, "b", "second.html");
@@ -4348,7 +4904,7 @@ test("POST /api/publish-local gates an expiring link on the first deploy", async
     // The first (and only) deploy must have written an edge gate carrying this
     // slug's expiry, plus a _routes.json scoping the Function to it.
     const middleware = await fs.readFile(
-      path.join(dataDir, "pages-site", "functions", "_middleware.js"),
+      path.join(managedSiteRoot(dataDir), "functions", "_middleware.js"),
       "utf8"
     );
     assert.match(
@@ -4357,7 +4913,7 @@ test("POST /api/publish-local gates an expiring link on the first deploy", async
       "the deployed gate must carry the slug's expiresAt on the first deploy"
     );
     const routes = JSON.parse(
-      await fs.readFile(path.join(dataDir, "pages-site", "_routes.json"), "utf8")
+      await fs.readFile(path.join(managedSiteRoot(dataDir), "_routes.json"), "utf8")
     );
     assert.ok(routes.include.includes(`/p/${data.slug}/*`), "the Function is scoped to the expiring slug");
   } finally {
@@ -4366,7 +4922,11 @@ test("POST /api/publish-local gates an expiring link on the first deploy", async
 });
 
 test("admin server reflects CORS only for chrome-extension origins", async () => {
-  assert.equal(extensionCorsOrigin("chrome-extension://abcdefghij"), "chrome-extension://abcdefghij");
+  const extensionOrigin = `chrome-extension://${PAGECAST_EXTENSION_ID}`;
+  const foreignExtensionOrigin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
+  assert.equal(extensionCorsOrigin(extensionOrigin), extensionOrigin);
+  assert.equal(extensionCorsOrigin(foreignExtensionOrigin), null);
+  assert.equal(extensionCorsOrigin("chrome-extension://abcdefghij"), null);
   assert.equal(extensionCorsOrigin("https://evil.com"), null);
   assert.equal(extensionCorsOrigin(undefined), null);
 
@@ -4384,9 +4944,9 @@ test("admin server reflects CORS only for chrome-extension origins", async () =>
   });
   try {
     const ext = await fetch(`${runtime.adminUrl}/api/status`, {
-      headers: { Origin: "chrome-extension://abcdefghij" }
+      headers: { Origin: extensionOrigin, "X-Pagecast-Extension": "1" }
     });
-    assert.equal(ext.headers.get("access-control-allow-origin"), "chrome-extension://abcdefghij");
+    assert.equal(ext.headers.get("access-control-allow-origin"), extensionOrigin);
 
     const evil = await fetch(`${runtime.adminUrl}/api/status`, {
       headers: { Origin: "https://evil.com" }
@@ -4395,10 +4955,10 @@ test("admin server reflects CORS only for chrome-extension origins", async () =>
 
     const pre = await fetch(`${runtime.adminUrl}/api/publish-local`, {
       method: "OPTIONS",
-      headers: { Origin: "chrome-extension://abcdefghij" }
+      headers: { Origin: extensionOrigin }
     });
     assert.equal(pre.status, 204);
-    assert.equal(pre.headers.get("access-control-allow-origin"), "chrome-extension://abcdefghij");
+    assert.equal(pre.headers.get("access-control-allow-origin"), extensionOrigin);
     assert.match(pre.headers.get("access-control-allow-methods") || "", /POST/);
   } finally {
     await runtime.close();
@@ -4451,7 +5011,11 @@ test("password-protection endpoint rolls back state when the redeploy fails", as
     await fetch(`${runtime.adminUrl}/api/config/pages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectName: "team-reports", accountId: "0123456789abcdef0123456789abcdef" })
+      body: JSON.stringify({
+        projectName: "team-reports",
+        accountId: "0123456789abcdef0123456789abcdef",
+        adoptExisting: true
+      })
     });
     const addData = await (
       await fetch(`${runtime.adminUrl}/api/reports/path`, {
@@ -4481,8 +5045,244 @@ test("password-protection endpoint rolls back state when the redeploy fails", as
     const listData = await (await fetch(`${runtime.adminUrl}/api/reports`)).json();
     const report = listData.reports.find((r) => r.id === id);
     assert.equal(report.passwordProtected, false, "protection state must roll back on redeploy failure");
+    assert.equal(deployCount, 2, "a failure before remote success must not trigger compensation");
   } finally {
     await runtime.close();
+  }
+});
+
+test("password rollback checkpoints remote compensation across local finalization failures", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportPath = path.join(tempDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>post-deploy rollback</h1>", "utf8");
+
+  const captures = [];
+  function capturingDeploy(_command, args, options) {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = (signal = "SIGTERM") => child.emit("exit", null, signal);
+    setImmediate(async () => {
+      const projectIndex = args.indexOf("--project-name");
+      const projectName = args[projectIndex + 1];
+      const middleware = await fs
+        .readFile(path.join(options.cwd, "functions", "_middleware.js"), "utf8")
+        .catch(() => "");
+      captures.push({ projectName, middleware });
+      child.stdout.emit("data", Buffer.from(`https://${projectName}.pages.dev`));
+      child.emit("exit", 0, null);
+    });
+    return child;
+  }
+
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    pagesDeploySpawnImpl: capturingDeploy,
+    pagesDeployTimeoutMs: 1000
+  });
+  try {
+    await fetch(`${runtime.adminUrl}/api/config/pages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectName: "post-deploy-password",
+        accountId: "0123456789abcdef0123456789abcdef",
+        adoptExisting: true
+      })
+    });
+    const added = await (
+      await fetch(`${runtime.adminUrl}/api/reports/path`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: reportPath })
+      })
+    ).json();
+    const reportId = added.report.id;
+    const protectResponse = await fetch(
+      `${runtime.adminUrl}/api/reports/${reportId}/password-protection`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: true, password: "keep-protected" })
+      }
+    );
+    assert.equal(protectResponse.status, 200);
+    const published = await (
+      await fetch(`${runtime.adminUrl}/api/reports/${reportId}/publish-snapshot`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      })
+    ).json();
+    const slug = published.publication.slug;
+
+    const originalSyncSnapshot = runtime.store.syncSnapshot;
+    let localFinalizeFailures = 2;
+    runtime.store.syncSnapshot = async (...args) => {
+      if (localFinalizeFailures > 0) {
+        localFinalizeFailures -= 1;
+        throw new Error("simulated post-deploy local commit failure");
+      }
+      return originalSyncSnapshot(...args);
+    };
+
+    const disableResponse = await fetch(
+      `${runtime.adminUrl}/api/reports/${reportId}/password-protection`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: false })
+      }
+    );
+    assert.ok(disableResponse.status >= 400, "local finalization failure must surface");
+    assert.equal(captures.length, 3, "publish, remote change, and compensation must deploy");
+    assert.match(
+      captures[1].middleware,
+      new RegExp(`"${slug}":\\{"expiresAt"`),
+      "the first remote change removes only the password gate"
+    );
+    assert.doesNotMatch(captures[1].middleware, /"hash":/);
+    assert.match(
+      captures[2].middleware,
+      new RegExp(`"${slug}":\\{.*"hash":`),
+      "compensation restores the password gate after remote success"
+    );
+    const state = await (await fetch(`${runtime.adminUrl}/api/reports`)).json();
+    assert.equal(state.reports.find((report) => report.id === reportId).passwordProtected, true);
+    const operations = runtime.store.listOperations();
+    assert.equal(operations.length, 1);
+    assert.equal(operations[0].type, "password_compensate");
+    assert.equal(operations[0].remoteSucceeded, true);
+
+    const retryResponse = await fetch(
+      `${runtime.adminUrl}/api/operations/${encodeURIComponent(operations[0].id)}/retry`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      }
+    );
+    assert.equal(retryResponse.status, 200);
+    assert.equal(captures.length, 4, "retry finalizes the restored password state");
+    assert.match(captures[3].middleware, new RegExp(`"${slug}":\\{.*"hash":`));
+    assert.deepEqual(runtime.store.listOperations(), []);
+  } finally {
+    await runtime.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("multi-target password changes compensate earlier targets before restoring protected state", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportPath = path.join(tempDir, "report.html");
+  const accountA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const accountB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const targetA = {
+    accountId: accountA,
+    projectName: "password-alpha",
+    baseUrl: "https://password-alpha.pages.dev"
+  };
+  const targetB = {
+    accountId: accountB,
+    projectName: "password-beta",
+    baseUrl: "https://password-beta.pages.dev"
+  };
+  await fs.writeFile(reportPath, "<h1>multi target</h1>", "utf8");
+
+  const config = createConfigStore({ dataDir });
+  await config.init();
+  await config.updatePages({ ...targetA, adoptExisting: true });
+  await config.claimManagedTarget(targetB);
+  const seeded = createReportStore({ dataDir });
+  await seeded.init();
+  const report = await seeded.addPath(reportPath);
+  await seeded.setPasswordProtection(report.id, { enabled: true, password: "keep-secret" });
+  for (const target of [targetA, targetB]) {
+    const draft = seeded.draftPublication(report.id, { label: target.projectName });
+    Object.assign(draft.publication, {
+      pagesProjectName: target.projectName,
+      pagesAccountId: target.accountId,
+      pagesBaseUrl: target.baseUrl,
+      projectRef: target,
+      publicUrl: `${target.baseUrl}/p/${draft.publication.slug}/`,
+      pending: false
+    });
+    await seeded.commitPublication(report.id, draft.publication);
+  }
+
+  const captures = [];
+  let deployCount = 0;
+  function partialDeploy(_command, args, options) {
+    deployCount += 1;
+    const current = deployCount;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = (signal = "SIGTERM") => child.emit("exit", null, signal);
+    setImmediate(async () => {
+      const projectIndex = args.indexOf("--project-name");
+      const projectName = args[projectIndex + 1];
+      const middleware = await fs
+        .readFile(path.join(options.cwd, "functions", "_middleware.js"), "utf8")
+        .catch(() => "");
+      captures.push({ projectName, middleware });
+      if (current === 2) {
+        child.stderr.emit("data", Buffer.from("simulated second-target failure"));
+        child.emit("exit", 1, null);
+      } else {
+        child.stdout.emit("data", Buffer.from(`https://${projectName}.pages.dev`));
+        child.emit("exit", 0, null);
+      }
+    });
+    return child;
+  }
+
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    pagesDeploySpawnImpl: partialDeploy,
+    pagesDeployTimeoutMs: 1000
+  });
+  try {
+    const response = await fetch(
+      `${runtime.adminUrl}/api/reports/${report.id}/password-protection`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: false })
+      }
+    );
+    assert.ok(response.status >= 400);
+    assert.deepEqual(
+      captures.map((capture) => capture.projectName),
+      ["password-alpha", "password-beta", "password-alpha"]
+    );
+    assert.match(
+      captures[0].middleware,
+      /const PROTECTED = \{\};/,
+      "first target was temporarily unprotected"
+    );
+    const alphaPublication = seeded
+      .get(report.id)
+      .publications.find((publication) => publication.pagesProjectName === "password-alpha");
+    assert.match(
+      captures[2].middleware,
+      new RegExp(`const PROTECTED = \\{.*${alphaPublication.slug}`),
+      "compensation restored the first target's password gate"
+    );
+    const state = await (await fetch(`${runtime.adminUrl}/api/reports`)).json();
+    assert.equal(state.reports.find((item) => item.id === report.id).passwordProtected, true);
+    assert.deepEqual(runtime.store.listOperations(), []);
+  } finally {
+    await runtime.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
 
@@ -4532,7 +5332,11 @@ test("expiry endpoint rolls back expiresAt when the redeploy fails", async () =>
     await fetch(`${runtime.adminUrl}/api/config/pages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectName: "team-reports", accountId: "0123456789abcdef0123456789abcdef" })
+      body: JSON.stringify({
+        projectName: "team-reports",
+        accountId: "0123456789abcdef0123456789abcdef",
+        adoptExisting: true
+      })
     });
     const addData = await (
       await fetch(`${runtime.adminUrl}/api/reports/path`, {

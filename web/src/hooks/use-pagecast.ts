@@ -10,6 +10,7 @@ import { activityMessage, emitActivity } from "@/lib/activity";
 import type {
   CloudflareSyncResponse,
   DeploymentsResponse,
+  OperationJournalEntry,
   PublishResponse,
   Report,
   ReportsResponse,
@@ -18,6 +19,7 @@ import type {
 
 const STATUS_KEY = ["status"] as const;
 const REPORTS_KEY = ["reports"] as const;
+const OPERATIONS_KEY = ["operations"] as const;
 const DEPLOYMENTS_KEY = ["deployments"] as const;
 
 export function useStatus() {
@@ -37,8 +39,20 @@ export function useReports() {
   });
 }
 
+export function useOperations() {
+  return useQuery<OperationJournalEntry[]>({
+    queryKey: OPERATIONS_KEY,
+    queryFn: async () => (await api.getOperations()).operations,
+    refetchInterval: 15_000
+  });
+}
+
 function invalidateReports(queryClient: QueryClient) {
   void queryClient.invalidateQueries({ queryKey: REPORTS_KEY });
+}
+
+function invalidateOperations(queryClient: QueryClient) {
+  void queryClient.invalidateQueries({ queryKey: OPERATIONS_KEY });
 }
 
 function errorMessage(error: unknown, fallback: string) {
@@ -157,15 +171,24 @@ export function useDeleteReport() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.deleteReport(id),
-    onSuccess: () => {
-      toast.success("Report deleted.");
-      emitActivity({ status: "success", title: "Page deleted" });
+    onSuccess: (data) => {
+      if (data.cleanupPending) {
+        const message =
+          data.cleanupError || "Local source cleanup will retry when Pagecast restarts.";
+        toast.warning("Report deleted; cleanup is pending.", { description: message });
+        emitActivity({ status: "info", title: "Page deleted; cleanup pending", message });
+      } else {
+        toast.success("Report deleted.");
+        emitActivity({ status: "success", title: "Page deleted" });
+      }
       invalidateReports(queryClient);
+      invalidateOperations(queryClient);
     },
     onError: (error) => {
       const message = errorMessage(error, "Could not delete report.");
       toast.error(message);
       emitActivity({ status: "error", title: "Delete failed", message });
+      invalidateOperations(queryClient);
     }
   });
 }
@@ -213,11 +236,13 @@ export function useRevokeAll() {
             : `${data.revokedCount} links taken offline.`
       });
       invalidateReports(queryClient);
+      invalidateOperations(queryClient);
     },
     onError: (error) => {
       const message = errorMessage(error, "Could not revoke links.");
       toast.error(message);
       emitActivity({ status: "error", title: "Revoke failed", message });
+      invalidateOperations(queryClient);
     }
   });
 }
@@ -302,6 +327,23 @@ export function useSyncPublication() {
   });
 }
 
+export function useAdoptPublicationTarget() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (token: string) => api.adoptPublicationTarget(token),
+    onSuccess: () => {
+      toast.success("Legacy link attached to the selected Pages project.");
+      emitActivity({ status: "success", title: "Legacy link target recovered" });
+      invalidateReports(queryClient);
+    },
+    onError: (error) => {
+      const message = errorMessage(error, "Could not attach the legacy link.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Target recovery failed", message });
+    }
+  });
+}
+
 export function useSyncCloudflarePages() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -381,11 +423,33 @@ export function useRevokePublication() {
       toast.success("Link revoked.");
       emitActivity({ status: "success", title: "Link taken offline" });
       invalidateReports(queryClient);
+      invalidateOperations(queryClient);
     },
     onError: (error) => {
       const message = errorMessage(error, "Could not revoke link.");
       toast.error(message);
       emitActivity({ status: "error", title: "Revoke failed", message });
+      invalidateOperations(queryClient);
+    }
+  });
+}
+
+export function useRetryOperation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (operation: OperationJournalEntry) => api.retryOperation(operation.id),
+    onSuccess: () => {
+      toast.success("Operation recovered.");
+      emitActivity({ status: "success", title: "Operation recovered" });
+      invalidateReports(queryClient);
+      invalidateOperations(queryClient);
+    },
+    onError: (error) => {
+      const message = errorMessage(error, "Could not recover this operation.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Operation retry failed", message });
+      invalidateReports(queryClient);
+      invalidateOperations(queryClient);
     }
   });
 }

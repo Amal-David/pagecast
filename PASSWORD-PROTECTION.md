@@ -118,6 +118,11 @@ page view.
 - **Assets are protected too.** The gate sits in front of the whole `/p/<slug>/`
   prefix, so sub-pages, images, JSON, and other assets are all gated, not just
   the entry HTML.
+- **Protection is deployment-scoped.** A new protected publish includes the gate
+  before its first successful deployment. Changing an existing link takes effect
+  only after the replacement deployment succeeds, and multiple Pages targets
+  update serially. Cloudflare's immutable URLs for older unprotected deployments
+  remain reachable until you prune/delete those deployments.
 - **The only attack is online guessing.** Because the hash is never served,
   there is no offline crack — an attacker can only submit guesses to the live
   endpoint, which is slow. You can add a Cloudflare WAF rate-limit rule for
