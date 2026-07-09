@@ -41,6 +41,11 @@ Use $publish-report to publish /absolute/path/report.md with Pagecast.
 
 This wires up both the `publish-report` skill and the report-detection hook.
 
+If Claude Code Artifacts are enabled, plain "publish this" requests can mean two
+different things. The Pagecast skill asks whether you want a Claude Code Artifact
+or a Pagecast Cloudflare Pages link. Say "publish this with Pagecast" when you
+want to skip the choice and use the Cloudflare Pages URL path.
+
 **Other Agent-Skills tools** — copy the portable skill:
 
 ```sh

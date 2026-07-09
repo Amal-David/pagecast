@@ -14,6 +14,7 @@ import {
   cloudflareCredentialStatus,
   createCloudflareAuthManager,
   createConfigStore,
+  createCloudflarePagesPublisher,
   createDeployQueue,
   createReportStore,
   findKvNamespaceId,
@@ -440,7 +441,12 @@ test("Wrangler Pages project list parsing normalizes selectable projects", () =>
         },
         {
           project_name: "pagecast",
-          account: { id: "abcdef0123456789abcdef0123456789", name: "Personal" }
+          account: { id: "abcdef0123456789abcdef0123456789", name: "Personal" },
+          project_domains: "pagecast-6cv.pages.dev"
+        },
+        {
+          "Project Name": "marketing-site",
+          "Project Domains": "marketing-site.pages.dev"
         },
         {
           name: "../bad"
@@ -451,11 +457,18 @@ test("Wrangler Pages project list parsing normalizes selectable projects", () =>
 
   assert.deepEqual(projects, [
     {
+      name: "marketing-site",
+      accountId: "",
+      accountName: "",
+      productionBranch: "",
+      baseUrl: "https://marketing-site.pages.dev"
+    },
+    {
       name: "pagecast",
       accountId: "abcdef0123456789abcdef0123456789",
       accountName: "Personal",
       productionBranch: "",
-      baseUrl: "https://pagecast.pages.dev"
+      baseUrl: "https://pagecast-6cv.pages.dev"
     },
     {
       name: "team-reports",
@@ -466,17 +479,24 @@ test("Wrangler Pages project list parsing normalizes selectable projects", () =>
     }
   ]);
   assert.equal(chooseWranglerPagesProject(projects, { projectName: "team-reports" }).name, "team-reports");
+  assert.equal(
+    chooseWranglerPagesProject(projects, {
+      projectName: "pagecast",
+      accountId: "abcdef0123456789abcdef0123456789"
+    }).baseUrl,
+    "https://pagecast-6cv.pages.dev"
+  );
   assert.equal(chooseWranglerPagesProject(projects, {}).name, "pagecast");
 
   assert.deepEqual(
     parseWranglerPagesProjects(
       [
-        "┌───────────────┬───────────────────┐",
-        "│ Name          │ Production Branch │",
-        "├───────────────┼───────────────────┤",
-        "│ team-reports  │ main              │",
-        "│ pagecast │ production        │",
-        "└───────────────┴───────────────────┘"
+        "┌───────────────┬────────────────────────┬───────────────────┐",
+        "│ Name          │ Project Domains        │ Production Branch │",
+        "├───────────────┼────────────────────────┼───────────────────┤",
+        "│ team-reports  │ team-reports.pages.dev │ main              │",
+        "│ pagecast      │ pagecast-6cv.pages.dev │ production        │",
+        "└───────────────┴────────────────────────┴───────────────────┘"
       ].join("\n")
     ),
     [
@@ -485,7 +505,7 @@ test("Wrangler Pages project list parsing normalizes selectable projects", () =>
         accountId: "",
         accountName: "",
         productionBranch: "production",
-        baseUrl: "https://pagecast.pages.dev"
+        baseUrl: "https://pagecast-6cv.pages.dev"
       },
       {
         name: "team-reports",
@@ -1458,6 +1478,7 @@ test("Headless Pages site deploy wraps Wrangler with project, branch, and accoun
   const siteDir = path.join(tempDir, "site");
   await fs.mkdir(path.join(siteDir, "assets"), { recursive: true });
   await fs.writeFile(path.join(siteDir, "index.html"), "<h1>Site</h1>");
+  await fs.writeFile(path.join(siteDir, "og-image.png"), "png");
   await fs.writeFile(path.join(siteDir, "assets", "app.js"), "window.ok = true;");
   await fs.writeFile(path.join(siteDir, ".env"), "SECRET=1");
 
@@ -1536,8 +1557,101 @@ test("Headless Pages site deploy wraps Wrangler with project, branch, and accoun
     }
   ]);
   assert.equal(await fs.readFile(path.join(stagingRoot, "index.html"), "utf8"), "<h1>Site</h1>");
+  assert.equal(await fs.readFile(path.join(stagingRoot, "og-image.png"), "utf8"), "png");
   assert.equal(await fs.readFile(path.join(stagingRoot, "assets", "app.js"), "utf8"), "window.ok = true;");
   await assert.rejects(() => fs.stat(path.join(stagingRoot, ".env")), /ENOENT/);
+});
+
+test("Pagecast marketing project deploys require the landing root assets", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const siteDir = path.join(tempDir, "site");
+  await fs.mkdir(siteDir, { recursive: true });
+  await fs.writeFile(path.join(siteDir, "index.html"), "<h1>Incomplete</h1>");
+
+  const accountId = "90e4c638bea527f464ec6fa7caebfd4e";
+  const { fakeSpawn: authSpawn } = makeWranglerFake((args) => {
+    if (args.includes("whoami")) {
+      return {
+        code: 0,
+        output: JSON.stringify({ accounts: [{ name: "Pagecast", id: accountId }] })
+      };
+    }
+    if (args.includes("list")) {
+      return {
+        code: 0,
+        output: JSON.stringify([{ name: "pagecasthq", account_id: accountId, production_branch: "main" }])
+      };
+    }
+    return { code: 0, output: "" };
+  });
+
+  const deployCommands = [];
+  function fakeDeploy(command, args, options) {
+    deployCommands.push({ command, args, cwd: options.cwd, accountId: options.env.CLOUDFLARE_ACCOUNT_ID || "" });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => child.emit("exit", null, "SIGTERM");
+    setImmediate(() => child.emit("exit", 0, null));
+    return child;
+  }
+
+  await assert.rejects(
+    () =>
+      deployCloudflarePagesSite({
+        sourceDir: siteDir,
+        projectName: "pagecasthq",
+        accountId,
+        dataDir,
+        cloudflareAuthSpawnImpl: authSpawn,
+        pagesDeploySpawnImpl: fakeDeploy,
+        cloudflareListTimeoutMs: 1000,
+        pagesDeployTimeoutMs: 1000
+      }),
+    /Refusing to deploy pagecasthq\.pages\.dev without og-image\.png/
+  );
+  assert.equal(deployCommands.length, 0);
+});
+
+test("Pagecast marketing project refuses publication-only deploys", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportDir = path.join(tempDir, "report");
+  await fs.mkdir(reportDir, { recursive: true });
+  await fs.writeFile(path.join(reportDir, "index.html"), "<h1>Report</h1>");
+
+  const deployCommands = [];
+  function fakeDeploy(command, args, options) {
+    deployCommands.push({ command, args, cwd: options.cwd, accountId: options.env.CLOUDFLARE_ACCOUNT_ID || "" });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => child.emit("exit", null, "SIGTERM");
+    setImmediate(() => child.emit("exit", 0, null));
+    return child;
+  }
+
+  const publisher = createCloudflarePagesPublisher({
+    dataDir,
+    spawnImpl: fakeDeploy,
+    timeoutMs: 1000
+  });
+
+  await assert.rejects(
+    () =>
+      publisher.publish({
+        report: { rootDir: reportDir, entryFile: "index.html", name: "Report" },
+        publication: { token: "report" },
+        pagesConfig: {
+          projectName: "pagecasthq",
+          accountId: "90e4c638bea527f464ec6fa7caebfd4e",
+          baseUrl: "https://pagecasthq.pages.dev"
+        }
+      }),
+    /Refusing to deploy pagecasthq\.pages\.dev without index\.html, og-image\.png/
+  );
+  assert.equal(deployCommands.length, 0);
 });
 
 test("Headless Pages site deploy defaults to the main branch when omitted", async () => {
@@ -1546,6 +1660,7 @@ test("Headless Pages site deploy defaults to the main branch when omitted", asyn
   const siteDir = path.join(tempDir, "site");
   await fs.mkdir(siteDir, { recursive: true });
   await fs.writeFile(path.join(siteDir, "index.html"), "<h1>No branch</h1>");
+  await fs.writeFile(path.join(siteDir, "og-image.png"), "png");
 
   const accountId = "90e4c638bea527f464ec6fa7caebfd4e";
   const { fakeSpawn: authSpawn } = makeWranglerFake((args) => {
@@ -3224,6 +3339,9 @@ test("isLoopbackHostHeader allows loopback and rejects rebound foreign hosts", (
   }
   // An explicitly configured bind host is trusted.
   assert.equal(isLoopbackHostHeader("0.0.0.0:4173", "0.0.0.0"), true);
+  // A configured local display hostname is trusted only when explicitly allowed.
+  assert.equal(isLoopbackHostHeader("pagecast:4173", "127.0.0.1", ["pagecast"]), true);
+  assert.equal(isLoopbackHostHeader("pagecast:4173", "127.0.0.1"), false);
 });
 
 test("startServers falls back from an occupied persisted port and saves the working pair", async () => {

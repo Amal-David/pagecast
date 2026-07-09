@@ -1,7 +1,8 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { emitActivity } from "@/lib/activity";
+import type { CloudflareProject, CloudflareProjectsResponse } from "@/lib/types";
 
 function message(error: unknown, fallback: string) {
   if (error instanceof ApiError || error instanceof Error) {
@@ -23,6 +24,44 @@ export function useCloudflareConnect() {
       const text = message(error, "Could not connect to Cloudflare.");
       toast.error(text);
       emitActivity({ status: "error", title: "Cloudflare connect failed", message: text });
+    }
+  });
+}
+
+export function useCloudflareProjects(enabled: boolean) {
+  return useQuery<CloudflareProjectsResponse>({
+    queryKey: ["cloudflare-projects"],
+    queryFn: api.cloudflareProjects,
+    enabled
+  });
+}
+
+export function useCloudflareProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (project: CloudflareProject) => {
+      const payload = {
+        projectName: project.name,
+        baseUrl: project.baseUrl
+      };
+      return api.configurePages({
+        ...payload,
+        ...(project.accountId ? { accountId: project.accountId } : {}),
+        ...(project.accountName ? { accountName: project.accountName } : {})
+      });
+    },
+    onSuccess: () => {
+      toast.success("Cloudflare Pages project selected.");
+      emitActivity({ status: "success", title: "Pages project selected" });
+      void queryClient.invalidateQueries({ queryKey: ["status"] });
+      void queryClient.invalidateQueries({ queryKey: ["reports"] });
+      void queryClient.invalidateQueries({ queryKey: ["deployments"] });
+      void queryClient.invalidateQueries({ queryKey: ["cloudflare-projects"] });
+    },
+    onError: (error) => {
+      const text = message(error, "Could not select project.");
+      toast.error(text);
+      emitActivity({ status: "error", title: "Project selection failed", message: text });
     }
   });
 }

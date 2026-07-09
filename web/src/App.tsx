@@ -70,13 +70,17 @@ import {
   useStatus
 } from "@/hooks/use-pagecast";
 import {
+  useCloudflareProject,
+  useCloudflareProjects
+} from "@/hooks/use-cloudflare";
+import {
   PAGECAST_ACTIVITY_EVENT,
   type ActivityEventDetail,
   type ActivityStatus
 } from "@/lib/activity";
 import { cn } from "@/lib/utils";
 import { copyToClipboard, relativeTime } from "@/lib/format";
-import type { CloudflareStatus, FeedbackConfig, Report } from "@/lib/types";
+import type { CloudflareProject, CloudflareStatus, FeedbackConfig, Report } from "@/lib/types";
 
 type ActiveView = "pages" | "settings";
 
@@ -343,6 +347,9 @@ export function App() {
               selectedReportId={selectedReportId}
               activeView={activeView}
               isLoading={reports.isLoading}
+              cloudflare={cloudflare}
+              cloudflareSyncPending={syncCloudflare.isPending}
+              onCloudflareProjectSelected={() => syncCloudflare.mutate({})}
               onSelectReport={selectReport}
               onOpenSettings={() => setActiveView("settings")}
               onRequestDelete={setPendingDelete}
@@ -682,6 +689,9 @@ function PageSidebar({
   selectedReportId,
   activeView,
   isLoading,
+  cloudflare,
+  cloudflareSyncPending,
+  onCloudflareProjectSelected,
   onSelectReport,
   onOpenSettings,
   onRequestDelete,
@@ -691,6 +701,9 @@ function PageSidebar({
   selectedReportId: string | null;
   activeView: ActiveView;
   isLoading: boolean;
+  cloudflare: CloudflareStatus | undefined;
+  cloudflareSyncPending: boolean;
+  onCloudflareProjectSelected: () => void;
   onSelectReport: (report: Report) => void;
   onOpenSettings: () => void;
   onRequestDelete: (report: Report) => void;
@@ -769,6 +782,12 @@ function PageSidebar({
           </details>
         </div>
 
+        <CloudflareProjectList
+          cloudflare={cloudflare}
+          syncPending={cloudflareSyncPending}
+          onProjectSelected={onCloudflareProjectSelected}
+        />
+
         <nav className="max-h-64 min-h-0 flex-1 space-y-1 overflow-y-auto p-2 lg:max-h-none" aria-label="Pages">
           {isLoading ? (
             <div className="flex items-center gap-2 px-2 py-6 text-sm text-muted-foreground">
@@ -818,6 +837,110 @@ function PageSidebar({
         </div>
       </div>
     </aside>
+  );
+}
+
+function cloudflareProjectValue(project: CloudflareProject) {
+  return `${project.accountId || "default"}:${project.name}`;
+}
+
+function cloudflareProjectDomain(project: CloudflareProject) {
+  try {
+    return new URL(project.baseUrl).hostname;
+  } catch {
+    return project.baseUrl.replace(/^https?:\/\//, "");
+  }
+}
+
+function CloudflareProjectList({
+  cloudflare,
+  syncPending,
+  onProjectSelected
+}: {
+  cloudflare: CloudflareStatus | undefined;
+  syncPending: boolean;
+  onProjectSelected: () => void;
+}) {
+  const loggedIn = Boolean(cloudflare?.loggedIn);
+  const projectsQuery = useCloudflareProjects(loggedIn);
+  const selectProject = useCloudflareProject();
+  const projects = projectsQuery.data?.cloudflare.projects ?? [];
+  const projectName = cloudflare?.projectName ?? "";
+  const selectedAccountId = cloudflare?.accountId || "";
+  const selectedProject = projects.find((project) =>
+    project.name === projectName &&
+    (!selectedAccountId || !project.accountId || project.accountId === selectedAccountId)
+  );
+  const selectedProjectValue = selectedProject ? cloudflareProjectValue(selectedProject) : "";
+  const displayedProjects = selectedProject
+    ? [
+        selectedProject,
+        ...projects.filter((project) => cloudflareProjectValue(project) !== selectedProjectValue)
+      ]
+    : projects;
+
+  if (!loggedIn) {
+    return null;
+  }
+
+  return (
+    <section className="border-b px-2 py-2" aria-label="Cloudflare Pages projects">
+      <div className="mb-1.5 flex items-center justify-between px-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <Cloud className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <h3 className="truncate text-xs font-medium text-muted-foreground">Cloudflare Pages</h3>
+        </div>
+        <Badge variant="muted">{projectsQuery.isLoading ? "..." : projects.length}</Badge>
+      </div>
+
+      {projectsQuery.isLoading ? (
+        <div className="flex items-center gap-2 rounded-md px-2 py-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Loading projects...
+        </div>
+      ) : displayedProjects.length === 0 ? (
+        <div className="rounded-md px-2 py-2 text-xs text-muted-foreground">
+          No Pages projects found.
+        </div>
+      ) : (
+        <div className="max-h-48 space-y-1 overflow-y-auto pr-1">
+          {displayedProjects.map((project) => {
+            const projectValue = cloudflareProjectValue(project);
+            const isCurrent = projectValue === selectedProjectValue;
+
+            return (
+              <button
+                key={projectValue}
+                type="button"
+                disabled={isCurrent || selectProject.isPending || syncPending}
+                onClick={() => selectProject.mutate(project, { onSuccess: onProjectSelected })}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:hover:bg-transparent",
+                  isCurrent && "bg-emerald-50 text-emerald-950 ring-1 ring-emerald-100 disabled:hover:bg-emerald-50"
+                )}
+              >
+                <Cloud className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-medium">{project.name}</span>
+                  <span className="block truncate font-mono text-[10px] text-muted-foreground">
+                    {cloudflareProjectDomain(project)}
+                  </span>
+                </span>
+                {isCurrent ? (
+                  <Badge variant="secondary" className="shrink-0 text-[10px]">
+                    Current
+                  </Badge>
+                ) : (
+                  <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
+                    Switch
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 

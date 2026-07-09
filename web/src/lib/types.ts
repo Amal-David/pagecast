@@ -95,6 +95,14 @@ export interface CloudflareAccount {
   name: string;
 }
 
+export interface CloudflareProject {
+  name: string;
+  accountId: string;
+  accountName: string;
+  productionBranch: string;
+  baseUrl: string;
+}
+
 export interface CloudflareStatus {
   authMode: "api-token" | "scoped-oauth";
   tokenConfigured: boolean;
@@ -141,6 +149,16 @@ export interface AppConfig {
   // When true, the dashboard periodically imports missing Pagecast links from
   // Cloudflare Pages. Manual sync is still available when this is off.
   cloudflareSyncEnabled: boolean;
+}
+
+export interface CloudflareProjectsResponse {
+  config: AppConfig;
+  cloudflare: {
+    authenticated: boolean;
+    projects: CloudflareProject[];
+    selectedProject: CloudflareProject | null;
+    projectCount: number;
+  };
 }
 
 export interface ConfigResponse {

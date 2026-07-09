@@ -34,6 +34,8 @@ export const DEFAULT_PAGES_BRANCH = "main";
 export const DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 export const DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS = 60 * 1000;
 export const CLOUDFLARE_OAUTH_SCOPES = ["account:read", "user:read", "pages:write"];
+const PAGECAST_MARKETING_PROJECT_NAME = "pagecasthq";
+const PAGECAST_MARKETING_REQUIRED_FILES = ["index.html", "og-image.png"];
 const MAX_SYNC_IMPORT_FILES = MAX_FOLDER_UPLOAD_FILES;
 const MAX_SYNC_IMPORT_BYTES = MAX_FOLDER_UPLOAD_BYTES;
 const MAX_SYNC_IMPORT_FILE_BYTES = MAX_FOLDER_UPLOAD_FILE_BYTES;
@@ -261,6 +263,58 @@ function normalizeAccountName(value) {
 
 function pagesBaseUrl(projectName) {
   return `https://${projectName}.pages.dev`;
+}
+
+function normalizePagesBaseUrl(value, projectName) {
+  const fallback = pagesBaseUrl(projectName);
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return fallback;
+  }
+
+  const firstDomain = raw.split(/[,\s]+/).find((item) => item && item !== "-") || "";
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(firstDomain)
+    ? firstDomain
+    : `https://${firstDomain}`;
+  try {
+    const url = new URL(candidate);
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || !url.hostname) {
+      return fallback;
+    }
+    return stripTrailingSlash(`${url.protocol}//${url.host}`);
+  } catch {
+    return fallback;
+  }
+}
+
+async function assertSafePagesDeployRoot(rootDir, projectName) {
+  if (projectName !== PAGECAST_MARKETING_PROJECT_NAME) {
+    return;
+  }
+
+  const missing = [];
+  for (const fileName of PAGECAST_MARKETING_REQUIRED_FILES) {
+    try {
+      const stat = await fs.stat(path.join(rootDir, fileName));
+      if (!stat.isFile()) {
+        missing.push(fileName);
+      }
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        missing.push(fileName);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  if (missing.length > 0) {
+    throw appError(
+      `Refusing to deploy ${PAGECAST_MARKETING_PROJECT_NAME}.pages.dev without ${missing.join(", ")}. ` +
+        "That project hosts Pagecast's public landing page; use a dedicated Pages project for published reports or deploy the full landing bundle.",
+      400
+    );
+  }
 }
 
 function pagesProjectNameFromPublicUrl(publicUrl) {
@@ -508,7 +562,7 @@ function normalizeConfig(config = {}) {
       accountId,
       accountName,
       branch: DEFAULT_PAGES_BRANCH,
-      baseUrl: pagesBaseUrl(projectName)
+      baseUrl: normalizePagesBaseUrl(config.pages?.baseUrl, projectName)
     },
     feedback: normalizeFeedback(config.feedback),
     // A subtle "Published with Pagecast" badge on shared pages (the word-of-mouth
@@ -662,6 +716,7 @@ function parseWranglerPagesProjectTable(output) {
 
   const headers = rows[headerIndex].map((column) => column.toLowerCase());
   const nameIndex = headers.findIndex((header) => header === "name" || header === "project name");
+  const domainIndex = headers.findIndex((header) => header.includes("domain"));
   const branchIndex = headers.findIndex((header) => header.includes("branch"));
   const accountIdIndex = headers.findIndex((header) => header === "account id");
   const accountNameIndex = headers.findIndex((header) => header === "account");
@@ -675,6 +730,7 @@ function parseWranglerPagesProjectTable(output) {
 
       return {
         name,
+        project_domains: domainIndex >= 0 ? columns[domainIndex] : "",
         account_id: accountIdIndex >= 0 ? columns[accountIdIndex] : "",
         account_name: accountNameIndex >= 0 ? columns[accountNameIndex] : "",
         production_branch: branchIndex >= 0 ? columns[branchIndex] : ""
@@ -693,7 +749,7 @@ export function parseWranglerPagesProjects(output) {
 
   return extractProjectCandidates(parsed)
     .map((project) => {
-      const name = firstString(project?.name, project?.projectName, project?.project_name);
+      const name = firstString(project?.name, project?.projectName, project?.project_name, project?.["Project Name"]);
       if (!name) {
         return null;
       }
@@ -726,9 +782,22 @@ export function parseWranglerPagesProjects(output) {
         productionBranch: firstString(
           project?.productionBranch,
           project?.production_branch,
-          project?.deployment_configs?.production?.branch
+          project?.deployment_configs?.production?.branch,
+          project?.["Production Branch"]
         ),
-        baseUrl: pagesBaseUrl(projectName)
+        baseUrl: normalizePagesBaseUrl(
+          firstString(
+            project?.baseUrl,
+            project?.base_url,
+            project?.url,
+            project?.domains,
+            project?.domain,
+            project?.projectDomains,
+            project?.project_domains,
+            project?.["Project Domains"]
+          ),
+          projectName
+        )
       };
     })
     .filter(Boolean)
@@ -741,10 +810,15 @@ export function chooseWranglerPagesProject(projects, pagesConfig = {}) {
   }
 
   const preferredName = String(pagesConfig.projectName || "").toLowerCase();
+  const preferredAccountId = String(pagesConfig.accountId || "").toLowerCase();
   // Only adopt a project that is actually requested. If no explicit preference
   // is available, fall back to Pagecast's default project.
   if (preferredName) {
-    return projects.find((project) => project.name === preferredName) || null;
+    const matches = projects.filter((project) => project.name === preferredName);
+    if (preferredAccountId) {
+      return matches.find((project) => String(project.accountId || "").toLowerCase() === preferredAccountId) || matches[0] || null;
+    }
+    return matches[0] || null;
   }
   return projects.find((project) => project.name === DEFAULT_PAGES_PROJECT_NAME) || null;
 }
@@ -1453,17 +1527,23 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
     return structuredClone(rest);
   }
 
-  async function updatePages({ projectName, accountId, accountName } = {}) {
+  async function updatePages({ projectName, accountId, accountName, baseUrl } = {}) {
+    const nextProjectName = projectName === undefined ? config.pages.projectName : projectName;
     const nextAccountId = accountId === undefined ? config.pages.accountId : accountId;
     const nextAccountName =
       accountName === undefined && nextAccountId === config.pages.accountId
         ? config.pages.accountName
         : accountName;
+    const nextBaseUrl =
+      baseUrl === undefined && nextProjectName === config.pages.projectName
+        ? config.pages.baseUrl
+        : baseUrl;
     config = normalizeConfig({
       pages: {
-        projectName: projectName === undefined ? config.pages.projectName : projectName,
+        projectName: nextProjectName,
         accountId: nextAccountId,
-        accountName: nextAccountName
+        accountName: nextAccountName,
+        baseUrl: nextBaseUrl
       },
       // Preserve feedback + badge + goal config — a pages update (e.g. persisting
       // the account on publish) must not wipe other settings.
@@ -1936,6 +2016,7 @@ export function createCloudflarePagesPublisher({
     const projectName = normalizePagesProjectName(pagesConfig.projectName);
     const accountId = normalizeAccountId(pagesConfig.accountId || "");
     const deployBranch = normalizePagesBranch(branch);
+    await assertSafePagesDeployRoot(rootDir, projectName);
 
     // Deploy from INSIDE rootDir (path arg ".") instead of passing rootDir as
     // the path. `wrangler pages deploy` resolves the Functions directory
@@ -4387,16 +4468,17 @@ async function detectAndPersistCloudflareProjects({ cloudflareAuth, configStore 
     accountId: currentConfig.pages.accountId
   });
   const selectedProject = chooseWranglerPagesProject(projects, currentConfig.pages);
-  const config = selectedProject
-    ? await configStore.updatePages({
-        projectName: selectedProject.name,
-        accountId: selectedProject.accountId || currentConfig.pages.accountId,
-        accountName: selectedProject.accountName || currentConfig.pages.accountName
-      })
-    : currentConfig;
+  if (selectedProject) {
+    await configStore.updatePages({
+      projectName: selectedProject.name,
+      accountId: selectedProject.accountId || currentConfig.pages.accountId,
+      accountName: selectedProject.accountName || currentConfig.pages.accountName,
+      baseUrl: selectedProject.baseUrl
+    });
+  }
 
   return {
-    config,
+    config: configStore.getPublicConfig(),
     cloudflare: {
       authenticated: true,
       projects,
@@ -4491,15 +4573,15 @@ async function ensureCloudflarePagesTarget({
       };
   }
 
-  let config = currentConfig;
   if (selectedProject) {
-    config = await configStore.updatePages({
+    await configStore.updatePages({
       projectName: selectedProject.name,
       accountId: selectedProject.accountId || accountId,
-      accountName: accountName || selectedProject.accountName
+      accountName: accountName || selectedProject.accountName,
+      baseUrl: selectedProject.baseUrl
     });
   } else if (accountId) {
-    config = await configStore.updatePages({
+    await configStore.updatePages({
       projectName: currentConfig.pages.projectName,
       accountId,
       accountName
@@ -4507,7 +4589,7 @@ async function ensureCloudflarePagesTarget({
   }
 
   return {
-    config,
+    config: configStore.getPublicConfig(),
     cloudflare: {
       authenticated: true,
       needsAccountChoice: false,
@@ -4585,7 +4667,7 @@ export function createPublicHandler({ store }) {
 // addressed to a loopback host. A malicious web page that rebinds its own domain
 // to 127.0.0.1 still sends *its* Host header (e.g. "evil.example"), which fails
 // this check, while the real admin UI on 127.0.0.1/localhost passes.
-export function isLoopbackHostHeader(hostHeader, bindHost) {
+export function isLoopbackHostHeader(hostHeader, bindHost, allowedHosts = []) {
   if (!hostHeader) {
     // No Host header (HTTP/1.0, some internal callers) — the request cannot have
     // come from a rebound browser origin, so allow it.
@@ -4617,6 +4699,9 @@ export function isLoopbackHostHeader(hostHeader, bindHost) {
   if (bindHost && hostname === String(bindHost).toLowerCase()) {
     return true;
   }
+  if (allowedHosts.some((allowedHost) => hostname === String(allowedHost).toLowerCase())) {
+    return true;
+  }
   return false;
 }
 
@@ -4641,11 +4726,12 @@ export function createAdminHandler({
   tunnelManager,
   deployQueue,
   watchManager,
-  bindHost = DEFAULT_HOST
+  bindHost = DEFAULT_HOST,
+  allowedHosts = []
 }) {
   return async function adminHandler(req, res) {
     try {
-      if (!isLoopbackHostHeader(req.headers.host, bindHost)) {
+      if (!isLoopbackHostHeader(req.headers.host, bindHost, allowedHosts)) {
         sendText(
           res,
           403,
@@ -4837,12 +4923,13 @@ async function handleApi(
 
   if (url.pathname === "/api/config/pages" && req.method === "POST") {
     const body = await readJsonBody(req);
-    const config = await configStore.updatePages({
+    await configStore.updatePages({
       projectName: body.projectName,
       accountId: body.accountId,
-      accountName: body.accountName
+      accountName: body.accountName,
+      baseUrl: body.baseUrl
     });
-    sendJson(res, 200, { config });
+    sendJson(res, 200, { config: configStore.getPublicConfig() });
     return;
   }
 
@@ -5732,7 +5819,8 @@ export async function startServers({
         tunnelManager,
         deployQueue,
         watchManager,
-        bindHost: urlHost
+        bindHost: urlHost,
+        allowedHosts: [displayHostname]
       })
     );
 
@@ -5815,15 +5903,16 @@ async function createHeadlessCloudflareContext({
   return { configStore, cloudflareAuth, pagesPublisher };
 }
 
-async function applyPagesSelection({ configStore, projectName, accountId }) {
+async function applyPagesSelection({ configStore, projectName, accountId, accountName, baseUrl }) {
   const current = configStore.get();
   const selectedProjectName = projectName ? normalizePagesProjectName(projectName) : current.pages.projectName;
   const selectedAccountId = accountId ? normalizeAccountId(accountId) : current.pages.accountId;
-  if (projectName || accountId) {
+  if (projectName || accountId || baseUrl) {
     await configStore.updatePages({
       projectName: selectedProjectName,
       accountId: selectedAccountId,
-      accountName: accountId ? "" : current.pages.accountName
+      accountName: accountName === undefined ? (accountId ? "" : current.pages.accountName) : accountName,
+      baseUrl
     });
   }
   return configStore.get();

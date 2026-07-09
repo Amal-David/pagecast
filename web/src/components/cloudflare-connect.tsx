@@ -20,9 +20,12 @@ import {
 import {
   useCloudflareAccount,
   useCloudflareConnect,
+  useCloudflareProject,
+  useCloudflareProjects,
   useCloudflareLogout
 } from "@/hooks/use-cloudflare";
-import type { CloudflareStatus } from "@/lib/types";
+import { useSyncCloudflarePages } from "@/hooks/use-pagecast";
+import type { CloudflareProject, CloudflareStatus } from "@/lib/types";
 
 interface CloudflareConnectProps {
   cloudflare: CloudflareStatus | undefined;
@@ -47,6 +50,22 @@ function accountOptionLabel(account: { name?: string; id: string }, index: numbe
   return `Cloudflare account ${index + 1}`;
 }
 
+function projectOptionValue(project: CloudflareProject) {
+  return `${project.accountId || "default"}:${project.name}`;
+}
+
+function projectOptionLabel(project: CloudflareProject) {
+  return project.accountName ? `${project.accountName} / ${project.name}` : project.name;
+}
+
+function projectDomain(project: CloudflareProject) {
+  try {
+    return new URL(project.baseUrl).hostname;
+  } catch {
+    return project.baseUrl.replace(/^https?:\/\//, "");
+  }
+}
+
 export function CloudflareConnect({
   cloudflare,
   autoSyncEnabled,
@@ -55,17 +74,35 @@ export function CloudflareConnect({
 }: CloudflareConnectProps) {
   const connect = useCloudflareConnect();
   const selectAccount = useCloudflareAccount();
+  const selectProject = useCloudflareProject();
+  const syncCloudflare = useSyncCloudflarePages();
   const logout = useCloudflareLogout();
   const [chosenAccount, setChosenAccount] = useState<string>("");
+  const [chosenProject, setChosenProject] = useState<string>("");
 
   const loggedIn = Boolean(cloudflare?.loggedIn);
   const accounts = cloudflare?.accounts ?? [];
+  const projectsQuery = useCloudflareProjects(loggedIn);
+  const projects = projectsQuery.data?.cloudflare.projects ?? [];
   const accountName = displayAccountName(cloudflare);
   const projectName = cloudflare?.projectName ?? "";
   const tokenAuth = cloudflare?.authMode === "api-token";
   const selectedAccountId = cloudflare?.accountId || "";
   const canChooseAccount = loggedIn && accounts.length > 1;
   const connected = loggedIn && Boolean(accountName) && Boolean(projectName);
+  const selectedProject = projects.find((project) =>
+    project.name === projectName &&
+    (!selectedAccountId || !project.accountId || project.accountId === selectedAccountId)
+  );
+  const selectedProjectValue = selectedProject ? projectOptionValue(selectedProject) : "";
+  const chosenProjectRecord = projects.find((project) => projectOptionValue(project) === chosenProject);
+  const canChooseProject = loggedIn && projects.length > 0;
+  const displayedProjects = selectedProject
+    ? [
+        selectedProject,
+        ...projects.filter((project) => projectOptionValue(project) !== selectedProjectValue)
+      ]
+    : projects;
 
   return (
     <Card>
@@ -156,6 +193,99 @@ export function CloudflareConnect({
                   ) : null}
                   Switch
                 </Button>
+              </div>
+            ) : null}
+
+            {canChooseProject ? (
+              <div className="space-y-3 border-t pt-3">
+                <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+                  <Select
+                    value={chosenProject || selectedProjectValue}
+                    onValueChange={setChosenProject}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select a Pages project" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {projects.map((project) => (
+                        <SelectItem key={projectOptionValue(project)} value={projectOptionValue(project)}>
+                          {projectOptionLabel(project)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    variant="outline"
+                    disabled={
+                      !chosenProjectRecord ||
+                      chosenProject === selectedProjectValue ||
+                      selectProject.isPending ||
+                      syncCloudflare.isPending
+                    }
+                    onClick={() =>
+                      chosenProjectRecord &&
+                      selectProject.mutate(chosenProjectRecord, {
+                        onSuccess: () => syncCloudflare.mutate({})
+                      })
+                    }
+                  >
+                    {selectProject.isPending || syncCloudflare.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : null}
+                    Switch
+                  </Button>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-medium">Cloudflare Pages projects</p>
+                    <Badge variant="muted">{projects.length}</Badge>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto rounded-md border">
+                    {displayedProjects.map((project) => {
+                      const value = projectOptionValue(project);
+                      const isCurrent = value === selectedProjectValue || project.name === projectName;
+                      return (
+                        <div
+                          key={value}
+                          className="grid gap-2 border-b px-3 py-2 last:border-b-0 sm:grid-cols-[1fr_auto] sm:items-center"
+                        >
+                          <div className="min-w-0">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <p className="truncate text-sm font-medium">{project.name}</p>
+                              {isCurrent ? (
+                                <Badge variant="secondary" className="shrink-0 gap-1">
+                                  <Check className="h-3 w-3" />
+                                  Current
+                                </Badge>
+                              ) : null}
+                            </div>
+                            <p className="truncate font-mono text-xs text-muted-foreground">
+                              {projectDomain(project)}
+                            </p>
+                          </div>
+                          <Button
+                            size="sm"
+                            variant={isCurrent ? "secondary" : "outline"}
+                            disabled={isCurrent || selectProject.isPending}
+                            onClick={() => selectProject.mutate(project)}
+                          >
+                            {isCurrent ? (
+                              <Check className="h-4 w-4" />
+                            ) : selectProject.isPending ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : null}
+                            {isCurrent ? "Current" : "Use"}
+                          </Button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            ) : projectsQuery.isLoading && loggedIn ? (
+              <div className="flex items-center gap-2 rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Loading Pages projects
               </div>
             ) : null}
 

@@ -101,10 +101,12 @@ async function main() {
         emit(
           `A plan was just finalized in plan mode. If this plan is something the user might ` +
             `want to share (a proposal, design doc, or roadmap), proactively offer ONCE — ask ` +
-            `"Want me to publish this plan with Pagecast? I'll save it as a shareable page." ` +
-            `On an explicit yes: write the plan markdown to a file (e.g. ./plan.md) and run ` +
-            `\`npx pagecast publish "<abs path>.md" --json\`, then return the URL. Skip the offer ` +
-            `for small/internal planning. Never publish without a yes; ask at most once.`
+            `"How do you want to publish this plan? 1. Claude Code Artifact — private/org claude.ai page. ` +
+            `2. Pagecast — Cloudflare Pages link you can share outside Claude. 3. Don't publish." ` +
+            `If they choose Pagecast, write the plan markdown to a file (e.g. ./plan.md), run ` +
+            `\`npx pagecast publish "<abs path>.md" --json\`, then return the URL. If they choose ` +
+            `Claude Code Artifact, use the Artifact publishing flow. Skip the offer for small/internal ` +
+            `planning. Never publish without an explicit choice; ask at most once.`
         );
       }
       process.exit(0);
@@ -119,12 +121,15 @@ async function main() {
     emit(
       `A shareable HTML/Markdown file was just written at "${filePath}". ` +
         `Default action: when you finish this turn, proactively offer ONCE to publish it — ` +
-        `ask the user exactly "Want me to publish this with Pagecast? It'll create a shareable public link." ` +
+        `ask the user exactly "How do you want to publish this? 1. Claude Code Artifact — private/org ` +
+        `claude.ai page that can update in place. 2. Pagecast — Cloudflare Pages link you can share ` +
+        `outside Claude, rename, re-sync, revoke, password-protect, or expire. 3. Don't publish." ` +
         `Offer unless the file is clearly internal/scratch (a draft note, a config/source file, or repo meta ` +
         `like README/CHANGELOG/TODO — those were already filtered, so lean toward offering). ` +
         `Do not stay silent just because you are unsure. ` +
-        `Only on an explicit yes, run \`npx pagecast publish "${filePath}" --json\` and return the URL. ` +
-        `Never publish without an explicit yes, and ask at most once for this file.`
+        `If they choose Pagecast, run \`npx pagecast publish "${filePath}" --json\` and return the URL. ` +
+        `If they choose Claude Code Artifact, use the Artifact publishing flow. Never publish without an ` +
+        `explicit choice, and ask at most once for this file.`
     );
     // Mark it handled so the Stop-hook safety net doesn't nudge the same file.
     await recordOffered(event.session_id, [filePath]);
