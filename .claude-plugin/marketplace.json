@@ -4,13 +4,13 @@
     "name": "Pagecast"
   },
   "metadata": {
-    "description": "Publish agent-generated HTML or Markdown reports to shareable public URLs with Pagecast."
+    "description": "Publish agent-generated HTML or Markdown reports as Claude Code Artifacts or Pagecast Cloudflare Pages URLs."
   },
   "plugins": [
     {
       "name": "pagecast",
       "source": "./plugin",
-      "description": "Offers to publish freshly created HTML/Markdown reports, plans, and docs to a public URL via the pagecast CLI."
+      "description": "Asks whether to publish freshly created HTML/Markdown reports, plans, and docs as Claude Code Artifacts or Pagecast Cloudflare Pages URLs."
     }
   ]
 }

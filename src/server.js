@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { createReadStream, watch as fsWatch } from "node:fs";
+import { createReadStream, existsSync, watch as fsWatch } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -34,10 +34,24 @@ export const DEFAULT_PAGES_BRANCH = "main";
 export const DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 export const DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS = 60 * 1000;
 export const CLOUDFLARE_OAUTH_SCOPES = ["account:read", "user:read", "pages:write"];
+const PAGECAST_MARKETING_PROJECT_NAME = "pagecasthq";
+const PAGECAST_MARKETING_REQUIRED_FILES = ["index.html", "og-image.png"];
 const MAX_SYNC_IMPORT_FILES = MAX_FOLDER_UPLOAD_FILES;
 const MAX_SYNC_IMPORT_BYTES = MAX_FOLDER_UPLOAD_BYTES;
 const MAX_SYNC_IMPORT_FILE_BYTES = MAX_FOLDER_UPLOAD_FILE_BYTES;
+const MAX_PUBLIC_URL_IMPORT_FILES = 80;
 const SYNC_MANIFEST_FETCH_TIMEOUT_MS = 5000;
+const PUBLIC_URL_SKIPPED_ASSET_EXTENSIONS = new Set([
+  ".mp3",
+  ".mp4",
+  ".m4a",
+  ".mov",
+  ".ogg",
+  ".opus",
+  ".wav",
+  ".webm",
+  ".flac"
+]);
 
 // Feedback provisioning deploys a Worker + KV, which the base publishing scopes
 // don't permit. These elevate the grant only when the user opts into feedback,
@@ -223,6 +237,14 @@ function normalizePagesProjectNameSafe(value) {
   }
 }
 
+function projectRootImportSlug(projectName) {
+  const normalized = normalizePagesProjectName(projectName);
+  const rootSuffix = "-root";
+  return normalizeCustomSlug(
+    `${normalized.slice(0, 63 - rootSuffix.length).replace(/-+$/g, "")}${rootSuffix}`
+  );
+}
+
 function normalizeAccountId(value) {
   const accountId = String(value || "").trim();
   if (!accountId) {
@@ -261,6 +283,58 @@ function normalizeAccountName(value) {
 
 function pagesBaseUrl(projectName) {
   return `https://${projectName}.pages.dev`;
+}
+
+function normalizePagesBaseUrl(value, projectName) {
+  const fallback = pagesBaseUrl(projectName);
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return fallback;
+  }
+
+  const firstDomain = raw.split(/[,\s]+/).find((item) => item && item !== "-") || "";
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(firstDomain)
+    ? firstDomain
+    : `https://${firstDomain}`;
+  try {
+    const url = new URL(candidate);
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || !url.hostname) {
+      return fallback;
+    }
+    return stripTrailingSlash(`${url.protocol}//${url.host}`);
+  } catch {
+    return fallback;
+  }
+}
+
+async function assertSafePagesDeployRoot(rootDir, projectName) {
+  if (projectName !== PAGECAST_MARKETING_PROJECT_NAME) {
+    return;
+  }
+
+  const missing = [];
+  for (const fileName of PAGECAST_MARKETING_REQUIRED_FILES) {
+    try {
+      const stat = await fs.stat(path.join(rootDir, fileName));
+      if (!stat.isFile()) {
+        missing.push(fileName);
+      }
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        missing.push(fileName);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  if (missing.length > 0) {
+    throw appError(
+      `Refusing to deploy ${PAGECAST_MARKETING_PROJECT_NAME}.pages.dev without ${missing.join(", ")}. ` +
+        "That project hosts Pagecast's public landing page; use a dedicated Pages project for published reports or deploy the full landing bundle.",
+      400
+    );
+  }
 }
 
 function pagesProjectNameFromPublicUrl(publicUrl) {
@@ -508,7 +582,7 @@ function normalizeConfig(config = {}) {
       accountId,
       accountName,
       branch: DEFAULT_PAGES_BRANCH,
-      baseUrl: pagesBaseUrl(projectName)
+      baseUrl: normalizePagesBaseUrl(config.pages?.baseUrl, projectName)
     },
     feedback: normalizeFeedback(config.feedback),
     // A subtle "Published with Pagecast" badge on shared pages (the word-of-mouth
@@ -606,6 +680,12 @@ function parseJsonFromCommandOutput(output) {
 
 function firstString(...values) {
   for (const value of values) {
+    if (Array.isArray(value)) {
+      const nested = firstString(...value);
+      if (nested) {
+        return nested;
+      }
+    }
     if (typeof value === "string" && value.trim()) {
       return value.trim();
     }
@@ -662,6 +742,7 @@ function parseWranglerPagesProjectTable(output) {
 
   const headers = rows[headerIndex].map((column) => column.toLowerCase());
   const nameIndex = headers.findIndex((header) => header === "name" || header === "project name");
+  const domainIndex = headers.findIndex((header) => header.includes("domain"));
   const branchIndex = headers.findIndex((header) => header.includes("branch"));
   const accountIdIndex = headers.findIndex((header) => header === "account id");
   const accountNameIndex = headers.findIndex((header) => header === "account");
@@ -675,6 +756,7 @@ function parseWranglerPagesProjectTable(output) {
 
       return {
         name,
+        project_domains: domainIndex >= 0 ? columns[domainIndex] : "",
         account_id: accountIdIndex >= 0 ? columns[accountIdIndex] : "",
         account_name: accountNameIndex >= 0 ? columns[accountNameIndex] : "",
         production_branch: branchIndex >= 0 ? columns[branchIndex] : ""
@@ -693,7 +775,7 @@ export function parseWranglerPagesProjects(output) {
 
   return extractProjectCandidates(parsed)
     .map((project) => {
-      const name = firstString(project?.name, project?.projectName, project?.project_name);
+      const name = firstString(project?.name, project?.projectName, project?.project_name, project?.["Project Name"]);
       if (!name) {
         return null;
       }
@@ -726,9 +808,22 @@ export function parseWranglerPagesProjects(output) {
         productionBranch: firstString(
           project?.productionBranch,
           project?.production_branch,
-          project?.deployment_configs?.production?.branch
+          project?.deployment_configs?.production?.branch,
+          project?.["Production Branch"]
         ),
-        baseUrl: pagesBaseUrl(projectName)
+        baseUrl: normalizePagesBaseUrl(
+          firstString(
+            project?.baseUrl,
+            project?.base_url,
+            project?.url,
+            project?.domains,
+            project?.domain,
+            project?.projectDomains,
+            project?.project_domains,
+            project?.["Project Domains"]
+          ),
+          projectName
+        )
       };
     })
     .filter(Boolean)
@@ -741,10 +836,15 @@ export function chooseWranglerPagesProject(projects, pagesConfig = {}) {
   }
 
   const preferredName = String(pagesConfig.projectName || "").toLowerCase();
+  const preferredAccountId = String(pagesConfig.accountId || "").toLowerCase();
   // Only adopt a project that is actually requested. If no explicit preference
   // is available, fall back to Pagecast's default project.
   if (preferredName) {
-    return projects.find((project) => project.name === preferredName) || null;
+    const matches = projects.filter((project) => project.name === preferredName);
+    if (preferredAccountId) {
+      return matches.find((project) => String(project.accountId || "").toLowerCase() === preferredAccountId) || matches[0] || null;
+    }
+    return matches[0] || null;
   }
   return projects.find((project) => project.name === DEFAULT_PAGES_PROJECT_NAME) || null;
 }
@@ -1105,6 +1205,262 @@ async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs = SYNC_M
   }
 }
 
+function safePublicUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+function relativePublicRootPath(publicUrl) {
+  if (publicUrl.pathname.endsWith("/")) {
+    return publicUrl.pathname;
+  }
+  return `${path.posix.dirname(publicUrl.pathname)}/`;
+}
+
+function localPathForPublicAsset(assetUrl, publicUrl) {
+  let decodedPath;
+  try {
+    decodedPath = decodeURIComponent(assetUrl.pathname);
+  } catch {
+    return null;
+  }
+
+  const rootPath = relativePublicRootPath(publicUrl);
+  const withoutRoot = decodedPath.startsWith(rootPath)
+    ? decodedPath.slice(rootPath.length)
+    : decodedPath.replace(/^\/+/, "");
+  const localPath = withoutRoot.replace(/^\/+/, "");
+  if (!localPath || localPath.endsWith("/")) {
+    return null;
+  }
+
+  const normalized = normalizeAssetRequestPath(localPath);
+  return normalized ? normalized.split(path.sep).join("/") : null;
+}
+
+function shouldSkipPublicUrlAsset(localPath) {
+  return PUBLIC_URL_SKIPPED_ASSET_EXTENSIONS.has(path.posix.extname(localPath).toLowerCase());
+}
+
+function publicAssetUrl(rawValue, baseUrl, rootUrl) {
+  const value = String(rawValue || "").trim();
+  if (
+    !value ||
+    value.startsWith("#") ||
+    /^(?:data|blob|mailto|tel|javascript):/i.test(value)
+  ) {
+    return null;
+  }
+
+  let url;
+  try {
+    url = new URL(value, baseUrl);
+  } catch {
+    return null;
+  }
+
+  if (url.origin !== rootUrl.origin || (url.protocol !== "http:" && url.protocol !== "https:")) {
+    return null;
+  }
+
+  const localPath = localPathForPublicAsset(url, rootUrl);
+  if (!localPath || localPath === "index.html") {
+    return null;
+  }
+  if (shouldSkipPublicUrlAsset(localPath)) {
+    return null;
+  }
+
+  return { url, localPath, rawValue: value };
+}
+
+function isLikelyHrefAsset(value) {
+  const href = String(value || "").trim();
+  if (!href || href.startsWith("#")) {
+    return false;
+  }
+  try {
+    const pathname = new URL(href, "https://pagecast.local").pathname;
+    return /\.[a-z0-9]{2,8}$/i.test(pathname);
+  } catch {
+    return false;
+  }
+}
+
+function extractHtmlAssetReferences(html, baseUrl, rootUrl) {
+  const references = [];
+  const attrPattern = /\b(src|href|poster)\s*=\s*(["'])(.*?)\2/gi;
+  let match;
+  while ((match = attrPattern.exec(html))) {
+    const attr = match[1].toLowerCase();
+    const rawValue = match[3];
+    if (attr === "href" && !isLikelyHrefAsset(rawValue)) {
+      continue;
+    }
+    const asset = publicAssetUrl(rawValue, baseUrl, rootUrl);
+    if (asset) {
+      references.push(asset);
+    }
+  }
+  return references;
+}
+
+function extractCssAssetReferences(css, baseUrl, rootUrl) {
+  const references = [];
+  const urlPattern = /url\(\s*(["']?)([^"')]+)\1\s*\)/gi;
+  let match;
+  while ((match = urlPattern.exec(css))) {
+    const asset = publicAssetUrl(match[2], baseUrl, rootUrl);
+    if (asset) {
+      references.push(asset);
+    }
+  }
+  return references;
+}
+
+function rewriteReferences(content, replacements) {
+  let rewritten = content;
+  for (const [from, to] of replacements) {
+    rewritten = rewritten.split(from).join(to);
+  }
+  return rewritten;
+}
+
+function relativeReference(fromFile, toFile) {
+  const fromDir = path.posix.dirname(fromFile);
+  const relative = path.posix.relative(fromDir, toFile);
+  return relative || path.posix.basename(toFile);
+}
+
+async function readSyncImportResponse(response, totalBytes) {
+  const lengthHeader = response.headers.get("content-length");
+  const contentLength = /^\d+$/.test(lengthHeader || "") ? Number(lengthHeader) : null;
+  if (contentLength !== null && contentLength > MAX_SYNC_IMPORT_FILE_BYTES) {
+    throw appError("Synced page includes a file that is too large.", 413);
+  }
+  if (contentLength !== null && totalBytes + contentLength > MAX_SYNC_IMPORT_BYTES) {
+    throw appError("Synced page is too large.", 413);
+  }
+
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    throw appError("Could not read synced page response.", 502);
+  }
+
+  const chunks = [];
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > MAX_SYNC_IMPORT_FILE_BYTES) {
+        throw appError("Synced page includes a file that is too large.", 413);
+      }
+      if (totalBytes + received > MAX_SYNC_IMPORT_BYTES) {
+        throw appError("Synced page is too large.", 413);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+
+  const content = Buffer.concat(chunks, received);
+  return { content, totalBytes: totalBytes + content.length };
+}
+
+async function copyPublicUrlFiles({ publicUrl, destinationRoot, fetchImpl = fetch } = {}) {
+  const rootUrl = safePublicUrl(publicUrl);
+  if (!rootUrl) {
+    throw appError("A public URL is required to recover this page.", 400);
+  }
+
+  await fs.rm(destinationRoot, { recursive: true, force: true });
+  await fs.mkdir(destinationRoot, { recursive: true });
+
+  const rootResponse = await fetchWithTimeout(fetchImpl, rootUrl.href, {
+    headers: { Accept: "text/html,application/xhtml+xml" }
+  });
+  if (!rootResponse.ok) {
+    throw appError(`Could not recover the published page (${rootResponse.status}).`, 502);
+  }
+
+  let totalBytes = 0;
+  const rootBody = await readSyncImportResponse(rootResponse, totalBytes);
+  totalBytes = rootBody.totalBytes;
+  let html = rootBody.content.toString("utf8");
+  const queued = [];
+  const seen = new Set(["index.html"]);
+  let fileCount = 1;
+
+  function enqueue(asset) {
+    if (!asset || seen.has(asset.localPath)) {
+      return;
+    }
+    if (fileCount >= MAX_PUBLIC_URL_IMPORT_FILES) {
+      return;
+    }
+    seen.add(asset.localPath);
+    fileCount += 1;
+    queued.push(asset);
+  }
+
+  const htmlReplacements = new Map();
+  for (const asset of extractHtmlAssetReferences(html, rootUrl.href, rootUrl)) {
+    enqueue(asset);
+    htmlReplacements.set(asset.rawValue, asset.localPath);
+  }
+  html = rewriteReferences(html, htmlReplacements);
+  await fs.writeFile(path.join(destinationRoot, "index.html"), html, "utf8");
+
+  for (let index = 0; index < queued.length; index += 1) {
+    const asset = queued[index];
+    const response = await fetchWithTimeout(fetchImpl, asset.url.href);
+    if (!response.ok) {
+      continue;
+    }
+    let body;
+    try {
+      body = await readSyncImportResponse(response, totalBytes);
+    } catch (error) {
+      if (error.statusCode === 413) {
+        continue;
+      }
+      throw error;
+    }
+    totalBytes = body.totalBytes;
+    const destinationPath = path.resolve(destinationRoot, asset.localPath);
+    if (!isPathInside(destinationRoot, destinationPath)) {
+      throw appError("Synced page includes an unsafe file path.", 400);
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/css") || asset.localPath.endsWith(".css")) {
+      let css = body.content.toString("utf8");
+      const cssReplacements = new Map();
+      for (const nestedAsset of extractCssAssetReferences(css, asset.url.href, rootUrl)) {
+        enqueue(nestedAsset);
+        cssReplacements.set(
+          nestedAsset.rawValue,
+          relativeReference(asset.localPath, nestedAsset.localPath)
+        );
+      }
+      css = rewriteReferences(css, cssReplacements);
+      body = { ...body, content: Buffer.from(css, "utf8") };
+    }
+
+    await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+    await fs.writeFile(destinationPath, body.content);
+  }
+
+  return { entryFile: "index.html", files: await listPublicTreeFiles(destinationRoot) };
+}
+
 async function runSpawnCommand({
   spawnImpl,
   command,
@@ -1453,17 +1809,23 @@ export function createConfigStore({ dataDir = path.join(PROJECT_ROOT, ".pagecast
     return structuredClone(rest);
   }
 
-  async function updatePages({ projectName, accountId, accountName } = {}) {
+  async function updatePages({ projectName, accountId, accountName, baseUrl } = {}) {
+    const nextProjectName = projectName === undefined ? config.pages.projectName : projectName;
     const nextAccountId = accountId === undefined ? config.pages.accountId : accountId;
     const nextAccountName =
       accountName === undefined && nextAccountId === config.pages.accountId
         ? config.pages.accountName
         : accountName;
+    const nextBaseUrl =
+      baseUrl === undefined && nextProjectName === config.pages.projectName
+        ? config.pages.baseUrl
+        : baseUrl;
     config = normalizeConfig({
       pages: {
-        projectName: projectName === undefined ? config.pages.projectName : projectName,
+        projectName: nextProjectName,
         accountId: nextAccountId,
-        accountName: nextAccountName
+        accountName: nextAccountName,
+        baseUrl: nextBaseUrl
       },
       // Preserve feedback + badge + goal config — a pages update (e.g. persisting
       // the account on publish) must not wipe other settings.
@@ -1936,6 +2298,7 @@ export function createCloudflarePagesPublisher({
     const projectName = normalizePagesProjectName(pagesConfig.projectName);
     const accountId = normalizeAccountId(pagesConfig.accountId || "");
     const deployBranch = normalizePagesBranch(branch);
+    await assertSafePagesDeployRoot(rootDir, projectName);
 
     // Deploy from INSIDE rootDir (path arg ".") instead of passing rootDir as
     // the path. `wrangler pages deploy` resolves the Functions directory
@@ -2117,6 +2480,56 @@ export function createCloudflarePagesPublisher({
           source: records.has(record.slug) ? "cloudflare+local-staged" : "local-staged"
         });
       }
+    }
+
+    const projectName =
+      normalizePagesProjectNameSafe(pagesConfig?.projectName) || DEFAULT_PAGES_PROJECT_NAME;
+    const projectRootSlug = projectRootImportSlug(projectName);
+    const projectDeployRoot = path.join(deployRoot, projectName);
+    try {
+      const projectEntry = await findFolderEntry(projectDeployRoot);
+      const files = await listPublicTreeFiles(projectDeployRoot);
+      let title = projectName;
+      try {
+        const html = await fs.readFile(path.join(projectDeployRoot, projectEntry), "utf8");
+        title = extractTitle(html, title) || title;
+      } catch {
+        title = projectName;
+      }
+      if (!records.has(projectRootSlug)) {
+        records.set(projectRootSlug, {
+          slug: projectRootSlug,
+          source: "local-staged-site-root",
+          sourceRoot: projectDeployRoot,
+          files,
+          title,
+          label: "recovered",
+          token: projectRootSlug,
+          publicUrl: baseUrl,
+          baseUrl,
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        });
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT" && error.statusCode !== 400) {
+        warnings.push(`Local staged Pages project could not be read: ${error.message || error}.`);
+      }
+    }
+
+    if (!remoteManifestFound && !records.has(projectRootSlug) && baseUrl) {
+      records.set(projectRootSlug, {
+        slug: projectRootSlug,
+        source: "cloudflare-public-root",
+        files: [],
+        title: projectName,
+        label: "recovered",
+        token: projectRootSlug,
+        publicUrl: baseUrl,
+        baseUrl,
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      });
     }
 
     return {
@@ -2586,7 +2999,8 @@ export function createCloudflareAuthManager({
 export function createReportStore({
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   buildSpawnImpl = spawn,
-  buildTimeoutMs = 5 * 60 * 1000
+  buildTimeoutMs = 5 * 60 * 1000,
+  recoverFetchImpl = fetch
 } = {}) {
   const statePath = path.join(dataDir, "reports.json");
   const uploadRoot = path.join(dataDir, "uploads");
@@ -2654,6 +3068,21 @@ export function createReportStore({
 
   function reportSourceRoot(report) {
     return path.resolve(report.workingDir || report.buildOutputRoot || report.rootDir);
+  }
+
+  function reportSourceMissing(report) {
+    if (!report || report.workingDir || report.kind === "upload") {
+      return false;
+    }
+    if (report.kind === "folder" && report.buildCommand && !report.buildOutputRoot) {
+      return false;
+    }
+    const rootDir = reportSourceRoot(report);
+    const entryPath = path.resolve(rootDir, report.entryFile || "index.html");
+    if (!isPathInside(rootDir, entryPath)) {
+      return true;
+    }
+    return !existsSync(entryPath);
   }
 
   async function save() {
@@ -2801,6 +3230,7 @@ export function createReportStore({
       // server-side secret and is intentionally never serialized to the API.
       passwordProtected: report.passwordProtected === true,
       importedFromCloudflare: report.importedFromCloudflare === true,
+      sourceMissing: reportSourceMissing(report),
       createdAt: report.createdAt,
       updatedAt: report.updatedAt,
       localUrl: adminBaseUrl ? joinUrl(adminBaseUrl, previewSuffix) : null,
@@ -3199,28 +3629,14 @@ export function createReportStore({
       if (!response.ok) {
         throw appError(`Could not import ${relativePath} from Cloudflare (${response.status}).`, 502);
       }
-      const lengthHeader = response.headers.get("content-length");
-      const contentLength = /^\d+$/.test(lengthHeader || "") ? Number(lengthHeader) : null;
-      if (contentLength !== null && contentLength > MAX_SYNC_IMPORT_FILE_BYTES) {
-        throw appError("Synced page includes a file that is too large.", 413);
-      }
-      if (contentLength !== null && totalBytes + contentLength > MAX_SYNC_IMPORT_BYTES) {
-        throw appError("Synced page is too large.", 413);
-      }
-      const content = Buffer.from(await response.arrayBuffer());
-      if (content.length > MAX_SYNC_IMPORT_FILE_BYTES) {
-        throw appError("Synced page includes a file that is too large.", 413);
-      }
-      totalBytes += content.length;
-      if (totalBytes > MAX_SYNC_IMPORT_BYTES) {
-        throw appError("Synced page is too large.", 413);
-      }
+      const body = await readSyncImportResponse(response, totalBytes);
+      totalBytes = body.totalBytes;
       const destinationPath = path.resolve(destinationRoot, relativePath);
       if (!isPathInside(destinationRoot, destinationPath)) {
         throw appError("Synced page includes an unsafe file path.", 400);
       }
       await fs.mkdir(path.dirname(destinationPath), { recursive: true });
-      await fs.writeFile(destinationPath, content);
+      await fs.writeFile(destinationPath, body.content);
     }
   }
 
@@ -3239,6 +3655,17 @@ export function createReportStore({
     const reportDir = path.join(importRoot, normalized.slug);
     if (record?.sourceRoot) {
       await copyPublicTree(record.sourceRoot, reportDir);
+    } else if (
+      normalized.publicUrl &&
+      (record?.source === "cloudflare-public-root" ||
+        record?.source === "cloudflare-public-url" ||
+        normalized.files.length === 0)
+    ) {
+      await copyPublicUrlFiles({
+        publicUrl: normalized.publicUrl,
+        destinationRoot: reportDir,
+        fetchImpl
+      });
     } else {
       await copyRemotePublicationFiles({
         slug: normalized.slug,
@@ -3418,6 +3845,63 @@ export function createReportStore({
     );
   }
 
+  async function recoverMissingReportSource(report) {
+    if (!report || !reportSourceMissing(report)) {
+      return false;
+    }
+    const publication = activeSnapshotPublications(report)
+      .filter((item) => item.publicUrl)
+      .sort((a, b) => (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt))[0];
+    if (!publication?.publicUrl) {
+      return false;
+    }
+
+    const recoveryRoot = path.join(workingRoot, `${report.id}-recovered`);
+    let recovered = null;
+    const slug = publication.slug || publication.token;
+    const pagesProjectName =
+      publication.pagesProjectName || pagesProjectNameFromPublicUrl(publication.publicUrl);
+    const localCandidates = [
+      slug ? path.join(dataDir, "pages-site", "p", slug) : "",
+      pagesProjectName && slug ? path.join(dataDir, "pages-deploy", pagesProjectName, "p", slug) : "",
+      pagesProjectName && publication.publicUrl === pagesBaseUrl(pagesProjectName)
+        ? path.join(dataDir, "pages-deploy", pagesProjectName)
+        : ""
+    ].filter(Boolean);
+
+    for (const candidate of localCandidates) {
+      try {
+        const entryFile = await findFolderEntry(candidate);
+        await copyPublicTree(candidate, recoveryRoot);
+        recovered = { entryFile };
+        break;
+      } catch (error) {
+        if (error.code !== "ENOENT" && error.statusCode !== 400) {
+          throw error;
+        }
+      }
+    }
+
+    if (!recovered) {
+      recovered = await copyPublicUrlFiles({
+        publicUrl: publication.publicUrl,
+        destinationRoot: recoveryRoot,
+        fetchImpl: recoverFetchImpl
+      });
+    }
+    report.workingDir = recoveryRoot;
+    report.entryFile = recovered.entryFile;
+    report.sourceMode = "edited-in-pagecast";
+    report.autoSync = false;
+    report.importedFromCloudflare = true;
+    report.buildOutputRoot = null;
+    report.buildStatus = "ready";
+    report.buildError = "";
+    report.updatedAt = nowIso();
+    await save();
+    return true;
+  }
+
   // The set of currently-live protected slugs and their password hashes, used to
   // regenerate the edge auth middleware on every deploy. One report's hash maps
   // to every active snapshot slug of that report.
@@ -3577,6 +4061,15 @@ export function createReportStore({
       stat = await fs.stat(targetPath);
     } catch (error) {
       if (error.code === "ENOENT") {
+        if (relativeAssetPath === "" && (await recoverMissingReportSource(report))) {
+          return resolveAsset(id, rawAssetPath);
+        }
+        if (relativeAssetPath === "" && reportSourceMissing(report)) {
+          return {
+            statusCode: 410,
+            message: "Source file is missing, and Pagecast could not recover it from a public URL."
+          };
+        }
         return {
           statusCode: report.kind === "path" && relativeAssetPath === "" ? 410 : 404,
           message: "Report asset was not found."
@@ -3711,12 +4204,32 @@ export function createReportStore({
     if (!report) {
       throw appError("Report was not found.", 404);
     }
-    const rootDir = reportSourceRoot(report);
-    const targetPath = path.resolve(rootDir, report.entryFile);
+    let rootDir = reportSourceRoot(report);
+    let targetPath = path.resolve(rootDir, report.entryFile);
     if (!isPathInside(rootDir, targetPath)) {
       throw appError("Report content path is not allowed.", 403);
     }
-    const html = await fs.readFile(targetPath, "utf8");
+    let html;
+    try {
+      html = await fs.readFile(targetPath, "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+      if (await recoverMissingReportSource(report)) {
+        rootDir = reportSourceRoot(report);
+        targetPath = path.resolve(rootDir, report.entryFile);
+        if (!isPathInside(rootDir, targetPath)) {
+          throw appError("Report content path is not allowed.", 403);
+        }
+        html = await fs.readFile(targetPath, "utf8");
+      } else {
+        throw appError(
+          "Source file is missing, and Pagecast could not recover it from a public URL.",
+          410
+        );
+      }
+    }
     return { html };
   }
 
@@ -4387,16 +4900,17 @@ async function detectAndPersistCloudflareProjects({ cloudflareAuth, configStore 
     accountId: currentConfig.pages.accountId
   });
   const selectedProject = chooseWranglerPagesProject(projects, currentConfig.pages);
-  const config = selectedProject
-    ? await configStore.updatePages({
-        projectName: selectedProject.name,
-        accountId: selectedProject.accountId || currentConfig.pages.accountId,
-        accountName: selectedProject.accountName || currentConfig.pages.accountName
-      })
-    : currentConfig;
+  if (selectedProject) {
+    await configStore.updatePages({
+      projectName: selectedProject.name,
+      accountId: selectedProject.accountId || currentConfig.pages.accountId,
+      accountName: selectedProject.accountName || currentConfig.pages.accountName,
+      baseUrl: selectedProject.baseUrl
+    });
+  }
 
   return {
-    config,
+    config: configStore.getPublicConfig(),
     cloudflare: {
       authenticated: true,
       projects,
@@ -4491,15 +5005,26 @@ async function ensureCloudflarePagesTarget({
       };
   }
 
-  let config = currentConfig;
   if (selectedProject) {
-    config = await configStore.updatePages({
+    const selectedDefaultBaseUrl = pagesBaseUrl(selectedProject.name);
+    const sameConfiguredProject =
+      currentConfig.pages.projectName === selectedProject.name &&
+      (!currentConfig.pages.accountId ||
+        !selectedProject.accountId ||
+        currentConfig.pages.accountId === selectedProject.accountId);
+    const configuredBaseUrl = sameConfiguredProject ? currentConfig.pages.baseUrl : "";
+    const baseUrl =
+      configuredBaseUrl && selectedProject.baseUrl === selectedDefaultBaseUrl
+        ? configuredBaseUrl
+        : selectedProject.baseUrl;
+    await configStore.updatePages({
       projectName: selectedProject.name,
       accountId: selectedProject.accountId || accountId,
-      accountName: accountName || selectedProject.accountName
+      accountName: accountName || selectedProject.accountName,
+      baseUrl
     });
   } else if (accountId) {
-    config = await configStore.updatePages({
+    await configStore.updatePages({
       projectName: currentConfig.pages.projectName,
       accountId,
       accountName
@@ -4507,7 +5032,7 @@ async function ensureCloudflarePagesTarget({
   }
 
   return {
-    config,
+    config: configStore.getPublicConfig(),
     cloudflare: {
       authenticated: true,
       needsAccountChoice: false,
@@ -4585,7 +5110,7 @@ export function createPublicHandler({ store }) {
 // addressed to a loopback host. A malicious web page that rebinds its own domain
 // to 127.0.0.1 still sends *its* Host header (e.g. "evil.example"), which fails
 // this check, while the real admin UI on 127.0.0.1/localhost passes.
-export function isLoopbackHostHeader(hostHeader, bindHost) {
+export function isLoopbackHostHeader(hostHeader, bindHost, allowedHosts = []) {
   if (!hostHeader) {
     // No Host header (HTTP/1.0, some internal callers) — the request cannot have
     // come from a rebound browser origin, so allow it.
@@ -4617,6 +5142,9 @@ export function isLoopbackHostHeader(hostHeader, bindHost) {
   if (bindHost && hostname === String(bindHost).toLowerCase()) {
     return true;
   }
+  if (allowedHosts.some((allowedHost) => hostname === String(allowedHost).toLowerCase())) {
+    return true;
+  }
   return false;
 }
 
@@ -4641,11 +5169,12 @@ export function createAdminHandler({
   tunnelManager,
   deployQueue,
   watchManager,
-  bindHost = DEFAULT_HOST
+  bindHost = DEFAULT_HOST,
+  allowedHosts = []
 }) {
   return async function adminHandler(req, res) {
     try {
-      if (!isLoopbackHostHeader(req.headers.host, bindHost)) {
+      if (!isLoopbackHostHeader(req.headers.host, bindHost, allowedHosts)) {
         sendText(
           res,
           403,
@@ -4837,12 +5366,13 @@ async function handleApi(
 
   if (url.pathname === "/api/config/pages" && req.method === "POST") {
     const body = await readJsonBody(req);
-    const config = await configStore.updatePages({
+    await configStore.updatePages({
       projectName: body.projectName,
       accountId: body.accountId,
-      accountName: body.accountName
+      accountName: body.accountName,
+      baseUrl: body.baseUrl
     });
-    sendJson(res, 200, { config });
+    sendJson(res, 200, { config: configStore.getPublicConfig() });
     return;
   }
 
@@ -5633,7 +6163,7 @@ export async function startServers({
   pagesDeploySpawnImpl = spawn,
   pagesDeployTimeoutMs = 180000
 } = {}) {
-  const store = createReportStore({ dataDir });
+  const store = createReportStore({ dataDir, recoverFetchImpl: fetchImpl });
   await store.init();
   const configStore = createConfigStore({ dataDir });
   await configStore.init();
@@ -5732,7 +6262,8 @@ export async function startServers({
         tunnelManager,
         deployQueue,
         watchManager,
-        bindHost: urlHost
+        bindHost: urlHost,
+        allowedHosts: [displayHostname]
       })
     );
 
@@ -5815,15 +6346,16 @@ async function createHeadlessCloudflareContext({
   return { configStore, cloudflareAuth, pagesPublisher };
 }
 
-async function applyPagesSelection({ configStore, projectName, accountId }) {
+async function applyPagesSelection({ configStore, projectName, accountId, accountName, baseUrl }) {
   const current = configStore.get();
   const selectedProjectName = projectName ? normalizePagesProjectName(projectName) : current.pages.projectName;
   const selectedAccountId = accountId ? normalizeAccountId(accountId) : current.pages.accountId;
-  if (projectName || accountId) {
+  if (projectName || accountId || baseUrl) {
     await configStore.updatePages({
       projectName: selectedProjectName,
       accountId: selectedAccountId,
-      accountName: accountId ? "" : current.pages.accountName
+      accountName: accountName === undefined ? (accountId ? "" : current.pages.accountName) : accountName,
+      baseUrl
     });
   }
   return configStore.get();
@@ -5838,11 +6370,13 @@ async function ensureHeadlessPagesTarget({
   cloudflareAuth,
   projectName,
   accountId,
+  accountName,
+  baseUrl,
   branch = DEFAULT_PAGES_BRANCH,
   autoCreate = true,
   loginIfNeeded = false
 } = {}) {
-  await applyPagesSelection({ configStore, projectName, accountId });
+  await applyPagesSelection({ configStore, projectName, accountId, accountName, baseUrl });
 
   const credential = cloudflareCredentialStatus();
   if (!credential.tokenConfigured) {
@@ -5878,6 +6412,8 @@ async function ensureHeadlessPagesTarget({
 export async function setupCloudflarePages({
   projectName,
   accountId,
+  accountName,
+  baseUrl,
   branch = DEFAULT_PAGES_BRANCH,
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
@@ -5893,6 +6429,8 @@ export async function setupCloudflarePages({
     cloudflareAuth,
     projectName,
     accountId,
+    accountName,
+    baseUrl,
     branch,
     autoCreate: true,
     loginIfNeeded: true
@@ -6171,6 +6709,8 @@ export async function deployCloudflarePagesSite({
   sourceDir,
   projectName,
   accountId,
+  accountName,
+  baseUrl,
   branch = DEFAULT_PAGES_BRANCH,
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
@@ -6195,6 +6735,8 @@ export async function deployCloudflarePagesSite({
     cloudflareAuth,
     projectName,
     accountId,
+    accountName,
+    baseUrl,
     branch: normalizedBranch,
     autoCreate: true,
     loginIfNeeded: false

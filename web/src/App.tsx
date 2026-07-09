@@ -70,13 +70,22 @@ import {
   useStatus
 } from "@/hooks/use-pagecast";
 import {
+  useCloudflareProject,
+  useCloudflareProjects
+} from "@/hooks/use-cloudflare";
+import {
   PAGECAST_ACTIVITY_EVENT,
   type ActivityEventDetail,
   type ActivityStatus
 } from "@/lib/activity";
+import {
+  cloudflareProjectDomain,
+  cloudflareProjectValue,
+  getCloudflareProjectSelection
+} from "@/lib/cloudflare";
 import { cn } from "@/lib/utils";
 import { copyToClipboard, relativeTime } from "@/lib/format";
-import type { CloudflareStatus, FeedbackConfig, Report } from "@/lib/types";
+import type { CloudflareProject, CloudflareStatus, FeedbackConfig, Report } from "@/lib/types";
 
 type ActiveView = "pages" | "settings";
 
@@ -88,6 +97,12 @@ interface ActivityItem extends ActivityEventDetail {
 interface PublishSummary {
   elapsedMs: number;
   url: string;
+}
+
+interface CloudflareProjectPreviewState {
+  project: CloudflareProject;
+  status: "syncing" | "missing";
+  message?: string;
 }
 
 const buildStatusLabels: Record<string, string> = {
@@ -107,6 +122,31 @@ function displayAccountName(cloudflare: CloudflareStatus | undefined) {
     return name;
   }
   return cloudflare?.loggedIn || cloudflare?.accountId ? "Cloudflare account" : "";
+}
+
+function stripTrailingSlash(value: string) {
+  return value.replace(/\/+$/, "");
+}
+
+function httpOrigin(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? stripTrailingSlash(url.origin)
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function reportMatchesProjectRoot(report: Report, project: CloudflareProject) {
+  const projectBaseUrl = httpOrigin(project.baseUrl || "");
+  if (!projectBaseUrl) return false;
+  return report.publications.some((publication) =>
+    publication.active &&
+    publication.publicUrl &&
+    httpOrigin(publication.publicUrl) === projectBaseUrl
+  );
 }
 
 function newestActivePublication(report: Report) {
@@ -183,12 +223,15 @@ export function App() {
   const [publishingReportId, setPublishingReportId] = useState<string | null>(null);
   const [publishStartedAt, setPublishStartedAt] = useState<number | null>(null);
   const [publishSummary, setPublishSummary] = useState<PublishSummary | null>(null);
+  const [cloudflareProjectPreview, setCloudflareProjectPreview] =
+    useState<CloudflareProjectPreviewState | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Report | null>(null);
   const [pendingRevoke, setPendingRevoke] = useState<Report | null>(null);
   const syncPendingRef = useRef(false);
   const elapsedMs = useElapsed(publishStartedAt);
 
   useEffect(() => {
+    if (cloudflareProjectPreview) return;
     if (reports.isLoading) return;
     if (reportItems.length === 0) {
       setSelectedReportId(null);
@@ -197,7 +240,7 @@ export function App() {
     if (!selectedReportId || !reportItems.some((report) => report.id === selectedReportId)) {
       setSelectedReportId([...reportItems].sort(compareSidebarReports)[0].id);
     }
-  }, [reportItems, reports.isLoading, selectedReportId]);
+  }, [cloudflareProjectPreview, reportItems, reports.isLoading, selectedReportId]);
 
   useEffect(() => {
     const onActivity = (event: Event) => {
@@ -231,9 +274,42 @@ export function App() {
   };
 
   const selectReport = (report: Report) => {
+    setCloudflareProjectPreview(null);
     setSelectedReportId(report.id);
     setActiveView("pages");
     setPublishSummary(null);
+  };
+
+  const syncSelectedCloudflareProject = (project: CloudflareProject) => {
+    setSelectedReportId(null);
+    setActiveView("pages");
+    setPublishSummary(null);
+    setCloudflareProjectPreview({ project, status: "syncing" });
+    syncCloudflare.mutate({}, {
+      onSuccess: (data) => {
+        const projectRootReport =
+          data.reports.find((report) => reportMatchesProjectRoot(report, project)) || null;
+        const fallbackReport = data.imported[0] || null;
+        const nextReport = projectRootReport || fallbackReport;
+        if (nextReport) {
+          setCloudflareProjectPreview(null);
+          setSelectedReportId(nextReport.id);
+          return;
+        }
+        setCloudflareProjectPreview({
+          project,
+          status: "missing",
+          message: data.failed[0]?.error
+        });
+      },
+      onError: () => {
+        setCloudflareProjectPreview({
+          project,
+          status: "missing",
+          message: "Could not sync this project."
+        });
+      }
+    });
   };
 
   const startPublish = (report: Report, drop = false) => {
@@ -343,6 +419,9 @@ export function App() {
               selectedReportId={selectedReportId}
               activeView={activeView}
               isLoading={reports.isLoading}
+              cloudflare={cloudflare}
+              cloudflareSyncPending={syncCloudflare.isPending}
+              onCloudflareProjectSelected={syncSelectedCloudflareProject}
               onSelectReport={selectReport}
               onOpenSettings={() => setActiveView("settings")}
               onRequestDelete={setPendingDelete}
@@ -381,6 +460,7 @@ export function App() {
                 >
                   <PageWorkspace
                     report={selectedReport}
+                    cloudflareProjectPreview={cloudflareProjectPreview}
                     isLoading={reports.isLoading}
                     connected={connected}
                     cloudflareReady={cloudflareReady}
@@ -682,6 +762,9 @@ function PageSidebar({
   selectedReportId,
   activeView,
   isLoading,
+  cloudflare,
+  cloudflareSyncPending,
+  onCloudflareProjectSelected,
   onSelectReport,
   onOpenSettings,
   onRequestDelete,
@@ -691,6 +774,9 @@ function PageSidebar({
   selectedReportId: string | null;
   activeView: ActiveView;
   isLoading: boolean;
+  cloudflare: CloudflareStatus | undefined;
+  cloudflareSyncPending: boolean;
+  onCloudflareProjectSelected: (project: CloudflareProject) => void;
   onSelectReport: (report: Report) => void;
   onOpenSettings: () => void;
   onRequestDelete: (report: Report) => void;
@@ -769,6 +855,12 @@ function PageSidebar({
           </details>
         </div>
 
+        <CloudflareProjectList
+          cloudflare={cloudflare}
+          syncPending={cloudflareSyncPending}
+          onProjectSelected={onCloudflareProjectSelected}
+        />
+
         <nav className="max-h-64 min-h-0 flex-1 space-y-1 overflow-y-auto p-2 lg:max-h-none" aria-label="Pages">
           {isLoading ? (
             <div className="flex items-center gap-2 px-2 py-6 text-sm text-muted-foreground">
@@ -821,6 +913,92 @@ function PageSidebar({
   );
 }
 
+function CloudflareProjectList({
+  cloudflare,
+  syncPending,
+  onProjectSelected
+}: {
+  cloudflare: CloudflareStatus | undefined;
+  syncPending: boolean;
+  onProjectSelected: (project: CloudflareProject) => void;
+}) {
+  const loggedIn = Boolean(cloudflare?.loggedIn);
+  const projectsQuery = useCloudflareProjects(loggedIn);
+  const selectProject = useCloudflareProject();
+  const projects = projectsQuery.data?.cloudflare.projects ?? [];
+  const projectName = cloudflare?.projectName ?? "";
+  const selectedAccountId = cloudflare?.accountId || "";
+  const { selectedProjectValue, displayedProjects } = getCloudflareProjectSelection(
+    projects,
+    projectName,
+    selectedAccountId
+  );
+
+  if (!loggedIn) {
+    return null;
+  }
+
+  return (
+    <section className="border-b px-2 py-2" aria-label="Cloudflare Pages projects">
+      <div className="mb-1.5 flex items-center justify-between px-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <Cloud className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <h3 className="truncate text-xs font-medium text-muted-foreground">Cloudflare Pages</h3>
+        </div>
+        <Badge variant="muted">{projectsQuery.isLoading ? "..." : projects.length}</Badge>
+      </div>
+
+      {projectsQuery.isLoading ? (
+        <div className="flex items-center gap-2 rounded-md px-2 py-2 text-xs text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Loading projects...
+        </div>
+      ) : displayedProjects.length === 0 ? (
+        <div className="rounded-md px-2 py-2 text-xs text-muted-foreground">
+          No Pages projects found.
+        </div>
+      ) : (
+        <div className="max-h-48 space-y-1 overflow-y-auto pr-1">
+          {displayedProjects.map((project) => {
+            const projectValue = cloudflareProjectValue(project);
+            const isCurrent = projectValue === selectedProjectValue;
+
+            return (
+              <button
+                key={projectValue}
+                type="button"
+                disabled={isCurrent || selectProject.isPending || syncPending}
+                onClick={() => selectProject.mutate(project, { onSuccess: () => onProjectSelected(project) })}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:hover:bg-transparent",
+                  isCurrent && "bg-emerald-50 text-emerald-950 ring-1 ring-emerald-100 disabled:hover:bg-emerald-50"
+                )}
+              >
+                <Cloud className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-xs font-medium">{project.name}</span>
+                  <span className="block truncate font-mono text-[10px] text-muted-foreground">
+                    {cloudflareProjectDomain(project)}
+                  </span>
+                </span>
+                {isCurrent ? (
+                  <Badge variant="secondary" className="shrink-0 text-[10px]">
+                    Current
+                  </Badge>
+                ) : (
+                  <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
+                    Switch
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function PageRow({
   report,
   isSelected,
@@ -838,6 +1016,7 @@ function PageRow({
   const hasActiveLinks = activeLinkCount > 0;
   const stateLabel = hasActiveLinks ? "Live" : "Draft";
   const detailLabels = [
+    report.sourceMissing ? "Source missing" : "",
     report.importedFromCloudflare ? "Recovered" : "",
     report.kind === "folder" ? "Mini app" : "",
     report.kind === "upload" ? "Upload" : "",
@@ -915,6 +1094,7 @@ function PageRow({
 
 function PageWorkspace({
   report,
+  cloudflareProjectPreview,
   isLoading,
   connected,
   cloudflareReady,
@@ -938,6 +1118,7 @@ function PageWorkspace({
   onRequestRevokeAll
 }: {
   report: Report | null;
+  cloudflareProjectPreview: CloudflareProjectPreviewState | null;
   isLoading: boolean;
   connected: boolean;
   cloudflareReady: boolean;
@@ -990,6 +1171,46 @@ function PageWorkspace({
   }
 
   if (!report) {
+    if (cloudflareProjectPreview) {
+      const projectUrl = cloudflareProjectPreview.project.baseUrl || "";
+      const isSyncing = cloudflareProjectPreview.status === "syncing";
+
+      return (
+        <div className="flex h-full flex-col items-center justify-center bg-background px-6 text-center">
+          <div className="flex h-11 w-11 items-center justify-center rounded-md bg-muted">
+            {isSyncing ? (
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            ) : (
+              <AlertCircle className="h-5 w-5 text-muted-foreground" />
+            )}
+          </div>
+          <h2 className="mt-4 text-base font-semibold">
+            {isSyncing
+              ? "Recovering project preview"
+              : `No preview found for ${cloudflareProjectPreview.project.name}`}
+          </h2>
+          <p className="mt-1 max-w-md text-sm text-muted-foreground">
+            {isSyncing
+              ? `Importing the live root from ${projectUrl || cloudflareProjectPreview.project.name}.`
+              : cloudflareProjectPreview.message
+                ? `Cloudflare reported: ${cloudflareProjectPreview.message}`
+                : `Pagecast could not recover ${projectUrl || cloudflareProjectPreview.project.name}.`}
+          </p>
+          {projectUrl ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="mt-4"
+              onClick={() => window.open(projectUrl, "_blank", "noopener,noreferrer")}
+            >
+              <ExternalLink className="h-4 w-4" />
+              Open project
+            </Button>
+          ) : null}
+        </div>
+      );
+    }
+
     return (
       <div className="flex h-full flex-col items-center justify-center bg-background px-6 text-center">
         <div className="flex h-11 w-11 items-center justify-center rounded-md bg-muted">
@@ -1366,6 +1587,12 @@ function PreviewPane({
               <Badge variant="muted" className="gap-1">
                 <CloudDownload className="h-3 w-3" />
                 Recovered
+              </Badge>
+            ) : null}
+            {report.sourceMissing ? (
+              <Badge variant="destructive" className="gap-1">
+                <AlertCircle className="h-3 w-3" />
+                Source missing
               </Badge>
             ) : null}
           </div>

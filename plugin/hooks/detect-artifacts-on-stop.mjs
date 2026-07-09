@@ -131,8 +131,9 @@ async function main() {
     const first = fresh[0];
     const systemMessage =
       `Pagecast: ${fresh.length === 1 ? "a shareable file was" : "shareable files were"} just created — ` +
-      `${list}. Publish a public link with \`npx pagecast publish "${first}" --json\`, ` +
-      `or ask Claude to publish it with Pagecast.`;
+      `${list}. Ask whether to publish as a Claude Code Artifact or with Pagecast. If the user chooses ` +
+      `Pagecast, run \`npx pagecast publish "${first}" --json\`; if they choose Artifact, use the ` +
+      `Claude Code Artifact flow. Never publish without an explicit choice.`;
 
     process.stdout.write(
       JSON.stringify({

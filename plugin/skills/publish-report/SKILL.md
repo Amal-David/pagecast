@@ -1,14 +1,21 @@
 ---
 name: publish-report
-description: Use right after an HTML or Markdown report, plan, doc, dashboard, or built static web project is created (or when the user wants to share one). Proactively offer to publish it with Pagecast as a shareable public link, then return the URL. Default to offering; only skip clearly internal/scratch files.
+description: Help publish local HTML, Markdown, or built static web projects by asking whether to use Claude Code Artifacts or Pagecast/Cloudflare Pages when the user's publish request is ambiguous. Use when a report, plan, doc, dashboard, analysis, or static build output should be shared from Claude Code, especially when the user says publish, share, make a public link, or send this. If the user explicitly says Pagecast, publish with Pagecast.
 version: 0.4.0
 ---
 
 # Publish with Pagecast
 
 Pagecast turns a local **HTML or Markdown** file (a report, plan, doc, or
-dashboard) into a shareable public URL. Use this skill to offer that at the
-right moment, then do it on a yes.
+dashboard) into a shareable public URL backed by the user's Cloudflare Pages
+project. Use this skill to offer that at the right moment, then do it on a yes.
+
+Claude Code Artifacts are also a valid publishing path. Do **not** disable or
+block Artifacts. When the user explicitly asks for a Claude Artifact, `claude.ai`
+artifact, or org-private artifact, use the Artifact flow. When the user
+explicitly asks for Pagecast or a Cloudflare Pages link, use Pagecast. When the
+user only says "publish", "share", "make a link", or similar, ask them which
+publishing path they want before doing anything.
 
 ## When to offer
 
@@ -29,6 +36,12 @@ This includes:
 - A `PostToolUse` hint fired saying an HTML/Markdown file was created — treat that
   as a cue to offer.
 
+If the user says only "publish this" or "make this shareable" for a local
+report/doc/dashboard, ask them to choose between Claude Code Artifacts and
+Pagecast. The built-in Claude Code Artifact publisher is useful for `claude.ai`
+private/org pages. Pagecast is useful for external Cloudflare Pages URLs that can
+be renamed, re-synced, revoked, password-protected, or expired.
+
 **The only files to skip** (don't offer): scratch/draft notes the user is clearly
 keeping private, source code, config files, secrets, and repo-meta files (README,
 CHANGELOG, CONTRIBUTING, LICENSE, AGENTS.md, CLAUDE.md, TODO/tasks), or anything
@@ -38,12 +51,21 @@ the user can just say no.
 Ask **at most once per file.** If the user declines or ignores the offer, drop it
 and don't re-ask for that file. Never nag across multiple turns.
 
-## The one question to ask
+## The question to ask
 
-> "Want me to publish this with Pagecast? It'll create a shareable public link."
+When the user has not specified a publishing path, ask:
 
-Only on an explicit **yes** do you proceed. Publishing makes the file publicly
-reachable — **never publish without confirmation.**
+> "How do you want to publish this?
+> 1. Claude Code Artifact — private/org `claude.ai` page that can update in place.
+> 2. Pagecast — Cloudflare Pages link you can share outside Claude, rename,
+> re-sync, revoke, password-protect, or expire.
+> 3. Don't publish."
+
+Accept the number or the name. Only proceed after an explicit choice. If they
+choose Pagecast, run the Pagecast CLI below. If they choose Claude Code Artifact,
+use the Claude Artifact publishing flow and do not run Pagecast. Publishing may
+make content reachable outside the current chat, especially with Pagecast —
+**never publish without confirmation.**
 
 ## How to publish
 

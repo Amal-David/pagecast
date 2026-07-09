@@ -1,5 +1,6 @@
 import type {
   CloudflareSyncResponse,
+  CloudflareProjectsResponse,
   ConfigResponse,
   ContentResponse,
   DeleteDeploymentResponse,
@@ -186,8 +187,18 @@ export const api = {
       json: { enabled }
     }),
 
+  configurePages: (payload: {
+    projectName: string;
+    accountId?: string;
+    accountName?: string;
+    baseUrl?: string;
+  }) => request<ConfigResponse>("/api/config/pages", { json: payload }),
+
   cloudflareConnect: () =>
     request<unknown>("/api/cloudflare/connect", { json: {} }),
+
+  cloudflareProjects: () =>
+    request<CloudflareProjectsResponse>("/api/cloudflare/projects", { json: {} }),
 
   cloudflareAccount: (accountId: string) =>
     request<unknown>("/api/cloudflare/account", { json: { accountId } }),
