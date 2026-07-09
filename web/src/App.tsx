@@ -85,7 +85,7 @@ import {
 } from "@/lib/cloudflare";
 import { cn } from "@/lib/utils";
 import { copyToClipboard, relativeTime } from "@/lib/format";
-import type { CloudflareStatus, FeedbackConfig, Report } from "@/lib/types";
+import type { CloudflareProject, CloudflareStatus, FeedbackConfig, Report } from "@/lib/types";
 
 type ActiveView = "pages" | "settings";
 
@@ -97,6 +97,12 @@ interface ActivityItem extends ActivityEventDetail {
 interface PublishSummary {
   elapsedMs: number;
   url: string;
+}
+
+interface CloudflareProjectPreviewState {
+  project: CloudflareProject;
+  status: "syncing" | "missing";
+  message?: string;
 }
 
 const buildStatusLabels: Record<string, string> = {
@@ -116,6 +122,20 @@ function displayAccountName(cloudflare: CloudflareStatus | undefined) {
     return name;
   }
   return cloudflare?.loggedIn || cloudflare?.accountId ? "Cloudflare account" : "";
+}
+
+function stripTrailingSlash(value: string) {
+  return value.replace(/\/+$/, "");
+}
+
+function reportMatchesProjectRoot(report: Report, project: CloudflareProject) {
+  const projectBaseUrl = stripTrailingSlash(project.baseUrl || "");
+  if (!projectBaseUrl) return false;
+  return report.publications.some((publication) =>
+    publication.active &&
+    publication.publicUrl &&
+    stripTrailingSlash(publication.publicUrl) === projectBaseUrl
+  );
 }
 
 function newestActivePublication(report: Report) {
@@ -192,12 +212,15 @@ export function App() {
   const [publishingReportId, setPublishingReportId] = useState<string | null>(null);
   const [publishStartedAt, setPublishStartedAt] = useState<number | null>(null);
   const [publishSummary, setPublishSummary] = useState<PublishSummary | null>(null);
+  const [cloudflareProjectPreview, setCloudflareProjectPreview] =
+    useState<CloudflareProjectPreviewState | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Report | null>(null);
   const [pendingRevoke, setPendingRevoke] = useState<Report | null>(null);
   const syncPendingRef = useRef(false);
   const elapsedMs = useElapsed(publishStartedAt);
 
   useEffect(() => {
+    if (cloudflareProjectPreview) return;
     if (reports.isLoading) return;
     if (reportItems.length === 0) {
       setSelectedReportId(null);
@@ -206,7 +229,7 @@ export function App() {
     if (!selectedReportId || !reportItems.some((report) => report.id === selectedReportId)) {
       setSelectedReportId([...reportItems].sort(compareSidebarReports)[0].id);
     }
-  }, [reportItems, reports.isLoading, selectedReportId]);
+  }, [cloudflareProjectPreview, reportItems, reports.isLoading, selectedReportId]);
 
   useEffect(() => {
     const onActivity = (event: Event) => {
@@ -240,9 +263,42 @@ export function App() {
   };
 
   const selectReport = (report: Report) => {
+    setCloudflareProjectPreview(null);
     setSelectedReportId(report.id);
     setActiveView("pages");
     setPublishSummary(null);
+  };
+
+  const syncSelectedCloudflareProject = (project: CloudflareProject) => {
+    setSelectedReportId(null);
+    setActiveView("pages");
+    setPublishSummary(null);
+    setCloudflareProjectPreview({ project, status: "syncing" });
+    syncCloudflare.mutate({}, {
+      onSuccess: (data) => {
+        const projectRootReport =
+          data.reports.find((report) => reportMatchesProjectRoot(report, project)) || null;
+        const fallbackReport = data.imported[0] || null;
+        const nextReport = projectRootReport || fallbackReport;
+        if (nextReport) {
+          setCloudflareProjectPreview(null);
+          setSelectedReportId(nextReport.id);
+          return;
+        }
+        setCloudflareProjectPreview({
+          project,
+          status: "missing",
+          message: data.failed[0]?.error
+        });
+      },
+      onError: () => {
+        setCloudflareProjectPreview({
+          project,
+          status: "missing",
+          message: "Could not sync this project."
+        });
+      }
+    });
   };
 
   const startPublish = (report: Report, drop = false) => {
@@ -354,7 +410,7 @@ export function App() {
               isLoading={reports.isLoading}
               cloudflare={cloudflare}
               cloudflareSyncPending={syncCloudflare.isPending}
-              onCloudflareProjectSelected={() => syncCloudflare.mutate({})}
+              onCloudflareProjectSelected={syncSelectedCloudflareProject}
               onSelectReport={selectReport}
               onOpenSettings={() => setActiveView("settings")}
               onRequestDelete={setPendingDelete}
@@ -393,6 +449,7 @@ export function App() {
                 >
                   <PageWorkspace
                     report={selectedReport}
+                    cloudflareProjectPreview={cloudflareProjectPreview}
                     isLoading={reports.isLoading}
                     connected={connected}
                     cloudflareReady={cloudflareReady}
@@ -708,7 +765,7 @@ function PageSidebar({
   isLoading: boolean;
   cloudflare: CloudflareStatus | undefined;
   cloudflareSyncPending: boolean;
-  onCloudflareProjectSelected: () => void;
+  onCloudflareProjectSelected: (project: CloudflareProject) => void;
   onSelectReport: (report: Report) => void;
   onOpenSettings: () => void;
   onRequestDelete: (report: Report) => void;
@@ -852,7 +909,7 @@ function CloudflareProjectList({
 }: {
   cloudflare: CloudflareStatus | undefined;
   syncPending: boolean;
-  onProjectSelected: () => void;
+  onProjectSelected: (project: CloudflareProject) => void;
 }) {
   const loggedIn = Boolean(cloudflare?.loggedIn);
   const projectsQuery = useCloudflareProjects(loggedIn);
@@ -900,7 +957,7 @@ function CloudflareProjectList({
                 key={projectValue}
                 type="button"
                 disabled={isCurrent || selectProject.isPending || syncPending}
-                onClick={() => selectProject.mutate(project, { onSuccess: onProjectSelected })}
+                onClick={() => selectProject.mutate(project, { onSuccess: () => onProjectSelected(project) })}
                 className={cn(
                   "flex w-full items-center gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-default disabled:hover:bg-transparent",
                   isCurrent && "bg-emerald-50 text-emerald-950 ring-1 ring-emerald-100 disabled:hover:bg-emerald-50"
@@ -1026,6 +1083,7 @@ function PageRow({
 
 function PageWorkspace({
   report,
+  cloudflareProjectPreview,
   isLoading,
   connected,
   cloudflareReady,
@@ -1049,6 +1107,7 @@ function PageWorkspace({
   onRequestRevokeAll
 }: {
   report: Report | null;
+  cloudflareProjectPreview: CloudflareProjectPreviewState | null;
   isLoading: boolean;
   connected: boolean;
   cloudflareReady: boolean;
@@ -1101,6 +1160,46 @@ function PageWorkspace({
   }
 
   if (!report) {
+    if (cloudflareProjectPreview) {
+      const projectUrl = cloudflareProjectPreview.project.baseUrl || "";
+      const isSyncing = cloudflareProjectPreview.status === "syncing";
+
+      return (
+        <div className="flex h-full flex-col items-center justify-center bg-background px-6 text-center">
+          <div className="flex h-11 w-11 items-center justify-center rounded-md bg-muted">
+            {isSyncing ? (
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            ) : (
+              <AlertCircle className="h-5 w-5 text-muted-foreground" />
+            )}
+          </div>
+          <h2 className="mt-4 text-base font-semibold">
+            {isSyncing
+              ? "Recovering project preview"
+              : `No preview found for ${cloudflareProjectPreview.project.name}`}
+          </h2>
+          <p className="mt-1 max-w-md text-sm text-muted-foreground">
+            {isSyncing
+              ? `Importing the live root from ${projectUrl || cloudflareProjectPreview.project.name}.`
+              : cloudflareProjectPreview.message
+                ? `Cloudflare reported: ${cloudflareProjectPreview.message}`
+                : `Pagecast could not recover ${projectUrl || cloudflareProjectPreview.project.name}.`}
+          </p>
+          {projectUrl ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="mt-4"
+              onClick={() => window.open(projectUrl, "_blank", "noopener,noreferrer")}
+            >
+              <ExternalLink className="h-4 w-4" />
+              Open project
+            </Button>
+          ) : null}
+        </div>
+      );
+    }
+
     return (
       <div className="flex h-full flex-col items-center justify-center bg-background px-6 text-center">
         <div className="flex h-11 w-11 items-center justify-center rounded-md bg-muted">

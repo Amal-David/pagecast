@@ -39,7 +39,19 @@ const PAGECAST_MARKETING_REQUIRED_FILES = ["index.html", "og-image.png"];
 const MAX_SYNC_IMPORT_FILES = MAX_FOLDER_UPLOAD_FILES;
 const MAX_SYNC_IMPORT_BYTES = MAX_FOLDER_UPLOAD_BYTES;
 const MAX_SYNC_IMPORT_FILE_BYTES = MAX_FOLDER_UPLOAD_FILE_BYTES;
+const MAX_PUBLIC_URL_IMPORT_FILES = 80;
 const SYNC_MANIFEST_FETCH_TIMEOUT_MS = 5000;
+const PUBLIC_URL_SKIPPED_ASSET_EXTENSIONS = new Set([
+  ".mp3",
+  ".mp4",
+  ".m4a",
+  ".mov",
+  ".ogg",
+  ".opus",
+  ".wav",
+  ".webm",
+  ".flac"
+]);
 
 // Feedback provisioning deploys a Worker + KV, which the base publishing scopes
 // don't permit. These elevate the grant only when the user opts into feedback,
@@ -223,6 +235,14 @@ function normalizePagesProjectNameSafe(value) {
   } catch {
     return "";
   }
+}
+
+function projectRootImportSlug(projectName) {
+  const normalized = normalizePagesProjectName(projectName);
+  const rootSuffix = "-root";
+  return normalizeCustomSlug(
+    `${normalized.slice(0, 63 - rootSuffix.length).replace(/-+$/g, "")}${rootSuffix}`
+  );
 }
 
 function normalizeAccountId(value) {
@@ -1222,6 +1242,10 @@ function localPathForPublicAsset(assetUrl, publicUrl) {
   return normalized ? normalized.split(path.sep).join("/") : null;
 }
 
+function shouldSkipPublicUrlAsset(localPath) {
+  return PUBLIC_URL_SKIPPED_ASSET_EXTENSIONS.has(path.posix.extname(localPath).toLowerCase());
+}
+
 function publicAssetUrl(rawValue, baseUrl, rootUrl) {
   const value = String(rawValue || "").trim();
   if (
@@ -1245,6 +1269,9 @@ function publicAssetUrl(rawValue, baseUrl, rootUrl) {
 
   const localPath = localPathForPublicAsset(url, rootUrl);
   if (!localPath || localPath === "index.html") {
+    return null;
+  }
+  if (shouldSkipPublicUrlAsset(localPath)) {
     return null;
   }
 
@@ -1358,8 +1385,8 @@ async function copyPublicUrlFiles({ publicUrl, destinationRoot, fetchImpl = fetc
     if (!asset || seen.has(asset.localPath)) {
       return;
     }
-    if (fileCount >= MAX_SYNC_IMPORT_FILES) {
-      throw appError(`Synced page includes more than ${MAX_SYNC_IMPORT_FILES} files.`, 413);
+    if (fileCount >= MAX_PUBLIC_URL_IMPORT_FILES) {
+      return;
     }
     seen.add(asset.localPath);
     fileCount += 1;
@@ -1380,7 +1407,15 @@ async function copyPublicUrlFiles({ publicUrl, destinationRoot, fetchImpl = fetc
     if (!response.ok) {
       continue;
     }
-    let body = await readSyncImportResponse(response, totalBytes);
+    let body;
+    try {
+      body = await readSyncImportResponse(response, totalBytes);
+    } catch (error) {
+      if (error.statusCode === 413) {
+        continue;
+      }
+      throw error;
+    }
     totalBytes = body.totalBytes;
     const destinationPath = path.resolve(destinationRoot, asset.localPath);
     if (!isPathInside(destinationRoot, destinationPath)) {
@@ -2432,11 +2467,11 @@ export function createCloudflarePagesPublisher({
 
     const projectName =
       normalizePagesProjectNameSafe(pagesConfig?.projectName) || DEFAULT_PAGES_PROJECT_NAME;
+    const projectRootSlug = projectRootImportSlug(projectName);
     const projectDeployRoot = path.join(deployRoot, projectName);
     try {
       const projectEntry = await findFolderEntry(projectDeployRoot);
       const files = await listPublicTreeFiles(projectDeployRoot);
-      const slug = normalizeCustomSlug(projectName);
       let title = projectName;
       try {
         const html = await fs.readFile(path.join(projectDeployRoot, projectEntry), "utf8");
@@ -2444,15 +2479,15 @@ export function createCloudflarePagesPublisher({
       } catch {
         title = projectName;
       }
-      if (!records.has(slug)) {
-        records.set(slug, {
-          slug,
+      if (!records.has(projectRootSlug)) {
+        records.set(projectRootSlug, {
+          slug: projectRootSlug,
           source: "local-staged-site-root",
           sourceRoot: projectDeployRoot,
           files,
           title,
           label: "recovered",
-          token: slug,
+          token: projectRootSlug,
           publicUrl: baseUrl,
           baseUrl,
           createdAt: nowIso(),
@@ -2465,15 +2500,14 @@ export function createCloudflarePagesPublisher({
       }
     }
 
-    if (records.size === 0 && baseUrl) {
-      const slug = normalizeCustomSlug(projectName);
-      records.set(slug, {
-        slug,
+    if (!remoteManifestFound && !records.has(projectRootSlug) && baseUrl) {
+      records.set(projectRootSlug, {
+        slug: projectRootSlug,
         source: "cloudflare-public-root",
         files: [],
         title: projectName,
         label: "recovered",
-        token: slug,
+        token: projectRootSlug,
         publicUrl: baseUrl,
         baseUrl,
         createdAt: nowIso(),

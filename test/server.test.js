@@ -2403,7 +2403,7 @@ test("Cloudflare sync recovers a public Pages root when no manifest exists", asy
       }
       if (href === "https://team-reports.pages.dev/") {
         return new Response(
-          '<!doctype html><title>Recovered Site</title><link rel="stylesheet" href="/style.css"><script src="./app.js"></script><h1>Recovered root</h1>',
+          '<!doctype html><title>Recovered Site</title><link rel="stylesheet" href="/style.css"><script src="./app.js"></script><audio src="/assets/huge.mp3"></audio><h1>Recovered root</h1>',
           { status: 200, headers: { "Content-Type": "text/html" } }
         );
       }
@@ -2425,12 +2425,26 @@ test("Cloudflare sync recovers a public Pages root when no manifest exists", asy
           headers: { "Content-Type": "image/png" }
         });
       }
+      if (href === "https://team-reports.pages.dev/assets/huge.mp3") {
+        return new Response("", {
+          status: 200,
+          headers: { "Content-Type": "audio/mpeg", "Content-Length": `${25 * 1024 * 1024 + 1}` }
+        });
+      }
       return new Response("Not found.", { status: 404 });
     }
   });
 
   try {
     await configurePages(runtime.adminUrl);
+    const staleRoot = path.join(dataDir, "pages-site", "p", "old-staged-link");
+    await fs.mkdir(staleRoot, { recursive: true });
+    await fs.writeFile(
+      path.join(staleRoot, "index.html"),
+      "<!doctype html><title>Old staged link</title>",
+      "utf8"
+    );
+
     const response = await fetch(`${runtime.adminUrl}/api/cloudflare/sync`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2439,20 +2453,25 @@ test("Cloudflare sync recovers a public Pages root when no manifest exists", asy
     assert.equal(response.status, 200);
     const data = await response.json();
     assert.equal(data.remoteManifestFound, false);
-    assert.equal(data.importedCount, 1);
+    assert.equal(data.importedCount, 2);
     assert.equal(data.failed.length, 0);
     assert.ok(fetched.some((href) => href === "https://team-reports.pages.dev/"));
     assert.ok(fetched.some((href) => href === "https://team-reports.pages.dev/assets/bg.png"));
 
-    const report = data.imported[0];
+    const report = data.imported.find((item) => item.publicUrl === "https://team-reports.pages.dev");
+    assert.ok(report, "selected project root should import even when other staged links exist");
     assert.equal(report.name, "Recovered Site");
     assert.equal(report.publicUrl, "https://team-reports.pages.dev");
     assert.equal(report.sourceMissing, false);
-    const recoveredRoot = path.join(dataDir, "imports", "team-reports");
+    const recoveredRoot = path.join(dataDir, "imports", "team-reports-root");
     const indexHtml = await fs.readFile(path.join(recoveredRoot, "index.html"), "utf8");
     assert.match(indexHtml, /href="style.css"/);
     assert.match(indexHtml, /src="app.js"/);
     assert.match(await fs.readFile(path.join(recoveredRoot, "style.css"), "utf8"), /assets\/bg\.png/);
+    await assert.rejects(
+      fs.stat(path.join(recoveredRoot, "assets", "huge.mp3")),
+      /ENOENT/
+    );
   } finally {
     await runtime.close();
   }
