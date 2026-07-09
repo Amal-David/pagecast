@@ -3697,6 +3697,11 @@ test("two auto-sync reports never deploy concurrently", async () => {
       assert.equal(response.status, 200);
     }
 
+    // fs.watch registration is synchronous at the Node API boundary, but some
+    // OS backends need one event-loop turn before they reliably observe the
+    // first write. Avoid racing the test itself against watcher activation.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
     const baseline = state.deployCount;
     // Mutate both sources nearly simultaneously.
     await fs.writeFile(pathA, "<h1>a1</h1>");

@@ -9,6 +9,10 @@ const JSON_FILE_MODE = 0o600;
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const RUNTIME_VERSION = 1;
 const MAX_ACQUIRE_ATTEMPTS = 20;
+// POSIX can replace one destination from concurrent rename calls, while
+// Windows may return EPERM. Pagecast already has one cross-process writer; this
+// queue gives concurrent in-process callers the same deterministic contract.
+const atomicWriteQueues = new Map();
 
 export class StateCoordinatorError extends Error {
   constructor(message, { code, statusCode, cause } = {}) {
@@ -118,23 +122,33 @@ export async function atomicWriteJson(
   const directory = path.dirname(destination);
   const temporary = temporaryPathFor(destination);
   const body = serializeJson(value);
-  let handle;
-
-  await ensurePrivateDirectory(directory, directoryMode);
+  const previousWrite = atomicWriteQueues.get(destination) || Promise.resolve();
+  const write = previousWrite.catch(() => {}).then(async () => {
+    let handle;
+    await ensurePrivateDirectory(directory, directoryMode);
+    try {
+      handle = await fs.open(temporary, "wx", fileMode);
+      await handle.chmod(fileMode);
+      await handle.writeFile(body, "utf8");
+      await syncHandle(handle);
+      await handle.close();
+      handle = null;
+      await fs.rename(temporary, destination);
+      await fs.chmod(destination, fileMode);
+      await syncDirectory(directory);
+    } catch (error) {
+      await handle?.close().catch(() => {});
+      await fs.rm(temporary, { force: true }).catch(() => {});
+      throw error;
+    }
+  });
+  atomicWriteQueues.set(destination, write);
   try {
-    handle = await fs.open(temporary, "wx", fileMode);
-    await handle.chmod(fileMode);
-    await handle.writeFile(body, "utf8");
-    await syncHandle(handle);
-    await handle.close();
-    handle = null;
-    await fs.rename(temporary, destination);
-    await fs.chmod(destination, fileMode);
-    await syncDirectory(directory);
-  } catch (error) {
-    await handle?.close().catch(() => {});
-    await fs.rm(temporary, { force: true }).catch(() => {});
-    throw error;
+    await write;
+  } finally {
+    if (atomicWriteQueues.get(destination) === write) {
+      atomicWriteQueues.delete(destination);
+    }
   }
 }
 
