@@ -128,13 +128,24 @@ function stripTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
 }
 
+function httpOrigin(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? stripTrailingSlash(url.origin)
+      : "";
+  } catch {
+    return "";
+  }
+}
+
 function reportMatchesProjectRoot(report: Report, project: CloudflareProject) {
-  const projectBaseUrl = stripTrailingSlash(project.baseUrl || "");
+  const projectBaseUrl = httpOrigin(project.baseUrl || "");
   if (!projectBaseUrl) return false;
   return report.publications.some((publication) =>
     publication.active &&
     publication.publicUrl &&
-    stripTrailingSlash(publication.publicUrl) === projectBaseUrl
+    httpOrigin(publication.publicUrl) === projectBaseUrl
   );
 }
 

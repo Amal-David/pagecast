@@ -1346,15 +1346,32 @@ async function readSyncImportResponse(response, totalBytes) {
     throw appError("Synced page is too large.", 413);
   }
 
-  const content = Buffer.from(await response.arrayBuffer());
-  if (content.length > MAX_SYNC_IMPORT_FILE_BYTES) {
-    throw appError("Synced page includes a file that is too large.", 413);
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    throw appError("Could not read synced page response.", 502);
   }
-  const nextTotalBytes = totalBytes + content.length;
-  if (nextTotalBytes > MAX_SYNC_IMPORT_BYTES) {
-    throw appError("Synced page is too large.", 413);
+
+  const chunks = [];
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > MAX_SYNC_IMPORT_FILE_BYTES) {
+        throw appError("Synced page includes a file that is too large.", 413);
+      }
+      if (totalBytes + received > MAX_SYNC_IMPORT_BYTES) {
+        throw appError("Synced page is too large.", 413);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock?.();
   }
-  return { content, totalBytes: nextTotalBytes };
+
+  const content = Buffer.concat(chunks, received);
+  return { content, totalBytes: totalBytes + content.length };
 }
 
 async function copyPublicUrlFiles({ publicUrl, destinationRoot, fetchImpl = fetch } = {}) {
@@ -3055,6 +3072,9 @@ export function createReportStore({
 
   function reportSourceMissing(report) {
     if (!report || report.workingDir || report.kind === "upload") {
+      return false;
+    }
+    if (report.kind === "folder" && report.buildCommand && !report.buildOutputRoot) {
       return false;
     }
     const rootDir = reportSourceRoot(report);

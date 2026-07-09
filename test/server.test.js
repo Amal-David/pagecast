@@ -203,6 +203,8 @@ test("folder reports run build commands and publish detected output", async () =
     buildCommand: "sh build.sh",
     buildOutputDir: "dist"
   });
+  const beforeBuild = store.list().find((item) => item.id === report.id);
+  assert.equal(beforeBuild.sourceMissing, false);
 
   const built = await store.buildReport(report.id);
   assert.equal(built.buildStatus, "ready");
@@ -2481,6 +2483,8 @@ test("Cloudflare sync rejects oversized remote assets before buffering", async (
   const tempDir = await makeTempDir();
   const dataDir = path.join(tempDir, "data");
   let oversizedBuffered = false;
+  let streamingOversizedBuffered = false;
+  let streamingChunksRead = 0;
   const runtime = await startServers({
     adminPort: 0,
     publicPort: 0,
@@ -2499,6 +2503,12 @@ test("Cloudflare sync rejects oversized remote assets before buffering", async (
                 title: "Oversized Remote",
                 files: ["index.html"],
                 publicUrl: "https://team-reports.pages.dev/p/oversized-remote/"
+              },
+              {
+                slug: "streaming-oversized",
+                title: "Streaming Oversized",
+                files: ["index.html"],
+                publicUrl: "https://team-reports.pages.dev/p/streaming-oversized/"
               }
             ]
           }),
@@ -2512,6 +2522,26 @@ test("Cloudflare sync rejects oversized remote assets before buffering", async (
         });
         response.arrayBuffer = async () => {
           oversizedBuffered = true;
+          return new ArrayBuffer(0);
+        };
+        return response;
+      }
+      if (href.endsWith("/p/streaming-oversized/index.html")) {
+        const chunk = new Uint8Array(1024 * 1024);
+        const response = new Response(
+          new ReadableStream({
+            pull(controller) {
+              streamingChunksRead += 1;
+              controller.enqueue(chunk);
+              if (streamingChunksRead > 25) {
+                controller.close();
+              }
+            }
+          }),
+          { status: 200, headers: { "Content-Type": "text/html" } }
+        );
+        response.arrayBuffer = async () => {
+          streamingOversizedBuffered = true;
           return new ArrayBuffer(0);
         };
         return response;
@@ -2530,8 +2560,14 @@ test("Cloudflare sync rejects oversized remote assets before buffering", async (
     assert.equal(response.status, 200);
     const data = await response.json();
     assert.equal(data.importedCount, 0);
-    assert.equal(data.failed.length, 1);
+    assert.equal(data.failed.length, 2);
+    assert.deepEqual(new Set(data.failed.map((item) => item.slug)), new Set([
+      "oversized-remote",
+      "streaming-oversized"
+    ]));
     assert.equal(oversizedBuffered, false);
+    assert.equal(streamingOversizedBuffered, false);
+    assert.equal(streamingChunksRead, 26);
   } finally {
     await runtime.close();
   }
