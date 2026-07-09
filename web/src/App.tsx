@@ -78,9 +78,14 @@ import {
   type ActivityEventDetail,
   type ActivityStatus
 } from "@/lib/activity";
+import {
+  cloudflareProjectDomain,
+  cloudflareProjectValue,
+  getCloudflareProjectSelection
+} from "@/lib/cloudflare";
 import { cn } from "@/lib/utils";
 import { copyToClipboard, relativeTime } from "@/lib/format";
-import type { CloudflareProject, CloudflareStatus, FeedbackConfig, Report } from "@/lib/types";
+import type { CloudflareStatus, FeedbackConfig, Report } from "@/lib/types";
 
 type ActiveView = "pages" | "settings";
 
@@ -840,18 +845,6 @@ function PageSidebar({
   );
 }
 
-function cloudflareProjectValue(project: CloudflareProject) {
-  return `${project.accountId || "default"}:${project.name}`;
-}
-
-function cloudflareProjectDomain(project: CloudflareProject) {
-  try {
-    return new URL(project.baseUrl).hostname;
-  } catch {
-    return project.baseUrl.replace(/^https?:\/\//, "");
-  }
-}
-
 function CloudflareProjectList({
   cloudflare,
   syncPending,
@@ -867,17 +860,11 @@ function CloudflareProjectList({
   const projects = projectsQuery.data?.cloudflare.projects ?? [];
   const projectName = cloudflare?.projectName ?? "";
   const selectedAccountId = cloudflare?.accountId || "";
-  const selectedProject = projects.find((project) =>
-    project.name === projectName &&
-    (!selectedAccountId || !project.accountId || project.accountId === selectedAccountId)
+  const { selectedProjectValue, displayedProjects } = getCloudflareProjectSelection(
+    projects,
+    projectName,
+    selectedAccountId
   );
-  const selectedProjectValue = selectedProject ? cloudflareProjectValue(selectedProject) : "";
-  const displayedProjects = selectedProject
-    ? [
-        selectedProject,
-        ...projects.filter((project) => cloudflareProjectValue(project) !== selectedProjectValue)
-      ]
-    : projects;
 
   if (!loggedIn) {
     return null;

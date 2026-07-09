@@ -660,6 +660,12 @@ function parseJsonFromCommandOutput(output) {
 
 function firstString(...values) {
   for (const value of values) {
+    if (Array.isArray(value)) {
+      const nested = firstString(...value);
+      if (nested) {
+        return nested;
+      }
+    }
     if (typeof value === "string" && value.trim()) {
       return value.trim();
     }
@@ -4574,11 +4580,22 @@ async function ensureCloudflarePagesTarget({
   }
 
   if (selectedProject) {
+    const selectedDefaultBaseUrl = pagesBaseUrl(selectedProject.name);
+    const sameConfiguredProject =
+      currentConfig.pages.projectName === selectedProject.name &&
+      (!currentConfig.pages.accountId ||
+        !selectedProject.accountId ||
+        currentConfig.pages.accountId === selectedProject.accountId);
+    const configuredBaseUrl = sameConfiguredProject ? currentConfig.pages.baseUrl : "";
+    const baseUrl =
+      configuredBaseUrl && selectedProject.baseUrl === selectedDefaultBaseUrl
+        ? configuredBaseUrl
+        : selectedProject.baseUrl;
     await configStore.updatePages({
       projectName: selectedProject.name,
       accountId: selectedProject.accountId || accountId,
       accountName: accountName || selectedProject.accountName,
-      baseUrl: selectedProject.baseUrl
+      baseUrl
     });
   } else if (accountId) {
     await configStore.updatePages({
@@ -5927,11 +5944,13 @@ async function ensureHeadlessPagesTarget({
   cloudflareAuth,
   projectName,
   accountId,
+  accountName,
+  baseUrl,
   branch = DEFAULT_PAGES_BRANCH,
   autoCreate = true,
   loginIfNeeded = false
 } = {}) {
-  await applyPagesSelection({ configStore, projectName, accountId });
+  await applyPagesSelection({ configStore, projectName, accountId, accountName, baseUrl });
 
   const credential = cloudflareCredentialStatus();
   if (!credential.tokenConfigured) {
@@ -5967,6 +5986,8 @@ async function ensureHeadlessPagesTarget({
 export async function setupCloudflarePages({
   projectName,
   accountId,
+  accountName,
+  baseUrl,
   branch = DEFAULT_PAGES_BRANCH,
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
@@ -5982,6 +6003,8 @@ export async function setupCloudflarePages({
     cloudflareAuth,
     projectName,
     accountId,
+    accountName,
+    baseUrl,
     branch,
     autoCreate: true,
     loginIfNeeded: true
@@ -6260,6 +6283,8 @@ export async function deployCloudflarePagesSite({
   sourceDir,
   projectName,
   accountId,
+  accountName,
+  baseUrl,
   branch = DEFAULT_PAGES_BRANCH,
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
@@ -6284,6 +6309,8 @@ export async function deployCloudflarePagesSite({
     cloudflareAuth,
     projectName,
     accountId,
+    accountName,
+    baseUrl,
     branch: normalizedBranch,
     autoCreate: true,
     loginIfNeeded: false

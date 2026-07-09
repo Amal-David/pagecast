@@ -437,7 +437,8 @@ test("Wrangler Pages project list parsing normalizes selectable projects", () =>
         {
           name: "team-reports",
           account_id: "0123456789abcdef0123456789abcdef",
-          account_name: "Team"
+          account_name: "Team",
+          domains: ["team-reports-prod.pages.dev", "team-reports.pages.dev"]
         },
         {
           project_name: "pagecast",
@@ -475,7 +476,7 @@ test("Wrangler Pages project list parsing normalizes selectable projects", () =>
       accountId: "0123456789abcdef0123456789abcdef",
       accountName: "Team",
       productionBranch: "",
-      baseUrl: "https://team-reports.pages.dev"
+      baseUrl: "https://team-reports-prod.pages.dev"
     }
   ]);
   assert.equal(chooseWranglerPagesProject(projects, { projectName: "team-reports" }).name, "team-reports");
@@ -1746,6 +1747,7 @@ test("Headless Pages setup logs in and creates the requested Pages project", asy
   const result = await setupCloudflarePages({
     projectName: "pagecasthq",
     accountId,
+    baseUrl: "https://pagecasthq-prod.pages.dev",
     branch: "production",
     dataDir,
     cloudflareAuthSpawnImpl: fakeSpawn,
@@ -1756,6 +1758,7 @@ test("Headless Pages setup logs in and creates the requested Pages project", asy
   assert.equal(result.cloudflare.autoCreated, true);
   assert.equal(result.config.pages.projectName, "pagecasthq");
   assert.equal(result.config.pages.accountId, accountId);
+  assert.equal(result.config.pages.baseUrl, "https://pagecasthq-prod.pages.dev");
 
   const createCall = captured.find((item) => item.args.includes("create"));
   assert.ok(createCall, "expected setup to create the requested Pages project");
