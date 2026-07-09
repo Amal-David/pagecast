@@ -36,6 +36,7 @@ export interface Report {
   autoSync: boolean;
   passwordProtected: boolean;
   importedFromCloudflare: boolean;
+  sourceMissing: boolean;
   sourceMode: SourceMode;
   buildCommand: string;
   buildOutputDir: string;

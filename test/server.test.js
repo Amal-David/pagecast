@@ -2386,6 +2386,78 @@ test("Cloudflare sync imports remote manifest links and downloads listed assets"
   }
 });
 
+test("Cloudflare sync recovers a public Pages root when no manifest exists", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const fetched = [];
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    fetchImpl: async (url) => {
+      const href = String(url);
+      fetched.push(href);
+      if (href.includes("/__pagecast/manifest.json")) {
+        return new Response("Not found.", { status: 404 });
+      }
+      if (href === "https://team-reports.pages.dev/") {
+        return new Response(
+          '<!doctype html><title>Recovered Site</title><link rel="stylesheet" href="/style.css"><script src="./app.js"></script><h1>Recovered root</h1>',
+          { status: 200, headers: { "Content-Type": "text/html" } }
+        );
+      }
+      if (href === "https://team-reports.pages.dev/style.css") {
+        return new Response("body { background: url('/assets/bg.png'); color: teal; }", {
+          status: 200,
+          headers: { "Content-Type": "text/css" }
+        });
+      }
+      if (href === "https://team-reports.pages.dev/app.js") {
+        return new Response("window.recovered = true;", {
+          status: 200,
+          headers: { "Content-Type": "application/javascript" }
+        });
+      }
+      if (href === "https://team-reports.pages.dev/assets/bg.png") {
+        return new Response("png", {
+          status: 200,
+          headers: { "Content-Type": "image/png" }
+        });
+      }
+      return new Response("Not found.", { status: 404 });
+    }
+  });
+
+  try {
+    await configurePages(runtime.adminUrl);
+    const response = await fetch(`${runtime.adminUrl}/api/cloudflare/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.remoteManifestFound, false);
+    assert.equal(data.importedCount, 1);
+    assert.equal(data.failed.length, 0);
+    assert.ok(fetched.some((href) => href === "https://team-reports.pages.dev/"));
+    assert.ok(fetched.some((href) => href === "https://team-reports.pages.dev/assets/bg.png"));
+
+    const report = data.imported[0];
+    assert.equal(report.name, "Recovered Site");
+    assert.equal(report.publicUrl, "https://team-reports.pages.dev");
+    assert.equal(report.sourceMissing, false);
+    const recoveredRoot = path.join(dataDir, "imports", "team-reports");
+    const indexHtml = await fs.readFile(path.join(recoveredRoot, "index.html"), "utf8");
+    assert.match(indexHtml, /href="style.css"/);
+    assert.match(indexHtml, /src="app.js"/);
+    assert.match(await fs.readFile(path.join(recoveredRoot, "style.css"), "utf8"), /assets\/bg\.png/);
+  } finally {
+    await runtime.close();
+  }
+});
+
 test("Cloudflare sync rejects oversized remote assets before buffering", async () => {
   const tempDir = await makeTempDir();
   const dataDir = path.join(tempDir, "data");
@@ -2757,6 +2829,166 @@ test("editing a path report writes a working copy and leaves the source untouche
     const staged = await fs.readFile(stagedIndex, "utf8");
     assert.ok(staged.includes(editedHtml), "staged content reflects the working-copy edit");
     assert.match(staged, /data-pagecast-badge/);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("missing local source reports expose a clear source-missing state", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportDir = path.join(tempDir, "report");
+  await fs.mkdir(reportDir, { recursive: true });
+  const reportPath = path.join(reportDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>Temporary source</h1>");
+
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public")
+  });
+
+  try {
+    const report = await addPathReport(runtime.adminUrl, reportPath);
+    await fs.rm(reportPath);
+
+    const listResponse = await fetch(`${runtime.adminUrl}/api/reports`);
+    assert.equal(listResponse.status, 200);
+    const listed = (await listResponse.json()).reports.find((item) => item.id === report.id);
+    assert.equal(listed.sourceMissing, true);
+
+    const contentResponse = await fetch(`${runtime.adminUrl}/api/reports/${report.id}/content`);
+    assert.equal(contentResponse.status, 410);
+    const contentData = await contentResponse.json();
+    assert.match(contentData.error.message, /Source file is missing/);
+
+    const previewResponse = await fetch(`${runtime.adminUrl}/preview/${report.id}/`);
+    assert.equal(previewResponse.status, 410);
+    assert.match(await previewResponse.text(), /Source file is missing/);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("missing published source recovers from the local staged copy before editing", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportDir = path.join(tempDir, "report");
+  await fs.mkdir(reportDir, { recursive: true });
+  const reportPath = path.join(reportDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>Local source before publish</h1>");
+
+  const { fakeDeploy, state } = makeInstrumentedDeploy();
+  const fetched = [];
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    pagesDeploySpawnImpl: fakeDeploy,
+    pagesDeployTimeoutMs: 1000,
+    fetchImpl: async () => {
+      fetched.push("unexpected");
+      return new Response("Not found.", { status: 404 });
+    }
+  });
+
+  try {
+    await configurePages(runtime.adminUrl);
+    const report = await addPathReport(runtime.adminUrl, reportPath);
+    await publishSnapshot(runtime.adminUrl, report.id);
+    assert.equal(state.deployCount, 1);
+    await fs.rm(reportPath);
+
+    const beforeResponse = await fetch(`${runtime.adminUrl}/api/reports`);
+    assert.equal(beforeResponse.status, 200);
+    const before = (await beforeResponse.json()).reports.find((item) => item.id === report.id);
+    assert.equal(before.sourceMissing, true);
+
+    const contentResponse = await fetch(`${runtime.adminUrl}/api/reports/${report.id}/content`);
+    assert.equal(contentResponse.status, 200);
+    const contentData = await contentResponse.json();
+    assert.match(contentData.html, /Local source before publish/);
+    assert.deepEqual(fetched, []);
+
+    const afterResponse = await fetch(`${runtime.adminUrl}/api/reports`);
+    const after = (await afterResponse.json()).reports.find((item) => item.id === report.id);
+    assert.equal(after.sourceMissing, false);
+    assert.equal(after.importedFromCloudflare, true);
+    assert.equal(after.sourceMode, "edited-in-pagecast");
+
+    const recoveredIndex = path.join(dataDir, "working", `${report.id}-recovered`, "index.html");
+    assert.match(await fs.readFile(recoveredIndex, "utf8"), /Local source before publish/);
+
+    const editResponse = await fetch(`${runtime.adminUrl}/api/reports/${report.id}/content`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html: "<h1>Edited after recovery</h1>" })
+    });
+    assert.equal(editResponse.status, 200);
+    assert.equal(state.deployCount, 2, "editing a recovered published page redeploys");
+    assert.match(await fs.readFile(recoveredIndex, "utf8"), /Edited after recovery/);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("missing published source falls back to its active public URL when no staged copy exists", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportDir = path.join(tempDir, "report");
+  await fs.mkdir(reportDir, { recursive: true });
+  const reportPath = path.join(reportDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>Local source before publish</h1>");
+
+  const { fakeDeploy } = makeInstrumentedDeploy();
+  const fetched = [];
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    pagesDeploySpawnImpl: fakeDeploy,
+    pagesDeployTimeoutMs: 1000,
+    fetchImpl: async (url) => {
+      const href = String(url);
+      fetched.push(href);
+      if (/^https:\/\/team-reports\.pages\.dev\/p\/[^/]+\/?$/.test(href)) {
+        return new Response(
+          '<!doctype html><title>Recovered Link</title><link rel="stylesheet" href="style.css"><h1>Recovered from Pages</h1>',
+          { status: 200, headers: { "Content-Type": "text/html" } }
+        );
+      }
+      if (/^https:\/\/team-reports\.pages\.dev\/p\/[^/]+\/style\.css$/.test(href)) {
+        return new Response("body { color: green; }", {
+          status: 200,
+          headers: { "Content-Type": "text/css" }
+        });
+      }
+      return new Response("Not found.", { status: 404 });
+    }
+  });
+
+  try {
+    await configurePages(runtime.adminUrl);
+    const report = await addPathReport(runtime.adminUrl, reportPath);
+    const publication = await publishSnapshot(runtime.adminUrl, report.id);
+    await fs.rm(reportPath);
+    await fs.rm(path.join(dataDir, "pages-site", "p", publication.slug), {
+      recursive: true,
+      force: true
+    });
+
+    const contentResponse = await fetch(`${runtime.adminUrl}/api/reports/${report.id}/content`);
+    assert.equal(contentResponse.status, 200);
+    const contentData = await contentResponse.json();
+    assert.match(contentData.html, /Recovered from Pages/);
+    assert.ok(fetched.includes(publication.publicUrl));
+    assert.match(
+      await fs.readFile(path.join(dataDir, "working", `${report.id}-recovered`, "style.css"), "utf8"),
+      /green/
+    );
   } finally {
     await runtime.close();
   }

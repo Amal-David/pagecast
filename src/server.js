@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { createReadStream, watch as fsWatch } from "node:fs";
+import { createReadStream, existsSync, watch as fsWatch } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1185,6 +1185,230 @@ async function fetchWithTimeout(fetchImpl, url, options = {}, timeoutMs = SYNC_M
   }
 }
 
+function safePublicUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+function relativePublicRootPath(publicUrl) {
+  if (publicUrl.pathname.endsWith("/")) {
+    return publicUrl.pathname;
+  }
+  return `${path.posix.dirname(publicUrl.pathname)}/`;
+}
+
+function localPathForPublicAsset(assetUrl, publicUrl) {
+  let decodedPath;
+  try {
+    decodedPath = decodeURIComponent(assetUrl.pathname);
+  } catch {
+    return null;
+  }
+
+  const rootPath = relativePublicRootPath(publicUrl);
+  const withoutRoot = decodedPath.startsWith(rootPath)
+    ? decodedPath.slice(rootPath.length)
+    : decodedPath.replace(/^\/+/, "");
+  const localPath = withoutRoot.replace(/^\/+/, "");
+  if (!localPath || localPath.endsWith("/")) {
+    return null;
+  }
+
+  const normalized = normalizeAssetRequestPath(localPath);
+  return normalized ? normalized.split(path.sep).join("/") : null;
+}
+
+function publicAssetUrl(rawValue, baseUrl, rootUrl) {
+  const value = String(rawValue || "").trim();
+  if (
+    !value ||
+    value.startsWith("#") ||
+    /^(?:data|blob|mailto|tel|javascript):/i.test(value)
+  ) {
+    return null;
+  }
+
+  let url;
+  try {
+    url = new URL(value, baseUrl);
+  } catch {
+    return null;
+  }
+
+  if (url.origin !== rootUrl.origin || (url.protocol !== "http:" && url.protocol !== "https:")) {
+    return null;
+  }
+
+  const localPath = localPathForPublicAsset(url, rootUrl);
+  if (!localPath || localPath === "index.html") {
+    return null;
+  }
+
+  return { url, localPath, rawValue: value };
+}
+
+function isLikelyHrefAsset(value) {
+  const href = String(value || "").trim();
+  if (!href || href.startsWith("#")) {
+    return false;
+  }
+  try {
+    const pathname = new URL(href, "https://pagecast.local").pathname;
+    return /\.[a-z0-9]{2,8}$/i.test(pathname);
+  } catch {
+    return false;
+  }
+}
+
+function extractHtmlAssetReferences(html, baseUrl, rootUrl) {
+  const references = [];
+  const attrPattern = /\b(src|href|poster)\s*=\s*(["'])(.*?)\2/gi;
+  let match;
+  while ((match = attrPattern.exec(html))) {
+    const attr = match[1].toLowerCase();
+    const rawValue = match[3];
+    if (attr === "href" && !isLikelyHrefAsset(rawValue)) {
+      continue;
+    }
+    const asset = publicAssetUrl(rawValue, baseUrl, rootUrl);
+    if (asset) {
+      references.push(asset);
+    }
+  }
+  return references;
+}
+
+function extractCssAssetReferences(css, baseUrl, rootUrl) {
+  const references = [];
+  const urlPattern = /url\(\s*(["']?)([^"')]+)\1\s*\)/gi;
+  let match;
+  while ((match = urlPattern.exec(css))) {
+    const asset = publicAssetUrl(match[2], baseUrl, rootUrl);
+    if (asset) {
+      references.push(asset);
+    }
+  }
+  return references;
+}
+
+function rewriteReferences(content, replacements) {
+  let rewritten = content;
+  for (const [from, to] of replacements) {
+    rewritten = rewritten.split(from).join(to);
+  }
+  return rewritten;
+}
+
+function relativeReference(fromFile, toFile) {
+  const fromDir = path.posix.dirname(fromFile);
+  const relative = path.posix.relative(fromDir, toFile);
+  return relative || path.posix.basename(toFile);
+}
+
+async function readSyncImportResponse(response, totalBytes) {
+  const lengthHeader = response.headers.get("content-length");
+  const contentLength = /^\d+$/.test(lengthHeader || "") ? Number(lengthHeader) : null;
+  if (contentLength !== null && contentLength > MAX_SYNC_IMPORT_FILE_BYTES) {
+    throw appError("Synced page includes a file that is too large.", 413);
+  }
+  if (contentLength !== null && totalBytes + contentLength > MAX_SYNC_IMPORT_BYTES) {
+    throw appError("Synced page is too large.", 413);
+  }
+
+  const content = Buffer.from(await response.arrayBuffer());
+  if (content.length > MAX_SYNC_IMPORT_FILE_BYTES) {
+    throw appError("Synced page includes a file that is too large.", 413);
+  }
+  const nextTotalBytes = totalBytes + content.length;
+  if (nextTotalBytes > MAX_SYNC_IMPORT_BYTES) {
+    throw appError("Synced page is too large.", 413);
+  }
+  return { content, totalBytes: nextTotalBytes };
+}
+
+async function copyPublicUrlFiles({ publicUrl, destinationRoot, fetchImpl = fetch } = {}) {
+  const rootUrl = safePublicUrl(publicUrl);
+  if (!rootUrl) {
+    throw appError("A public URL is required to recover this page.", 400);
+  }
+
+  await fs.rm(destinationRoot, { recursive: true, force: true });
+  await fs.mkdir(destinationRoot, { recursive: true });
+
+  const rootResponse = await fetchWithTimeout(fetchImpl, rootUrl.href, {
+    headers: { Accept: "text/html,application/xhtml+xml" }
+  });
+  if (!rootResponse.ok) {
+    throw appError(`Could not recover the published page (${rootResponse.status}).`, 502);
+  }
+
+  let totalBytes = 0;
+  const rootBody = await readSyncImportResponse(rootResponse, totalBytes);
+  totalBytes = rootBody.totalBytes;
+  let html = rootBody.content.toString("utf8");
+  const queued = [];
+  const seen = new Set(["index.html"]);
+  let fileCount = 1;
+
+  function enqueue(asset) {
+    if (!asset || seen.has(asset.localPath)) {
+      return;
+    }
+    if (fileCount >= MAX_SYNC_IMPORT_FILES) {
+      throw appError(`Synced page includes more than ${MAX_SYNC_IMPORT_FILES} files.`, 413);
+    }
+    seen.add(asset.localPath);
+    fileCount += 1;
+    queued.push(asset);
+  }
+
+  const htmlReplacements = new Map();
+  for (const asset of extractHtmlAssetReferences(html, rootUrl.href, rootUrl)) {
+    enqueue(asset);
+    htmlReplacements.set(asset.rawValue, asset.localPath);
+  }
+  html = rewriteReferences(html, htmlReplacements);
+  await fs.writeFile(path.join(destinationRoot, "index.html"), html, "utf8");
+
+  for (let index = 0; index < queued.length; index += 1) {
+    const asset = queued[index];
+    const response = await fetchWithTimeout(fetchImpl, asset.url.href);
+    if (!response.ok) {
+      continue;
+    }
+    let body = await readSyncImportResponse(response, totalBytes);
+    totalBytes = body.totalBytes;
+    const destinationPath = path.resolve(destinationRoot, asset.localPath);
+    if (!isPathInside(destinationRoot, destinationPath)) {
+      throw appError("Synced page includes an unsafe file path.", 400);
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/css") || asset.localPath.endsWith(".css")) {
+      let css = body.content.toString("utf8");
+      const cssReplacements = new Map();
+      for (const nestedAsset of extractCssAssetReferences(css, asset.url.href, rootUrl)) {
+        enqueue(nestedAsset);
+        cssReplacements.set(
+          nestedAsset.rawValue,
+          relativeReference(asset.localPath, nestedAsset.localPath)
+        );
+      }
+      css = rewriteReferences(css, cssReplacements);
+      body = { ...body, content: Buffer.from(css, "utf8") };
+    }
+
+    await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+    await fs.writeFile(destinationPath, body.content);
+  }
+
+  return { entryFile: "index.html", files: await listPublicTreeFiles(destinationRoot) };
+}
+
 async function runSpawnCommand({
   spawnImpl,
   command,
@@ -2206,6 +2430,57 @@ export function createCloudflarePagesPublisher({
       }
     }
 
+    const projectName =
+      normalizePagesProjectNameSafe(pagesConfig?.projectName) || DEFAULT_PAGES_PROJECT_NAME;
+    const projectDeployRoot = path.join(deployRoot, projectName);
+    try {
+      const projectEntry = await findFolderEntry(projectDeployRoot);
+      const files = await listPublicTreeFiles(projectDeployRoot);
+      const slug = normalizeCustomSlug(projectName);
+      let title = projectName;
+      try {
+        const html = await fs.readFile(path.join(projectDeployRoot, projectEntry), "utf8");
+        title = extractTitle(html, title) || title;
+      } catch {
+        title = projectName;
+      }
+      if (!records.has(slug)) {
+        records.set(slug, {
+          slug,
+          source: "local-staged-site-root",
+          sourceRoot: projectDeployRoot,
+          files,
+          title,
+          label: "recovered",
+          token: slug,
+          publicUrl: baseUrl,
+          baseUrl,
+          createdAt: nowIso(),
+          updatedAt: nowIso()
+        });
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT" && error.statusCode !== 400) {
+        warnings.push(`Local staged Pages project could not be read: ${error.message || error}.`);
+      }
+    }
+
+    if (records.size === 0 && baseUrl) {
+      const slug = normalizeCustomSlug(projectName);
+      records.set(slug, {
+        slug,
+        source: "cloudflare-public-root",
+        files: [],
+        title: projectName,
+        label: "recovered",
+        token: slug,
+        publicUrl: baseUrl,
+        baseUrl,
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      });
+    }
+
     return {
       publications: [...records.values()].sort((a, b) => a.slug.localeCompare(b.slug)),
       warnings,
@@ -2673,7 +2948,8 @@ export function createCloudflareAuthManager({
 export function createReportStore({
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   buildSpawnImpl = spawn,
-  buildTimeoutMs = 5 * 60 * 1000
+  buildTimeoutMs = 5 * 60 * 1000,
+  recoverFetchImpl = fetch
 } = {}) {
   const statePath = path.join(dataDir, "reports.json");
   const uploadRoot = path.join(dataDir, "uploads");
@@ -2741,6 +3017,18 @@ export function createReportStore({
 
   function reportSourceRoot(report) {
     return path.resolve(report.workingDir || report.buildOutputRoot || report.rootDir);
+  }
+
+  function reportSourceMissing(report) {
+    if (!report || report.workingDir || report.kind === "upload") {
+      return false;
+    }
+    const rootDir = reportSourceRoot(report);
+    const entryPath = path.resolve(rootDir, report.entryFile || "index.html");
+    if (!isPathInside(rootDir, entryPath)) {
+      return true;
+    }
+    return !existsSync(entryPath);
   }
 
   async function save() {
@@ -2888,6 +3176,7 @@ export function createReportStore({
       // server-side secret and is intentionally never serialized to the API.
       passwordProtected: report.passwordProtected === true,
       importedFromCloudflare: report.importedFromCloudflare === true,
+      sourceMissing: reportSourceMissing(report),
       createdAt: report.createdAt,
       updatedAt: report.updatedAt,
       localUrl: adminBaseUrl ? joinUrl(adminBaseUrl, previewSuffix) : null,
@@ -3286,28 +3575,14 @@ export function createReportStore({
       if (!response.ok) {
         throw appError(`Could not import ${relativePath} from Cloudflare (${response.status}).`, 502);
       }
-      const lengthHeader = response.headers.get("content-length");
-      const contentLength = /^\d+$/.test(lengthHeader || "") ? Number(lengthHeader) : null;
-      if (contentLength !== null && contentLength > MAX_SYNC_IMPORT_FILE_BYTES) {
-        throw appError("Synced page includes a file that is too large.", 413);
-      }
-      if (contentLength !== null && totalBytes + contentLength > MAX_SYNC_IMPORT_BYTES) {
-        throw appError("Synced page is too large.", 413);
-      }
-      const content = Buffer.from(await response.arrayBuffer());
-      if (content.length > MAX_SYNC_IMPORT_FILE_BYTES) {
-        throw appError("Synced page includes a file that is too large.", 413);
-      }
-      totalBytes += content.length;
-      if (totalBytes > MAX_SYNC_IMPORT_BYTES) {
-        throw appError("Synced page is too large.", 413);
-      }
+      const body = await readSyncImportResponse(response, totalBytes);
+      totalBytes = body.totalBytes;
       const destinationPath = path.resolve(destinationRoot, relativePath);
       if (!isPathInside(destinationRoot, destinationPath)) {
         throw appError("Synced page includes an unsafe file path.", 400);
       }
       await fs.mkdir(path.dirname(destinationPath), { recursive: true });
-      await fs.writeFile(destinationPath, content);
+      await fs.writeFile(destinationPath, body.content);
     }
   }
 
@@ -3326,6 +3601,17 @@ export function createReportStore({
     const reportDir = path.join(importRoot, normalized.slug);
     if (record?.sourceRoot) {
       await copyPublicTree(record.sourceRoot, reportDir);
+    } else if (
+      normalized.publicUrl &&
+      (record?.source === "cloudflare-public-root" ||
+        record?.source === "cloudflare-public-url" ||
+        normalized.files.length === 0)
+    ) {
+      await copyPublicUrlFiles({
+        publicUrl: normalized.publicUrl,
+        destinationRoot: reportDir,
+        fetchImpl
+      });
     } else {
       await copyRemotePublicationFiles({
         slug: normalized.slug,
@@ -3505,6 +3791,63 @@ export function createReportStore({
     );
   }
 
+  async function recoverMissingReportSource(report) {
+    if (!report || !reportSourceMissing(report)) {
+      return false;
+    }
+    const publication = activeSnapshotPublications(report)
+      .filter((item) => item.publicUrl)
+      .sort((a, b) => (b.updatedAt || b.createdAt).localeCompare(a.updatedAt || a.createdAt))[0];
+    if (!publication?.publicUrl) {
+      return false;
+    }
+
+    const recoveryRoot = path.join(workingRoot, `${report.id}-recovered`);
+    let recovered = null;
+    const slug = publication.slug || publication.token;
+    const pagesProjectName =
+      publication.pagesProjectName || pagesProjectNameFromPublicUrl(publication.publicUrl);
+    const localCandidates = [
+      slug ? path.join(dataDir, "pages-site", "p", slug) : "",
+      pagesProjectName && slug ? path.join(dataDir, "pages-deploy", pagesProjectName, "p", slug) : "",
+      pagesProjectName && publication.publicUrl === pagesBaseUrl(pagesProjectName)
+        ? path.join(dataDir, "pages-deploy", pagesProjectName)
+        : ""
+    ].filter(Boolean);
+
+    for (const candidate of localCandidates) {
+      try {
+        const entryFile = await findFolderEntry(candidate);
+        await copyPublicTree(candidate, recoveryRoot);
+        recovered = { entryFile };
+        break;
+      } catch (error) {
+        if (error.code !== "ENOENT" && error.statusCode !== 400) {
+          throw error;
+        }
+      }
+    }
+
+    if (!recovered) {
+      recovered = await copyPublicUrlFiles({
+        publicUrl: publication.publicUrl,
+        destinationRoot: recoveryRoot,
+        fetchImpl: recoverFetchImpl
+      });
+    }
+    report.workingDir = recoveryRoot;
+    report.entryFile = recovered.entryFile;
+    report.sourceMode = "edited-in-pagecast";
+    report.autoSync = false;
+    report.importedFromCloudflare = true;
+    report.buildOutputRoot = null;
+    report.buildStatus = "ready";
+    report.buildError = "";
+    report.updatedAt = nowIso();
+    await save();
+    return true;
+  }
+
   // The set of currently-live protected slugs and their password hashes, used to
   // regenerate the edge auth middleware on every deploy. One report's hash maps
   // to every active snapshot slug of that report.
@@ -3664,6 +4007,15 @@ export function createReportStore({
       stat = await fs.stat(targetPath);
     } catch (error) {
       if (error.code === "ENOENT") {
+        if (relativeAssetPath === "" && (await recoverMissingReportSource(report))) {
+          return resolveAsset(id, rawAssetPath);
+        }
+        if (relativeAssetPath === "" && reportSourceMissing(report)) {
+          return {
+            statusCode: 410,
+            message: "Source file is missing, and Pagecast could not recover it from a public URL."
+          };
+        }
         return {
           statusCode: report.kind === "path" && relativeAssetPath === "" ? 410 : 404,
           message: "Report asset was not found."
@@ -3798,12 +4150,32 @@ export function createReportStore({
     if (!report) {
       throw appError("Report was not found.", 404);
     }
-    const rootDir = reportSourceRoot(report);
-    const targetPath = path.resolve(rootDir, report.entryFile);
+    let rootDir = reportSourceRoot(report);
+    let targetPath = path.resolve(rootDir, report.entryFile);
     if (!isPathInside(rootDir, targetPath)) {
       throw appError("Report content path is not allowed.", 403);
     }
-    const html = await fs.readFile(targetPath, "utf8");
+    let html;
+    try {
+      html = await fs.readFile(targetPath, "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") {
+        throw error;
+      }
+      if (await recoverMissingReportSource(report)) {
+        rootDir = reportSourceRoot(report);
+        targetPath = path.resolve(rootDir, report.entryFile);
+        if (!isPathInside(rootDir, targetPath)) {
+          throw appError("Report content path is not allowed.", 403);
+        }
+        html = await fs.readFile(targetPath, "utf8");
+      } else {
+        throw appError(
+          "Source file is missing, and Pagecast could not recover it from a public URL.",
+          410
+        );
+      }
+    }
     return { html };
   }
 
@@ -5737,7 +6109,7 @@ export async function startServers({
   pagesDeploySpawnImpl = spawn,
   pagesDeployTimeoutMs = 180000
 } = {}) {
-  const store = createReportStore({ dataDir });
+  const store = createReportStore({ dataDir, recoverFetchImpl: fetchImpl });
   await store.init();
   const configStore = createConfigStore({ dataDir });
   await configStore.init();

@@ -3,6 +3,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { motion } from "framer-motion";
 import {
+  AlertCircle,
   Check,
   ChevronDown,
   Eye,
@@ -150,6 +151,12 @@ export function ReportCard({ report, onPreview, onEdit }: ReportCardProps) {
                 <Badge variant="muted" className="shrink-0 gap-1 px-1.5 py-0 text-[10px]">
                   <Upload className="h-2.5 w-2.5" />
                   upload
+                </Badge>
+              ) : null}
+              {report.sourceMissing ? (
+                <Badge variant="destructive" className="shrink-0 gap-1 px-1.5 py-0 text-[10px]">
+                  <AlertCircle className="h-2.5 w-2.5" />
+                  source missing
                 </Badge>
               ) : null}
             </div>

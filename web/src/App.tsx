@@ -948,6 +948,7 @@ function PageRow({
   const hasActiveLinks = activeLinkCount > 0;
   const stateLabel = hasActiveLinks ? "Live" : "Draft";
   const detailLabels = [
+    report.sourceMissing ? "Source missing" : "",
     report.importedFromCloudflare ? "Recovered" : "",
     report.kind === "folder" ? "Mini app" : "",
     report.kind === "upload" ? "Upload" : "",
@@ -1476,6 +1477,12 @@ function PreviewPane({
               <Badge variant="muted" className="gap-1">
                 <CloudDownload className="h-3 w-3" />
                 Recovered
+              </Badge>
+            ) : null}
+            {report.sourceMissing ? (
+              <Badge variant="destructive" className="gap-1">
+                <AlertCircle className="h-3 w-3" />
+                Source missing
               </Badge>
             ) : null}
           </div>
