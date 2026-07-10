@@ -28,16 +28,15 @@ backend (export static assets first).
 
 ## Quick Start
 
-> **Release status:** `main` contains the merged Pagecast 0.5.0 code and docs,
-> but npm, GitHub Releases, and `ghcr.io/amal-david/pagecast:latest` still provide
-> 0.4.0. To run 0.5.0 before it is published, clone `main` and run `npm start`, or
-> build the container locally.
-
-Requires Node.js 20.19+ and a Cloudflare account (for publishing). No global install:
+Requires Node.js 20.19+ and a Cloudflare account for publishing. Run the exact
+Pagecast 0.5.0 release without a global install:
 
 ```sh
-npx pagecast
+npx pagecast@0.5.0
 ```
+
+The versioned command is reproducible. Unversioned `npx pagecast` follows npm's
+current `latest` tag. From a source checkout of `main`, run `npm start` instead.
 
 This starts the local app and opens the admin UI:
 
@@ -52,8 +51,8 @@ server from the same directory to use the same reports and Cloudflare target.
 
 ### Upgrading from 0.4 to 0.5
 
-- After 0.5.0 is published, stop any v0.4 foreground process with `Ctrl-C`. For
-  a transient background process, switch versions explicitly:
+- Stop any v0.4 foreground process with `Ctrl-C`. For a transient background
+  process, switch versions explicitly:
 
   ```sh
   npx pagecast@0.4.0 background stop
@@ -65,7 +64,7 @@ server from the same directory to use the same reports and Cloudflare target.
   exact Node and CLI paths, so restarting the old service does not upgrade it.
 - Replace the unpacked Chrome extension with the matching 0.5.0 release folder
   (or the `extension/` folder from the same source checkout), then click
-  **Reload** in `chrome://extensions`. The 0.5 extension negotiates the new
+  **Reload** in `chrome://extensions`. The 0.5.0 extension negotiates the new
   admin-session token before publishing.
 - Existing URLs, passwords, expiries, redirects, Cloudflare selections, and
   `.pagecast/` data remain readable. Existing word-only URLs are preserved as
@@ -178,7 +177,8 @@ inspect deployment history before retrying an ambiguous timeout.
 
 Common errors: `statusCode 401` means Cloudflare setup or authentication is
 required. `statusCode 409` means a conflict; follow the returned message. For
-the explicit multiple-account conflict, rerun setup with `--account <id>`.
+the explicit multiple-account conflict, run
+`npx pagecast pages setup --project pagecast --account <id>`.
 
 ## Password Protection
 
