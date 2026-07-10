@@ -40,7 +40,7 @@ test("CI covers the supported OS and Node matrix plus artifact proofs", () => {
   const workflow = read(".github/workflows/ci.yml");
   const hardenedCheckouts =
     workflow.match(
-      /- name: Checkout\n\s+uses: actions\/checkout@[^\n]+\n\s+with:\n\s+persist-credentials: false/g
+      /- name: Checkout\r?\n\s+uses: actions\/checkout@[^\r\n]+\r?\n\s+with:\r?\n\s+persist-credentials: false/g
     ) || [];
   assert.equal(hardenedCheckouts.length, 2, "every CI checkout must avoid persisting credentials");
   assert.match(workflow, /os:\s*\[ubuntu-latest, windows-latest\]/);
@@ -85,7 +85,7 @@ test("release publishing is verification-gated and labels extension assets from 
   const workflow = read(".github/workflows/release.yml");
   const hardenedCheckouts =
     workflow.match(
-      /- name: Checkout\n\s+uses: actions\/checkout@[^\n]+\n\s+with:\n\s+persist-credentials: false/g
+      /- name: Checkout\r?\n\s+uses: actions\/checkout@[^\r\n]+\r?\n\s+with:\r?\n\s+persist-credentials: false/g
     ) || [];
   assert.equal(
     hardenedCheckouts.length,
