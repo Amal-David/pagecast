@@ -656,6 +656,78 @@ test("an unrelated existing project requires explicit adoption and emits an owne
   assert.equal(marker.projectName, TARGET_A.projectName);
 });
 
+test("a rejected target never replaces the publisher's last authorized target", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const source = await addReport(
+    dataDir,
+    path.join(tempDir, "source"),
+    "authorized-target",
+    "<h1>Authorized target</h1>"
+  );
+  const { fakeDeploy, captures } = makeDeployFake([undefined, "fail"]);
+  const publisher = createCloudflarePagesPublisher({
+    dataDir,
+    spawnImpl: fakeDeploy,
+    timeoutMs: 1000,
+    fetchImpl: async () => new Response("Not found", { status: 404 })
+  });
+
+  try {
+    await publisher.publish({
+      report: source.report,
+      publication: publication("authorized-target", TARGET_A),
+      pagesConfig: pagesConfig(TARGET_A)
+    });
+    const authorizedRoot = publisher.siteRoot;
+    const authorizedManifest = await publisher.buildSyncManifest();
+    assert.equal(authorizedManifest.baseUrl, "https://alpha-reports.pages.dev");
+    assert.deepEqual(
+      authorizedManifest.publications.map((entry) => entry.slug),
+      ["authorized-target"]
+    );
+
+    await assert.rejects(
+      () =>
+        publisher.publish({
+          report: source.report,
+          publication: publication("rejected-target", TARGET_B),
+          pagesConfig: pagesConfig(TARGET_B, { adoptExisting: false })
+        }),
+      /adopt|ownership|managed/i
+    );
+
+    assert.equal(captures.length, 1, "the rejected target must never reach Wrangler");
+    assert.equal(publisher.siteRoot, authorizedRoot);
+    const manifestAfterRejection = await publisher.buildSyncManifest();
+    assert.equal(manifestAfterRejection.baseUrl, "https://alpha-reports.pages.dev");
+    assert.deepEqual(
+      manifestAfterRejection.publications.map((entry) => entry.slug),
+      ["authorized-target"]
+    );
+
+    await assert.rejects(
+      () =>
+        publisher.publish({
+          report: source.report,
+          publication: publication("failed-authorized-target", TARGET_B),
+          pagesConfig: pagesConfig(TARGET_B)
+        }),
+      /deploy failed/i
+    );
+    assert.equal(captures.length, 2, "the authorized target reaches Wrangler before deploy fails");
+    assert.equal(publisher.siteRoot, authorizedRoot);
+    const manifestAfterDeployFailure = await publisher.buildSyncManifest();
+    assert.equal(manifestAfterDeployFailure.baseUrl, "https://alpha-reports.pages.dev");
+    assert.deepEqual(
+      manifestAfterDeployFailure.publications.map((entry) => entry.slug),
+      ["authorized-target"]
+    );
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("a matching ownership marker is accepted without a new adoption", async () => {
   const tempDir = await makeTempDir();
   const dataDir = path.join(tempDir, "data");

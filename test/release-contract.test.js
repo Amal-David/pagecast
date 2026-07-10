@@ -38,6 +38,11 @@ test("package-facing component versions stay aligned", () => {
 
 test("CI covers the supported OS and Node matrix plus artifact proofs", () => {
   const workflow = read(".github/workflows/ci.yml");
+  const hardenedCheckouts =
+    workflow.match(
+      /- name: Checkout\n\s+uses: actions\/checkout@[^\n]+\n\s+with:\n\s+persist-credentials: false/g
+    ) || [];
+  assert.equal(hardenedCheckouts.length, 2, "every CI checkout must avoid persisting credentials");
   assert.match(workflow, /os:\s*\[ubuntu-latest, windows-latest\]/);
   assert.match(workflow, /node:\s*\["20\.19\.0", 22\]/);
   assert.match(workflow, /pnpm -C web run build/);
@@ -78,6 +83,15 @@ test("security and extension privacy docs describe reusable process-scoped token
 
 test("release publishing is verification-gated and labels extension assets from the manifest", () => {
   const workflow = read(".github/workflows/release.yml");
+  const hardenedCheckouts =
+    workflow.match(
+      /- name: Checkout\n\s+uses: actions\/checkout@[^\n]+\n\s+with:\n\s+persist-credentials: false/g
+    ) || [];
+  assert.equal(
+    hardenedCheckouts.length,
+    4,
+    "every release checkout must avoid persisting credentials"
+  );
   assert.match(workflow, /workflow_dispatch:\s*\n\s+inputs:\s*\n\s+version:/);
   assert.match(workflow, /EXPECTED_VERSION:/);
   assert.match(workflow, /require\("\.\/package\.json"\)\.version/);

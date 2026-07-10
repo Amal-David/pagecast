@@ -512,23 +512,23 @@ test("feedback API and headless DTOs never serialize internal secrets", async ()
   const tempDir = await makeTempDir();
   const dataDir = path.join(tempDir, "data");
   const secretValues = await seedSecrets(dataDir);
-  const runtime = await startTestRuntime(dataDir);
   try {
-    const apiResponse = await fetch(`${runtime.adminUrl}/api/feedback/setup`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Pagecast-Capability": runtime.commandCapability
-      },
-      body: "{}"
-    });
-    assert.equal(apiResponse.status, 200);
-    assertSecretFreeDto(await apiResponse.json(), secretValues);
-  } finally {
-    await runtime.close();
-  }
+    const runtime = await startTestRuntime(dataDir);
+    try {
+      const apiResponse = await fetch(`${runtime.adminUrl}/api/feedback/setup`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Pagecast-Capability": runtime.commandCapability
+        },
+        body: "{}"
+      });
+      assert.equal(apiResponse.status, 200);
+      assertSecretFreeDto(await apiResponse.json(), secretValues);
+    } finally {
+      await runtime.close();
+    }
 
-  try {
     const feedbackResult = await setupCloudflareFeedback({
       dataDir,
       cloudflareAuthSpawnImpl: fakeWranglerSpawn,

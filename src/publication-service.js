@@ -757,7 +757,6 @@ export function createPublicationService(options = {}, dependencies = {}) {
   ) {
     const normalized = normalizeProjectRef(pagesConfig);
     const targetConfig = { ...pagesConfig, ...normalized };
-    lastPagesConfig = targetConfig;
     await assertTargetOwnership(targetConfig);
     const { operationRoot, desiredRoot } = await materializeDesiredSite(targetConfig, {
       candidateSnapshots,
@@ -776,6 +775,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
       const commit = async () => {
         try {
           await commitTargetGeneration(generationRoot, targetConfig);
+          lastPagesConfig = targetConfig;
         } finally {
           await fs.rm(operationRoot, { recursive: true, force: true }).catch(() => {});
         }

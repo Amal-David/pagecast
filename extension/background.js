@@ -1,6 +1,6 @@
 "use strict";
 
-importScripts("expiry.js", "discovery.js");
+importScripts("expiry.js", "discovery.js", "errors.js");
 
 // Right-click "Publish to Pagecast" on a local file:// page. Mirrors the popup's
 // publish flow, but surfaces the result via a notification (and opens the link).
@@ -56,7 +56,7 @@ async function publish(fileUrl) {
       signal: controller.signal
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.url) {
+    if (!res.ok || !data?.url) {
       const message = data && data.error && data.error.message;
       if (res.status === 401) return notify("Connect Cloudflare", "Open Pagecast to sign in, then try again.");
       if (res.status === 409) return notify("Choose an account", "Open Pagecast and pick a Cloudflare account.");
@@ -71,8 +71,8 @@ async function publish(fileUrl) {
         ? `Your existing link now shows the latest version. ${expiryNote}`
         : `${data.url}\n${expiryNote}`
     );
-  } catch {
-    notify("Publish failed", "The connection dropped. Check the Pagecast terminal, then try again.");
+  } catch (error) {
+    notify("Publish failed", PagecastExtensionErrors.publishFailureMessage(error));
   } finally {
     clearTimeout(timer);
   }
@@ -84,11 +84,11 @@ async function getCsrfToken(base, signal) {
     signal
   });
   if (!response.ok) {
-    throw new Error(`Could not establish an admin session (${response.status})`);
+    throw PagecastExtensionErrors.adminSessionError(response.status);
   }
-  const session = await response.json();
+  const session = await response.json().catch(() => null);
   if (!session || typeof session.csrfToken !== "string" || !session.csrfToken) {
-    throw new Error("Admin session did not include a CSRF token");
+    throw PagecastExtensionErrors.adminSessionError();
   }
   return session.csrfToken;
 }

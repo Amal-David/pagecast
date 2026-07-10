@@ -90,11 +90,71 @@ test("popup and background share discovery without probing a fallback port range
   ]);
 
   assert.match(popupHtml, /discovery\.js[\s\S]*expiry\.js[\s\S]*popup\.js/);
-  assert.match(background, /importScripts\("expiry\.js", "discovery\.js"\)/);
+  assert.match(
+    background,
+    /importScripts\([^)]*"expiry\.js"[^)]*"discovery\.js"[^)]*"errors\.js"[^)]*\)/
+  );
   assert.match(popup, /PagecastDiscovery\.discover/);
   assert.match(background, /PagecastDiscovery\.discover/);
   assert.match(popup, /cf\.requiresAdoption/);
   assert.match(background, /cloudflare\?\.requiresAdoption/);
   assert.match(`${popup}\n${background}`, /explicitly adopt|click Adopt/);
   assert.doesNotMatch(discovery, /for\s*\([^)]*(?:4173|port)/i);
+});
+
+test("background publish handles a valid JSON null response as an ordinary publish failure", async () => {
+  const notifications = [];
+  const openedTabs = [];
+  let clickedListener;
+  const chrome = {
+    runtime: { onInstalled: { addListener() {} } },
+    contextMenus: {
+      create() {},
+      onClicked: {
+        addListener(listener) {
+          clickedListener = listener;
+        }
+      }
+    },
+    notifications: {
+      create(notification) {
+        notifications.push(notification);
+      }
+    },
+    tabs: {
+      create(tab) {
+        openedTabs.push(tab);
+      }
+    }
+  };
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/api/session")) {
+      return { ok: true, async json() { return { csrfToken: "test-csrf" }; } };
+    }
+    assert.ok(url.endsWith("/api/publish-local"));
+    return { ok: true, status: 200, async json() { return null; } };
+  };
+  const context = {
+    AbortController,
+    PagecastDiscovery: {
+      async discover() {
+        return { base: "http://pagecast.localhost:4173", data: {} };
+      }
+    },
+    PagecastExpiry: { format: () => "Expires: never." },
+    chrome,
+    clearTimeout,
+    fetch: fetchImpl,
+    importScripts() {},
+    setTimeout
+  };
+  vm.runInNewContext(await source("extension/background.js"), context, {
+    filename: "extension/background.js"
+  });
+
+  await clickedListener({ menuItemId: "pagecast-publish", pageUrl: "file:///tmp/report.html" }, {});
+
+  assert.equal(openedTabs.length, 0, "a missing response URL must never be opened");
+  assert.equal(notifications.at(-1).title, "Couldn't publish");
+  assert.equal(notifications.at(-1).message, "Check the Pagecast terminal.");
 });

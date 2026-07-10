@@ -19,6 +19,11 @@ function showHint(html) {
   hintEl.hidden = false;
 }
 
+function showTextHint(text) {
+  hintEl.textContent = text;
+  hintEl.hidden = false;
+}
+
 function setStatus(text) {
   statusEl.textContent = text;
   statusEl.hidden = false;
@@ -126,7 +131,7 @@ async function publish(fileUrl) {
       signal: controller.signal
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.url) {
+    if (!res.ok || !data?.url) {
       handleError(res.status, data);
       return;
     }
@@ -143,7 +148,7 @@ async function publish(fileUrl) {
     openBtn.onclick = () => chrome.tabs.create({ url: data.url });
   } catch (err) {
     setStatus("Publish failed.");
-    showHint("The publish timed out or the connection dropped. Check the Pagecast terminal, then try again.");
+    showTextHint(PagecastExtensionErrors.publishFailureMessage(err));
     publishBtn.disabled = false;
     publishBtn.textContent = original;
   } finally {
@@ -157,11 +162,11 @@ async function getCsrfToken(base, signal) {
     signal
   });
   if (!response.ok) {
-    throw new Error(`Could not establish an admin session (${response.status})`);
+    throw PagecastExtensionErrors.adminSessionError(response.status);
   }
-  const session = await response.json();
+  const session = await response.json().catch(() => null);
   if (!session || typeof session.csrfToken !== "string" || !session.csrfToken) {
-    throw new Error("Admin session did not include a CSRF token");
+    throw PagecastExtensionErrors.adminSessionError();
   }
   return session.csrfToken;
 }
@@ -181,11 +186,11 @@ function handleError(statusCode, data) {
     showHint("Is the file still on disk at this path?");
   } else {
     setStatus("Couldn't publish.");
-    showHint(msg ? String(msg) : "Check the Pagecast terminal for details.");
+    showTextHint(msg ? String(msg) : "Check the Pagecast terminal for details.");
   }
 }
 
 main().catch((err) => {
   setStatus("Something went wrong.");
-  showHint(String(err && err.message ? err.message : err));
+  showTextHint(PagecastExtensionErrors.publishFailureMessage(err));
 });

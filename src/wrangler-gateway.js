@@ -596,7 +596,18 @@ export async function runSpawnCommand({
     child.stdout?.on("data", recordOutput);
     child.stderr?.on("data", recordOutput);
     child.on("error", () => fail(appError(`${command} could not start.`, 502)));
-    child.on("exit", (code, signal) => finish({ code, signal, output }));
+    const hasReadableStreams = [child.stdout, child.stderr].some(
+      (stream) => typeof stream?.read === "function"
+    );
+    child.on("exit", (code, signal) => {
+      // Lightweight injected test adapters may expose EventEmitters instead of
+      // real streams. Production children resolve on `close` below so buffered
+      // stdout/stderr cannot arrive after the result has already settled.
+      if (!hasReadableStreams) {
+        finish({ code, signal, output });
+      }
+    });
+    child.on("close", (code, signal) => finish({ code, signal, output }));
   });
 }
 

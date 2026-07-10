@@ -81,6 +81,37 @@ test("gateway command runner terminates a timed-out Wrangler child", async () =>
   }
 });
 
+test("gateway command runner waits for close before returning buffered output", async () => {
+  const spawnImpl = () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.kill = () => true;
+    setImmediate(() => {
+      child.stdout.write("before exit\n");
+      child.exitCode = 0;
+      child.emit("exit", 0, null);
+      child.stdout.write("after exit\n");
+      child.stdout.end();
+      child.stderr.end();
+      child.emit("close", 0, null);
+    });
+    return child;
+  };
+
+  const result = await gateway.runSpawnCommand({
+    spawnImpl,
+    command: "npx",
+    args: ["wrangler", "whoami"],
+    timeoutMs: 1000
+  });
+
+  assert.equal(result.code, 0);
+  assert.equal(result.output, "before exit\nafter exit\n");
+});
+
 test("gateway normalizers reject unsafe command-line identifiers before spawn", async () => {
   let spawnCount = 0;
   const manager = gateway.createCloudflareAuthManager({

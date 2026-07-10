@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,6 +20,16 @@ async function makeTempDir() {
 
 function permissions(mode) {
   return mode & 0o777;
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
 }
 
 test("atomicWriteJson replaces valid JSON atomically and restricts directory/file permissions", async () => {
@@ -163,6 +174,262 @@ test("stale lease recovery occurs only after its recorded PID is confirmed dead"
 
   await recovered.release();
   assert.equal(await readRuntimeDescriptor(dataDir), null);
+});
+
+test("one recovery leader cannot delete a replacement created by a poised contender", { timeout: 5000 }, async () => {
+  const dataDir = await makeTempDir();
+  const stalePid = 42101;
+  const crashed = new WorkspaceLease(dataDir, {
+    pid: stalePid,
+    isPidAlive: async () => true
+  });
+  await crashed.acquire({ capability: "crashed-capability" });
+
+  const contenderReady = deferred();
+  const staleLeaseUnlinked = deferred();
+  const contenderAcquired = deferred();
+  let contenderPaused = false;
+  const contender = new WorkspaceLease(dataDir, {
+    pid: 42104,
+    isPidAlive: async () => true,
+    async onTransition(stage) {
+      if (stage === "before-lease-create" && !contenderPaused) {
+        contenderPaused = true;
+        contenderReady.resolve();
+        await staleLeaseUnlinked.promise;
+      }
+    }
+  });
+  const contenderAttempt = contender.acquire({ capability: "poised-contender" }).then(
+    (descriptor) => {
+      contenderAcquired.resolve(descriptor);
+      return descriptor;
+    },
+    (error) => {
+      contenderAcquired.reject(error);
+      throw error;
+    }
+  );
+  await contenderReady.promise;
+
+  let staleUnlinks = 0;
+  const recoveryOptions = (pid) => ({
+    pid,
+    isPidAlive: async (candidatePid) => candidatePid !== stalePid,
+    async onTransition(stage) {
+      if (stage === "stale-lease-unlinked") {
+        staleUnlinks += 1;
+        staleLeaseUnlinked.resolve();
+        await contenderAcquired.promise;
+      }
+    }
+  });
+  const first = new WorkspaceLease(dataDir, recoveryOptions(42102));
+  const second = new WorkspaceLease(dataDir, recoveryOptions(42103));
+  const recoveryOutcomes = Promise.allSettled([
+    first.acquire({ capability: "first-recoverer" }),
+    second.acquire({ capability: "second-recoverer" })
+  ]);
+
+  const descriptor = await contenderAttempt;
+  const outcomes = await recoveryOutcomes;
+  assert.equal(staleUnlinks, 1, "one generation elects exactly one destructive recovery leader");
+  assert.equal(descriptor.pid, contender.pid);
+  assert.equal(descriptor.capability, "poised-contender");
+  assert.equal(outcomes.filter((entry) => entry.status === "rejected").length, 2);
+  for (const outcome of outcomes) {
+    assert.equal(outcome.reason.code, "PAGECAST_WORKSPACE_BUSY");
+  }
+
+  const savedLease = JSON.parse(
+    await fs.readFile(path.join(dataDir, WORKSPACE_LEASE_FILENAME), "utf8")
+  );
+  assert.equal(savedLease.pid, descriptor.pid);
+  assert.equal(savedLease.leaseId, descriptor.leaseId);
+  assert.deepEqual(await readRuntimeDescriptor(dataDir), descriptor);
+  assert.deepEqual(
+    (await fs.readdir(dataDir)).filter((name) => name.includes(".recovery.")),
+    []
+  );
+
+  await contender.release();
+});
+
+test("a dead recovery leader has exactly one append-only takeover", async () => {
+  const dataDir = await makeTempDir();
+  const crashed = new WorkspaceLease(dataDir, {
+    pid: 42201,
+    isPidAlive: async () => true
+  });
+  await crashed.acquire({ capability: "crashed-capability" });
+  const leasePath = path.join(dataDir, WORKSPACE_LEASE_FILENAME);
+  const staleLease = JSON.parse(await fs.readFile(leasePath, "utf8"));
+  const generation = createHash("sha256").update(staleLease.leaseId).digest("hex");
+  const orphanPath = `${leasePath}.recovery.${generation}.root`;
+  await fs.writeFile(
+    orphanPath,
+    `${JSON.stringify(
+      {
+        version: 1,
+        leaseId: staleLease.leaseId,
+        predecessorId: null,
+        pid: 42202,
+        abandoned: false,
+        recoveryId: "a".repeat(32)
+      },
+      null,
+      2
+    )}\n`,
+    { mode: 0o600 }
+  );
+
+  const recovered = new WorkspaceLease(dataDir, {
+    pid: 42203,
+    isPidAlive: async (pid) => pid === 42203
+  });
+  const descriptor = await recovered.acquire({ capability: "orphan-recovered" });
+
+  assert.equal(descriptor.pid, 42203);
+  assert.equal((await readRuntimeDescriptor(dataDir)).capability, "orphan-recovered");
+  assert.deepEqual(
+    (await fs.readdir(dataDir)).filter((name) => name.includes(".recovery.")),
+    []
+  );
+  await recovered.release();
+});
+
+test("a failed recovery keeps its claim immutable until one child takes over", { timeout: 5000 }, async () => {
+  const dataDir = await makeTempDir();
+  const stalePid = 42301;
+  const failedRecoveryPid = 42302;
+  const delayedRecoveryPid = 42303;
+  const takeoverPid = 42304;
+  const crashed = new WorkspaceLease(dataDir, {
+    pid: stalePid,
+    isPidAlive: async () => true
+  });
+  await crashed.acquire({ capability: "crashed-capability" });
+
+  const rootClaimPublished = deferred();
+  const delayedReadRoot = deferred();
+  const resumeDelayed = deferred();
+  const failedRecovery = new WorkspaceLease(dataDir, {
+    pid: failedRecoveryPid,
+    isPidAlive: async (pid) => pid === failedRecoveryPid,
+    async onTransition(stage) {
+      if (stage === "before-stale-lease-cleanup") {
+        rootClaimPublished.resolve();
+        await delayedReadRoot.promise;
+        throw new Error("simulated pre-unlink recovery failure");
+      }
+    }
+  });
+  const failedOutcome = Promise.allSettled([
+    failedRecovery.acquire({ capability: "failed-recovery" })
+  ]);
+  await rootClaimPublished.promise;
+
+  const delayedRecovery = new WorkspaceLease(dataDir, {
+    pid: delayedRecoveryPid,
+    isPidAlive: async (pid) => {
+      if (pid === stalePid) {
+        return false;
+      }
+      if (pid === failedRecoveryPid) {
+        delayedReadRoot.resolve();
+        await resumeDelayed.promise;
+        return false;
+      }
+      return true;
+    }
+  });
+  const delayedOutcome = Promise.allSettled([
+    delayedRecovery.acquire({ capability: "delayed-recovery" })
+  ]);
+  await delayedReadRoot.promise;
+  const [failed] = await failedOutcome;
+  assert.equal(failed.status, "rejected");
+  assert.match(failed.reason.message, /simulated pre-unlink recovery failure/);
+  assert.equal(
+    (await fs.readdir(dataDir)).filter((name) => name.includes(".recovery.")).length,
+    2,
+    "a failed root claim survives and publishes one immutable abandonment marker"
+  );
+
+  const takeoverReady = deferred();
+  const resumeTakeover = deferred();
+  const takeover = new WorkspaceLease(dataDir, {
+    pid: takeoverPid,
+    isPidAlive: async (pid) => ![stalePid, failedRecoveryPid].includes(pid),
+    async onTransition(stage) {
+      if (stage === "before-stale-lease-cleanup") {
+        takeoverReady.resolve();
+        await resumeTakeover.promise;
+      }
+    }
+  });
+  const takeoverAttempt = takeover.acquire({ capability: "takeover-recovery" });
+  await takeoverReady.promise;
+  assert.equal(
+    (await fs.readdir(dataDir)).filter((name) => name.includes(".recovery.")).length,
+    3,
+    "the takeover appends after the marker instead of reopening either earlier slot"
+  );
+
+  resumeDelayed.resolve();
+  const [delayed] = await delayedOutcome;
+  assert.equal(delayed.status, "rejected");
+  assert.equal(delayed.reason.code, "PAGECAST_WORKSPACE_BUSY");
+  resumeTakeover.resolve();
+
+  const descriptor = await takeoverAttempt;
+  assert.equal(descriptor.pid, takeoverPid);
+  assert.deepEqual(await readRuntimeDescriptor(dataDir), descriptor);
+  assert.deepEqual(
+    (await fs.readdir(dataDir)).filter((name) => name.includes(".recovery.")),
+    []
+  );
+  await takeover.release();
+});
+
+test("a post-link claim failure hands off so the same process can retry", async () => {
+  const dataDir = await makeTempDir();
+  const stalePid = 42401;
+  const recoveryPid = 42402;
+  const crashed = new WorkspaceLease(dataDir, {
+    pid: stalePid,
+    isPidAlive: async () => true
+  });
+  await crashed.acquire({ capability: "crashed-capability" });
+
+  const failedRecovery = new WorkspaceLease(dataDir, {
+    pid: recoveryPid,
+    isPidAlive: async (pid) => pid === recoveryPid,
+    async onTransition(stage) {
+      if (stage === "recovery-claim-linked") {
+        throw Object.freeze(new Error("simulated post-link claim failure"));
+      }
+    }
+  });
+  await assert.rejects(
+    () => failedRecovery.acquire({ capability: "failed-recovery" }),
+    /simulated post-link claim failure/
+  );
+
+  const retry = new WorkspaceLease(dataDir, {
+    pid: recoveryPid,
+    isPidAlive: async (pid) => pid === recoveryPid
+  });
+  const descriptor = await retry.acquire({ capability: "same-process-retry" });
+
+  assert.equal(descriptor.pid, recoveryPid);
+  assert.equal(descriptor.capability, "same-process-retry");
+  assert.deepEqual(await readRuntimeDescriptor(dataDir), descriptor);
+  assert.deepEqual(
+    (await fs.readdir(dataDir)).filter((name) => name.includes(".recovery.")),
+    []
+  );
+  await retry.release();
 });
 
 test("the lease can atomically publish its actual bound URL after acquisition", async () => {

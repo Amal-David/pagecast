@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -9,6 +9,9 @@ const JSON_FILE_MODE = 0o600;
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const RUNTIME_VERSION = 1;
 const MAX_ACQUIRE_ATTEMPTS = 20;
+const MAX_RECOVERY_CLAIM_DEPTH = 100;
+const RECOVERY_CLAIM_VERSION = 1;
+const EXCLUSIVE_JSON_LINKED = Symbol("pagecast.exclusiveJsonLinked");
 // POSIX can replace one destination from concurrent rename calls, while
 // Windows may return EPERM. Pagecast already has one cross-process writer; this
 // queue gives concurrent in-process callers the same deterministic contract.
@@ -106,6 +109,15 @@ function temporaryPathFor(file) {
     path.dirname(file),
     `.${path.basename(file)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`
   );
+}
+
+function recoveryGenerationFor(leaseId) {
+  return createHash("sha256").update(leaseId).digest("hex");
+}
+
+function recoveryClaimPathFor(file, leaseId, predecessorId = null) {
+  const predecessor = predecessorId || "root";
+  return `${file}.recovery.${recoveryGenerationFor(leaseId)}.${predecessor}`;
 }
 
 export async function atomicWriteJson(
@@ -220,6 +232,38 @@ function normalizeLeaseRecord(value) {
   return { version: RUNTIME_VERSION, pid: value.pid, leaseId: value.leaseId };
 }
 
+function normalizeRecoveryClaim(value, { leaseId, predecessorId }) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw stateError(
+      "Workspace lease recovery claim is corrupt.",
+      "PAGECAST_LEASE_RECOVERY_CORRUPT"
+    );
+  }
+  const expectedPredecessorId = predecessorId || null;
+  if (
+    value.version !== RECOVERY_CLAIM_VERSION ||
+    value.leaseId !== leaseId ||
+    value.predecessorId !== expectedPredecessorId ||
+    !validPid(value.pid) ||
+    typeof value.abandoned !== "boolean" ||
+    typeof value.recoveryId !== "string" ||
+    !/^[a-f0-9]{32}$/.test(value.recoveryId)
+  ) {
+    throw stateError(
+      "Workspace lease recovery claim is corrupt.",
+      "PAGECAST_LEASE_RECOVERY_CORRUPT"
+    );
+  }
+  return {
+    version: RECOVERY_CLAIM_VERSION,
+    leaseId,
+    predecessorId: expectedPredecessorId,
+    pid: value.pid,
+    abandoned: value.abandoned,
+    recoveryId: value.recoveryId
+  };
+}
+
 function normalizeRuntimeDescriptor(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw stateError("Runtime descriptor is corrupt.", "PAGECAST_RUNTIME_CORRUPT");
@@ -293,7 +337,11 @@ export function isProcessAlive(pid) {
   }
 }
 
-async function createExclusiveJson(file, value, mode = JSON_FILE_MODE) {
+async function createExclusiveJson(
+  file,
+  value,
+  { mode = JSON_FILE_MODE, rollbackLinked = true, afterLink = null } = {}
+) {
   const temporary = temporaryPathFor(file);
   let handle;
   let linked = false;
@@ -306,14 +354,24 @@ async function createExclusiveJson(file, value, mode = JSON_FILE_MODE) {
     handle = null;
     await fs.link(temporary, file);
     linked = true;
+    await afterLink?.();
     await fs.rm(temporary, { force: true });
     await fs.chmod(file, mode);
     await syncDirectory(path.dirname(file));
   } catch (error) {
     await handle?.close().catch(() => {});
     await fs.rm(temporary, { force: true }).catch(() => {});
-    if (linked) {
+    if (linked && rollbackLinked) {
       await fs.rm(file, { force: true }).catch(() => {});
+    }
+    if (linked && !rollbackLinked) {
+      const linkedError = stateError(
+        error?.message || String(error || "Workspace recovery claim publication failed."),
+        "PAGECAST_LEASE_RECOVERY_CLAIM_PUBLISHED",
+        { cause: error }
+      );
+      linkedError[EXCLUSIVE_JSON_LINKED] = true;
+      throw linkedError;
     }
     throw error;
   }
@@ -322,7 +380,7 @@ async function createExclusiveJson(file, value, mode = JSON_FILE_MODE) {
 export class WorkspaceLease {
   constructor(
     dataDir,
-    { pid = process.pid, isPidAlive = isProcessAlive } = {}
+    { pid = process.pid, isPidAlive = isProcessAlive, onTransition = null } = {}
   ) {
     this.dataDir = normalizeDataDir(dataDir);
     if (!validPid(pid)) {
@@ -331,8 +389,12 @@ export class WorkspaceLease {
     if (typeof isPidAlive !== "function") {
       throw new TypeError("isPidAlive must be a function.");
     }
+    if (onTransition !== null && typeof onTransition !== "function") {
+      throw new TypeError("onTransition must be a function when provided.");
+    }
     this.pid = pid;
     this.isPidAlive = isPidAlive;
+    this.onTransition = onTransition;
     this.leasePath = workspaceLeasePath(this.dataDir);
     this.runtimePath = runtimeDescriptorPath(this.dataDir);
     this.leaseId = null;
@@ -350,6 +412,132 @@ export class WorkspaceLease {
     return { lease: normalizeLeaseRecord(parsed.value), raw: parsed.raw };
   }
 
+  async #claimStaleRecovery(lease) {
+    const recoveryId = randomBytes(16).toString("hex");
+    const traversedPaths = [];
+    let predecessorId = null;
+
+    for (let depth = 0; depth < MAX_RECOVERY_CLAIM_DEPTH; depth += 1) {
+      const claimPath = recoveryClaimPathFor(this.leasePath, lease.leaseId, predecessorId);
+      const claim = {
+        version: RECOVERY_CLAIM_VERSION,
+        leaseId: lease.leaseId,
+        predecessorId,
+        pid: this.pid,
+        abandoned: false,
+        recoveryId
+      };
+      try {
+        // A published recovery claim is immutable until its stale lease
+        // generation is gone. A later error must be taken over through the
+        // claim's fixed child slot rather than reopening this slot.
+        await createExclusiveJson(claimPath, claim, {
+          rollbackLinked: false,
+          afterLink: () =>
+            this.onTransition?.("recovery-claim-linked", {
+              leaseId: lease.leaseId,
+              pid: this.pid,
+              recoveryId
+            })
+        });
+        return { claimPath, recoveryId, traversedPaths: [...traversedPaths, claimPath] };
+      } catch (error) {
+        if (error?.[EXCLUSIVE_JSON_LINKED]) {
+          return {
+            claimPath,
+            publicationError: error,
+            recoveryId,
+            traversedPaths: [...traversedPaths, claimPath]
+          };
+        }
+        if (error?.code !== "EEXIST") {
+          throw error;
+        }
+      }
+
+      const parsed = await parseJsonFile(claimPath, {
+        corruptCode: "PAGECAST_LEASE_RECOVERY_CORRUPT",
+        corruptLabel: "Workspace lease recovery claim"
+      });
+      if (parsed.raw === null) {
+        continue;
+      }
+      const existing = normalizeRecoveryClaim(parsed.value, {
+        leaseId: lease.leaseId,
+        predecessorId
+      });
+      traversedPaths.push(claimPath);
+
+      // A failed owner hands off by publishing one immutable child marker.
+      // Follow an existing child before consulting the parent's PID so a
+      // same-process retry can move past its own abandoned live parent.
+      const childPath = recoveryClaimPathFor(
+        this.leasePath,
+        lease.leaseId,
+        existing.recoveryId
+      );
+      const child = await parseJsonFile(childPath, {
+        corruptCode: "PAGECAST_LEASE_RECOVERY_CORRUPT",
+        corruptLabel: "Workspace lease recovery claim"
+      });
+      if (child.raw !== null) {
+        normalizeRecoveryClaim(child.value, {
+          leaseId: lease.leaseId,
+          predecessorId: existing.recoveryId
+        });
+        predecessorId = existing.recoveryId;
+        continue;
+      }
+
+      if (!existing.abandoned && (await this.isPidAlive(existing.pid))) {
+        throw stateError(
+          `Pagecast workspace recovery is already in progress by process ${existing.pid}.`,
+          "PAGECAST_WORKSPACE_BUSY"
+        );
+      }
+      // Never delete or replace a dead recovery claim. Its immutable recovery
+      // ID names one fixed child slot, where exactly one takeover can win.
+      predecessorId = existing.recoveryId;
+    }
+
+    throw stateError(
+      "Pagecast could not take over stale workspace lease recovery.",
+      "PAGECAST_LEASE_RECOVERY_CONTENDED"
+    );
+  }
+
+  async #abandonRecoveryClaim(lease, recovery) {
+    const recoveryId = randomBytes(16).toString("hex");
+    const markerPath = recoveryClaimPathFor(
+      this.leasePath,
+      lease.leaseId,
+      recovery.recoveryId
+    );
+    const marker = {
+      version: RECOVERY_CLAIM_VERSION,
+      leaseId: lease.leaseId,
+      predecessorId: recovery.recoveryId,
+      pid: this.pid,
+      abandoned: true,
+      recoveryId
+    };
+    try {
+      await createExclusiveJson(markerPath, marker, { rollbackLinked: false });
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        throw error;
+      }
+      const existing = await parseJsonFile(markerPath, {
+        corruptCode: "PAGECAST_LEASE_RECOVERY_CORRUPT",
+        corruptLabel: "Workspace lease recovery claim"
+      });
+      normalizeRecoveryClaim(existing.value, {
+        leaseId: lease.leaseId,
+        predecessorId: recovery.recoveryId
+      });
+    }
+  }
+
   async #removeStaleLease(lease, originalRaw) {
     if (await this.isPidAlive(lease.pid)) {
       throw stateError(
@@ -358,23 +546,79 @@ export class WorkspaceLease {
       );
     }
 
-    const current = await this.#readLease();
-    if (!current.lease || current.raw !== originalRaw) {
-      return false;
-    }
-
-    // The dead owner's lock remains in place while its descriptor is removed,
-    // so another acquirer cannot publish a new descriptor that we then delete.
-    await fs.rm(this.runtimePath, { force: true });
+    const recovery = await this.#claimStaleRecovery(lease);
+    let removed = false;
+    let operationError = null;
     try {
-      await fs.unlink(this.leasePath);
+      if (recovery.publicationError) {
+        throw recovery.publicationError;
+      }
+      const current = await this.#readLease();
+      if (
+        !current.lease ||
+        current.raw !== originalRaw ||
+        current.lease.leaseId !== lease.leaseId ||
+        current.lease.pid !== lease.pid
+      ) {
+        return false;
+      }
+      if (await this.isPidAlive(lease.pid)) {
+        throw stateError(
+          `Pagecast workspace is already in use by process ${lease.pid}.`,
+          "PAGECAST_WORKSPACE_BUSY"
+        );
+      }
+
+      // Only the live tail of this generation's immutable recovery chain may
+      // perform shared cleanup. Everything shared is removed before the
+      // canonical lease, so no later action can touch a replacement generation.
+      await this.onTransition?.("before-stale-lease-cleanup", {
+        leaseId: lease.leaseId,
+        pid: lease.pid
+      });
+      await fs.rm(this.runtimePath, { force: true });
+      try {
+        await fs.unlink(this.leasePath);
+        removed = true;
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          throw error;
+        }
+      }
+      if (removed) {
+        await this.onTransition?.("stale-lease-unlinked", {
+          leaseId: lease.leaseId,
+          pid: lease.pid
+        });
+      }
+      await syncDirectory(this.dataDir);
+      return removed;
     } catch (error) {
-      if (error?.code !== "ENOENT") {
-        throw error;
+      operationError = error;
+      throw error;
+    } finally {
+      try {
+        if (removed) {
+          await Promise.all(
+            recovery.traversedPaths.map((claimPath) => fs.rm(claimPath, { force: true }))
+          );
+        } else {
+          // The owner has stopped all shared work. Publish a one-way handoff in
+          // its fixed child slot so this live process (or another contender)
+          // can retry without ever reopening the active claim.
+          await this.#abandonRecoveryClaim(lease, recovery);
+        }
+        await syncDirectory(this.dataDir);
+      } catch (cleanupError) {
+        if (operationError) {
+          throw new AggregateError(
+            [operationError, cleanupError],
+            "Workspace lease recovery failed and its handoff could not be persisted."
+          );
+        }
+        throw cleanupError;
       }
     }
-    await syncDirectory(this.dataDir);
-    return true;
   }
 
   async acquire({ adminUrl = "", capability, role = "operation" } = {}) {
@@ -390,6 +634,7 @@ export class WorkspaceLease {
       const leaseId = randomBytes(16).toString("hex");
       const lease = { version: RUNTIME_VERSION, pid: this.pid, leaseId };
       try {
+        await this.onTransition?.("before-lease-create", { leaseId, pid: this.pid });
         await createExclusiveJson(this.leasePath, lease);
       } catch (error) {
         if (error?.code !== "EEXIST") {
