@@ -28,6 +28,11 @@ backend (export static assets first).
 
 ## Quick Start
 
+> **Release status:** `main` contains the merged Pagecast 0.5.0 code and docs,
+> but npm, GitHub Releases, and `ghcr.io/amal-david/pagecast:latest` still provide
+> 0.4.0. To run 0.5.0 before it is published, clone `main` and run `npm start`, or
+> build the container locally.
+
 Requires Node.js 20.19+ and a Cloudflare account (for publishing). No global install:
 
 ```sh
@@ -42,13 +47,26 @@ This starts the local app and opens the admin UI:
   origin)
 - Local data/config — `.pagecast/` in the current directory
 
-### Upgrading from 0.4
+Pagecast state is workspace-scoped. Run the CLI, background service, and MCP
+server from the same directory to use the same reports and Cloudflare target.
 
-- Stop and restart any v0.4 background process once after upgrading. v0.5 uses
-  a workspace lease and authenticated local command protocol that an old process
-  does not understand.
-- Reload/update the bundled Chrome extension with Pagecast. The v0.5 extension
-  negotiates the new admin-session token before publishing.
+### Upgrading from 0.4 to 0.5
+
+- After 0.5.0 is published, stop any v0.4 foreground process with `Ctrl-C`. For
+  a transient background process, switch versions explicitly:
+
+  ```sh
+  npx pagecast@0.4.0 background stop
+  npx pagecast@0.5.0 background start
+  ```
+
+- If you installed the macOS login service, rerun
+  `npx pagecast@0.5.0 background service install`. The LaunchAgent captures the
+  exact Node and CLI paths, so restarting the old service does not upgrade it.
+- Replace the unpacked Chrome extension with the matching 0.5.0 release folder
+  (or the `extension/` folder from the same source checkout), then click
+  **Reload** in `chrome://extensions`. The 0.5 extension negotiates the new
+  admin-session token before publishing.
 - Existing URLs, passwords, expiries, redirects, Cloudflare selections, and
   `.pagecast/` data remain readable. Existing word-only URLs are preserved as
   issued; Pagecast does not silently rotate them.
@@ -57,8 +75,8 @@ This starts the local app and opens the admin UI:
   select its original project and click **Attach selected project** for that
   link.
 - On a genuinely fresh install, telemetry sends nothing until you run
-  `pagecast telemetry enable`. Existing saved choices and explicit environment
-  overrides keep their previous behavior.
+  `npx pagecast telemetry enable`. Existing saved choices and explicit
+  environment overrides keep their previous behavior.
 
 Want Pagecast waiting in the background instead of keeping a terminal tab open?
 
@@ -116,26 +134,33 @@ npx pagecast pages setup --project pagecast
 ## Publish From The Terminal
 
 ```sh
-# An HTML or Markdown file → a memorable /p/<slug>/ link (sibling assets included)
+# An HTML or Markdown file → a memorable /p/<slug>/ link (source folder included)
 npx pagecast publish "/absolute/path/report.html" --json
 
 # Set an expiry — 7d, 12h, or never (default 30d)
 npx pagecast publish "/absolute/path/report.html" --expires 7d --json
 
 # A built static project → publish its entry file
-npm run build && npx pagecast publish "$(pwd)/dist/index.html" --json
+npm run build && npx pagecast publish ./dist/index.html --json
 
 # A whole folder → replace a named Pages project directly (--branch defaults to main)
-npx pagecast pages deploy "$(pwd)/dist" --project pagecasthq --json
+npx pagecast pages deploy ./dist --project my-static-site --json
 ```
+
+The CLI's `pagecast publish` copies every non-hidden, non-symlink file under its
+source folder, even when the entry HTML does not reference it. Every copied file
+is reachable beneath the published URL, so publish from a clean folder and keep
+credentials and source secrets elsewhere. MCP `publish_file` isolates the entry
+file unless sibling assets are explicitly confirmed.
 
 New links are **unlisted** by default: a memorable label plus a 128-bit opaque
 capability (for example, `/p/hollow-paperclip-<32-hex-characters>/`). Anyone who
 has the URL can view it; unlisted does not mean private. The admin UI's
-**Publish as a drop** toggle instead mints a short, intentionally easy-to-share
-link. Renaming a link to a vanity slug without the 128-bit suffix is also an
-explicit conversion to a public drop. Password protection is the access-control
-option. Existing word-only links keep their original URL and continue to resolve.
+**Short public link** toggle instead mints an intentionally easy-to-share,
+guessable public drop. Renaming a link to a vanity slug without the 128-bit
+suffix is also an explicit conversion to a public drop. Password protection is
+the access-control option. Existing word-only links keep their original URL and
+continue to resolve.
 
 Pagecast records the actual production origin returned by Cloudflare rather
 than assuming `<project>.pages.dev`, so a global hostname collision does not
@@ -146,10 +171,14 @@ build settings.
 `pages deploy` is a separate whole-site operation. It replaces the contents of
 the named Cloudflare Pages project and does not change the project selected for
 managed `/p/...` publications. Use a separate project unless replacing the
-managed publication site is intentional.
+managed publication site is intentional. Managed publication workflows record
+incomplete Cloudflare/local reconciliation in the operation journal and surface
+it for safe retry or manual action; direct `pages deploy` is stateless, so
+inspect deployment history before retrying an ambiguous timeout.
 
-Common errors: `statusCode 401` → run `pages setup` or connect Cloudflare;
-`statusCode 409` → pass `--account <id>`.
+Common errors: `statusCode 401` means Cloudflare setup or authentication is
+required. `statusCode 409` means a conflict; follow the returned message. For
+the explicit multiple-account conflict, rerun setup with `--account <id>`.
 
 ## Password Protection
 
@@ -374,6 +403,8 @@ unzip it, and load that folder. See [extension/README.md](extension/README.md).
   vanity slugs are public drops), or revoke one/all versions.
 - Auto-sync path-backed reports; password-protect pages; edit HTML in-app without
   touching the original source file.
+- Review interrupted managed operations, retry safe recovery steps, and see
+  when a conflict requires manual action.
 - View deploy history and remove old whole-site snapshots (the live deploy is
   protected), with a one-click "keep newest N" cleanup.
 
@@ -392,8 +423,10 @@ unzip it, and load that folder. See [extension/README.md](extension/README.md).
 - Production access is through active `/p/<slug>/` links; revoked links 404 after
   the replacement deploy finishes. Direct URLs for older immutable Cloudflare
   deployments retain their original snapshot until pruned.
-- Public routes reject directory traversal and hidden files. Sibling assets in a
-  report's folder can become public if referenced — keep secrets out of it.
+- Public routes reject directory traversal and hidden files. CLI path publishing
+  makes every regular non-hidden, non-symlink file under the report's source
+  folder reachable, even if the entry HTML does not reference it — keep secrets
+  out of that folder.
 - The Pages root publishes no report listing.
 
 ## Telemetry
@@ -406,8 +439,8 @@ IDs. See [PRIVACY.md](PRIVACY.md) for the exact fields.
 Fresh installs are consent-pending and send nothing. Enable it explicitly:
 
 ```sh
-pagecast telemetry enable       # inspect with: pagecast telemetry status
-pagecast telemetry disable
+npx pagecast telemetry enable       # inspect with: npx pagecast telemetry status
+npx pagecast telemetry disable
 # Explicit env overrides are also supported (DO_NOT_TRACK always wins).
 export PAGECAST_TELEMETRY=1
 export PAGECAST_TELEMETRY=0
@@ -425,7 +458,9 @@ npm run check && npm test  # verification suite
 npm run build              # rebuild the React admin UI (web/) into public/
 ```
 
-Work on the UI with Vite (`pnpm -C web run dev`, proxied to the server on 4173).
+UI development and builds require pnpm 10. Install the web dependencies with
+`pnpm -C web install --frozen-lockfile --ignore-scripts`, then run Vite with
+`pnpm -C web run dev` (proxied to the server on 4173).
 The root CLI/server has no runtime npm dependencies. Layout: `src/` (CLI, server,
 publisher), `public/` (built UI), `web/` (React source), `plugin/` +
 `.codex/skills/` (agent skills), `test/` (Node tests).
@@ -455,10 +490,10 @@ Issues and pull requests are welcome.
 
 5. Open a PR describing what changed and why.
 
-After this workflow lands, a repository administrator still needs to configure
-GitHub branch protection/rulesets for `main` to require the four Node matrix
-checks and **Build, package, and container proof**. Workflow files can add the
-checks, but a code-only PR cannot make them required.
+The merged workflow defines four Node matrix checks plus **Build, package, and
+container proof**. A repository administrator still needs to configure branch
+protection or a ruleset for `main` to make those checks required; workflow files
+cannot enforce that repository setting.
 
 See the [Development](#development) section for the project layout. Please
 **don't** file public issues for security problems — report them privately
