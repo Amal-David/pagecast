@@ -17,19 +17,97 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: Expected package version (for example 0.5.0 or v0.5.0)
+        required: true
+        type: string
 
 permissions:
-  contents: write # needed to upload the Chrome extension zip to the release
-  id-token: write # required for npm --provenance
-  packages: write # required for GHCR Docker image publish
+  contents: read
 
 jobs:
-  npm:
-    name: Publish npm package
+  verify:
+    name: Verify release source
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up pnpm
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        with:
+          version: 10
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
+      - name: Validate requested release version
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ github.event_name == 'release' && github.ref_name || inputs.version }}
+        run: test "${EXPECTED_VERSION#v}" = "$(node -p 'require("./package.json").version')"
+      - name: Validate component version alignment
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const json = (file) => JSON.parse(readFileSync(file, "utf8"));
+          const skillVersion = (file) => {
+            const match = readFileSync(file, "utf8").match(/^version:\s*(\S+)$/m);
+            return match?.[1] || "";
+          };
+          const expected = json("package.json").version;
+          const versions = {
+            extension: json("extension/manifest.json").version,
+            plugin: json("plugin/.claude-plugin/plugin.json").version,
+            codexSkill: skillVersion(".codex/skills/publish-report/SKILL.md"),
+            pluginSkill: skillVersion("plugin/skills/publish-report/SKILL.md")
+          };
+          for (const [component, version] of Object.entries(versions)) {
+            if (version !== expected) {
+              throw new Error(`${component} version ${version || "<missing>"} != ${expected}`);
+            }
+          }
+          NODE
+      - name: Verify source, build, and tests
+        run: |
+          npm run build
+          npm run check
+          pnpm -C web exec tsc --noEmit
+          npm test
+          git diff --exit-code -- public
+      - name: Pack, install, and smoke-test the shipped package
+        shell: bash
+        run: |
+          pack_json="$RUNNER_TEMP/pagecast-pack.json"
+          npm pack --ignore-scripts --json > "$pack_json"
+          package_file="$(node -e 'const fs=require("fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8"))[0].filename)' "$pack_json")"
+          smoke_dir="$(mktemp -d)"
+          npm install --prefix "$smoke_dir" --ignore-scripts --no-audit --no-fund "./$package_file"
+          (cd "$smoke_dir" && node --input-type=module -e 'import("pagecast").then((api) => { if (typeof api.startServers !== "function") process.exit(1) })')
+          "$smoke_dir/node_modules/.bin/pagecast" --help | grep -q "pagecast publish"
+          rm -rf "$smoke_dir" "$package_file"
+      - name: Prove the release container and offline Wrangler runtime
+        shell: bash
+        run: |
+          docker build --check .
+          docker build -t pagecast:release-verify .
+          docker run --rm --network none --entrypoint node pagecast:release-verify --input-type=module -e 'import { spawnSync } from "node:child_process"; import { createWranglerInvocation } from "file:///app/src/platform.js"; const invocation = createWranglerInvocation(["--version"], { env: process.env }); if (invocation.command !== "wrangler") throw new Error(`Expected baked Wrangler, got ${invocation.command}`); const result = spawnSync(invocation.command, invocation.args, { stdio: "inherit" }); process.exit(result.status ?? 1);'
+
+  npm:
+    name: Publish npm package
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Set up pnpm # used by `npm run build` to build the web UI
         uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
@@ -39,7 +117,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
 
       # `npm publish` runs the package's prepack/prepublishOnly hooks, which build
@@ -52,11 +130,17 @@ jobs:
 
   docker:
     name: Publish Docker image
+    needs: verify
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Prepare image metadata
         id: image
@@ -98,19 +182,28 @@ jobs:
 
   chrome-extension:
     name: Attach Chrome extension zip
+    needs: verify
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Package extension
+        id: extension
         shell: bash
         run: |
+          version="$(node -p 'require("./extension/manifest.json").version')"
+          asset="pagecast-extension-v${version}.zip"
           cd extension
-          zip -r "../pagecast-extension-${GITHUB_REF_NAME}.zip" . -x "store/*" ".*"
+          zip -r "../${asset}" . -x "store/*" ".*"
+          echo "asset=${asset}" >> "$GITHUB_OUTPUT"
 
       - name: Upload release asset
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${GITHUB_REF_NAME}" "pagecast-extension-${GITHUB_REF_NAME}.zip" --clobber
+        run: gh release upload "${GITHUB_REF_NAME}" "${{ steps.extension.outputs.asset }}" --clobber

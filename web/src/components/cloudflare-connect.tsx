@@ -78,14 +78,19 @@ export function CloudflareConnect({
   const projectName = cloudflare?.projectName ?? "";
   const tokenAuth = cloudflare?.authMode === "api-token";
   const selectedAccountId = cloudflare?.accountId || "";
+  const requiresAdoption = cloudflare?.requiresAdoption === true;
   const canChooseAccount = loggedIn && accounts.length > 1;
-  const connected = loggedIn && Boolean(accountName) && Boolean(projectName);
+  const configured = loggedIn && Boolean(accountName) && Boolean(projectName);
+  const connected = configured && !requiresAdoption;
   const { selectedProjectValue, displayedProjects } = getCloudflareProjectSelection(
     projects,
     projectName,
     selectedAccountId
   );
-  const chosenProjectRecord = projects.find((project) => projectOptionValue(project) === chosenProject);
+  const effectiveChosenProject = chosenProject || selectedProjectValue;
+  const chosenProjectRecord = projects.find(
+    (project) => projectOptionValue(project) === effectiveChosenProject
+  );
   const canChooseProject = loggedIn && projects.length > 0;
 
   return (
@@ -100,7 +105,9 @@ export function CloudflareConnect({
             Sign in once, then publish pages from this workspace.
           </CardDescription>
         </div>
-        {connected ? (
+        {requiresAdoption ? (
+          <Badge variant="outline">Adoption required</Badge>
+        ) : connected ? (
           <Badge variant="secondary" className="gap-1">
             <Check className="h-3 w-3" />
             Connected
@@ -112,7 +119,7 @@ export function CloudflareConnect({
         )}
       </CardHeader>
       <CardContent className="space-y-4">
-        {connected ? (
+        {configured ? (
           <div className="space-y-3">
             <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
               <dt className="text-muted-foreground">Account</dt>
@@ -128,6 +135,13 @@ export function CloudflareConnect({
                 </>
               ) : null}
             </dl>
+
+            {requiresAdoption ? (
+              <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+                This existing project is selected but not managed by this workspace.
+                Confirm <strong>Adopt</strong> below before Pagecast changes its published files.
+              </div>
+            ) : null}
 
             <div className="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-3">
               <div>
@@ -202,7 +216,7 @@ export function CloudflareConnect({
                     variant="outline"
                     disabled={
                       !chosenProjectRecord ||
-                      chosenProject === selectedProjectValue ||
+                      (effectiveChosenProject === selectedProjectValue && !requiresAdoption) ||
                       selectProject.isPending ||
                       syncCloudflare.isPending
                     }
@@ -216,7 +230,9 @@ export function CloudflareConnect({
                     {selectProject.isPending || syncCloudflare.isPending ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : null}
-                    Switch
+                    {effectiveChosenProject === selectedProjectValue && requiresAdoption
+                      ? "Adopt"
+                      : "Switch"}
                   </Button>
                 </div>
                 <div className="space-y-2">
@@ -228,6 +244,7 @@ export function CloudflareConnect({
                     {displayedProjects.map((project) => {
                       const value = projectOptionValue(project);
                       const isCurrent = value === selectedProjectValue;
+                      const canAdopt = isCurrent && requiresAdoption;
                       return (
                         <div
                           key={value}
@@ -250,19 +267,23 @@ export function CloudflareConnect({
                           <Button
                             size="sm"
                             variant={isCurrent ? "secondary" : "outline"}
-                            disabled={isCurrent || selectProject.isPending || syncCloudflare.isPending}
+                            disabled={
+                              (isCurrent && !canAdopt) ||
+                              selectProject.isPending ||
+                              syncCloudflare.isPending
+                            }
                             onClick={() =>
                               selectProject.mutate(project, {
                                 onSuccess: () => syncCloudflare.mutate({})
                               })
                             }
                           >
-                            {isCurrent ? (
+                            {isCurrent && !canAdopt ? (
                               <Check className="h-4 w-4" />
                             ) : selectProject.isPending ? (
                               <Loader2 className="h-4 w-4 animate-spin" />
                             ) : null}
-                            {isCurrent ? "Current" : "Use"}
+                            {canAdopt ? "Adopt" : isCurrent ? "Current" : "Use"}
                           </Button>
                         </div>
                       );

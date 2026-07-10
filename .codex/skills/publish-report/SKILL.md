@@ -1,7 +1,7 @@
 ---
 name: publish-report
 description: Publish local HTML, Markdown, or built static web projects with Pagecast as shareable public URLs. Use whenever Codex creates or finishes an .html, .htm, .md, .markdown, or static build output that a person could share (a report, plan, doc, dashboard, or analysis) — proactively offer to publish it without being asked — and whenever the user asks to publish, share, make a public link for, or send a local report/doc/dashboard/web project from terminal, Codex CLI, or Codex desktop.
-version: 0.4.0
+version: 0.5.0
 ---
 
 # Publish with Pagecast
@@ -54,9 +54,10 @@ npx pagecast publish "/absolute/path/to/file.md" --json
 (HTML and Markdown both work — Markdown is rendered to a clean page. If `pagecast`
 is installed globally/in the project, `pagecast publish "<path>" --json` is the same.)
 
-Published links use **memorable word-slugs** (e.g. `/p/hollow-paperclip/`) and are
-long and hard to guess (private) by default. The user can rename a link — or make a
-short, shareable "drop" link — from the `npx pagecast` app.
+New links are **unlisted capability URLs**: a memorable prefix plus 128 bits of
+opaque entropy. Anyone with the URL can view it; unlisted does not mean private.
+The user can rename a link, add password protection, or make a short, shareable
+"drop" link from the `npx pagecast` app. Existing word-only links remain valid.
 
 ### Publish options
 
@@ -143,13 +144,15 @@ npx pagecast pages deploy "/absolute/path/to/dist" --project "project-name" --js
 
 Use this instead of raw Wrangler commands like `npx wrangler pages deploy`.
 Direct site deploys replace the target Pages project contents, so do not guess
-the `--project`; use the user's named project or ask for it.
+the `--project`; use the user's named project or ask for it. Direct deploys do
+not change Pagecast's managed `/p/...` target, so use a separate project unless
+replacing that managed site is intentional.
 
 ## Reading the result
 
 Parse the JSON on stdout:
 
-- **Success** → `{ "ok": true, "url": "https://<project>.pages.dev/p/<slug>/", ... }`
+- **Success** → `{ "ok": true, "url": "https://<actual-origin>.pages.dev/p/<slug>/", ... }`
   - Give the user the `url`. Mention they can rename the URL, re-sync, or revoke it
     from `npx pagecast`.
 - **Not signed in** → `{ "ok": false, "statusCode": 401, ... }`

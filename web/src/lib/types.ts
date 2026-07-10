@@ -2,6 +2,7 @@
 // fields: formatReport / formatPublication / /api/status are the source of truth.
 
 export type PublicationKind = "snapshot";
+export type PublicationLinkKind = "drop" | "unlisted" | "protected" | "legacy" | "unknown";
 
 export interface Publication {
   token: string;
@@ -9,8 +10,10 @@ export interface Publication {
   label: string;
   kind: PublicationKind;
   // True when published as a public "drop": a short, memorable, guessable slug.
-  // False (default) means a long, hard-to-guess private slug.
+  // Use linkKind for the complete state; false can also represent a legacy URL.
   drop: boolean;
+  linkKind: PublicationLinkKind;
+  targetAttributed: boolean;
   active: boolean;
   createdAt: string;
   updatedAt: string;
@@ -116,6 +119,8 @@ export interface CloudflareStatus {
   accountName: string;
   projectName: string;
   baseUrl: string;
+  managed: boolean;
+  requiresAdoption: boolean;
 }
 
 export interface PagesConfig {
@@ -128,9 +133,7 @@ export interface PagesConfig {
 
 export interface FeedbackConfig {
   url: string;
-  statsToken: string;
   workerName: string;
-  kvId: string;
 }
 
 export interface LocalConfig {
@@ -150,6 +153,7 @@ export interface AppConfig {
   // When true, the dashboard periodically imports missing Pagecast links from
   // Cloudflare Pages. Manual sync is still available when this is off.
   cloudflareSyncEnabled: boolean;
+  telemetryConsent: boolean | null;
 }
 
 export interface CloudflareProjectsResponse {
@@ -159,6 +163,8 @@ export interface CloudflareProjectsResponse {
     projects: CloudflareProject[];
     selectedProject: CloudflareProject | null;
     projectCount: number;
+    managed: boolean;
+    requiresAdoption: boolean;
   };
 }
 
@@ -187,14 +193,64 @@ export interface FeedbackSetupResponse {
 }
 
 export interface StatusResponse {
-  admin: { ok: boolean };
+  admin: { ok: boolean; product: "pagecast"; protocolVersion: 1 };
   public: { localBaseUrl: string | null };
+  operations: OperationJournalEntry[];
   cloudflare: CloudflareStatus;
   config: AppConfig;
 }
 
 export interface ReportsResponse {
   reports: Report[];
+}
+
+export interface ProjectRef {
+  accountId: string;
+  projectName: string;
+  baseUrl: string;
+}
+
+export type OperationType =
+  | "publish"
+  | "sync"
+  | "auto_sync"
+  | "content_sync"
+  | "password_sync"
+  | "password_compensate"
+  | "rename"
+  | "goal_sync"
+  | "revoke"
+  | (string & {});
+
+export interface OperationRecovery {
+  mode: "automatic" | "manual";
+  title: string;
+  summary: string;
+  action: string | null;
+  manualReason: string | null;
+}
+
+export interface OperationJournalEntry {
+  id: string;
+  type: OperationType;
+  token: string;
+  slug: string;
+  projectRef: ProjectRef | null;
+  status: "pending" | "failed";
+  error: string;
+  createdAt: string;
+  updatedAt: string;
+  attempts: number;
+  recovery: OperationRecovery;
+}
+
+export interface OperationsResponse {
+  operations: OperationJournalEntry[];
+}
+
+export interface OperationRetryResponse extends OperationsResponse {
+  recovered: true;
+  operationId: string;
 }
 
 export interface CloudflareSyncResponse {

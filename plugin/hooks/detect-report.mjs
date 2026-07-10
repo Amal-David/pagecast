@@ -7,7 +7,10 @@
 // actually worth offering. Any error exits 0 silently so it can't disrupt the
 // agent.
 
+import path from "node:path";
+
 import { recordOffered } from "./lib-offered.mjs";
+import { encodePathToken } from "./lib-path-token.mjs";
 
 // Obvious non-artifacts the agent should not be nudged to publish. The skill
 // applies the real judgment; this just keeps the common noise down.
@@ -98,13 +101,16 @@ async function main() {
     if (toolName === "ExitPlanMode") {
       const plan = event.tool_input?.plan;
       if (typeof plan === "string" && plan.trim().length > 200) {
+        const planToken = encodePathToken(
+          path.resolve(event.cwd || process.cwd(), "plan.md")
+        );
         emit(
           `A plan was just finalized in plan mode. If this plan is something the user might ` +
             `want to share (a proposal, design doc, or roadmap), proactively offer ONCE — ask ` +
             `"How do you want to publish this plan? 1. Claude Code Artifact — private/org claude.ai page. ` +
             `2. Pagecast — Cloudflare Pages link you can share outside Claude. 3. Don't publish." ` +
-            `If they choose Pagecast, write the plan markdown to a file (e.g. ./plan.md), run ` +
-            `\`npx pagecast publish "<abs path>.md" --json\`, then return the URL. If they choose ` +
+            `If they choose Pagecast, write the plan markdown to ./plan.md, run ` +
+            `\`npx pagecast publish --path-token ${planToken} --json\`, then return the URL. If they choose ` +
             `Claude Code Artifact, use the Artifact publishing flow. Skip the offer for small/internal ` +
             `planning. Never publish without an explicit choice; ask at most once.`
         );
@@ -117,9 +123,12 @@ async function main() {
     if (!filePath) {
       process.exit(0);
     }
+    const pathToken = encodePathToken(
+      path.resolve(event.cwd || process.cwd(), filePath)
+    );
 
     emit(
-      `A shareable HTML/Markdown file was just written at "${filePath}". ` +
+      `A shareable HTML/Markdown file was just written. ` +
         `Default action: when you finish this turn, proactively offer ONCE to publish it — ` +
         `ask the user exactly "How do you want to publish this? 1. Claude Code Artifact — private/org ` +
         `claude.ai page that can update in place. 2. Pagecast — Cloudflare Pages link you can share ` +
@@ -127,7 +136,7 @@ async function main() {
         `Offer unless the file is clearly internal/scratch (a draft note, a config/source file, or repo meta ` +
         `like README/CHANGELOG/TODO — those were already filtered, so lean toward offering). ` +
         `Do not stay silent just because you are unsure. ` +
-        `If they choose Pagecast, run \`npx pagecast publish "${filePath}" --json\` and return the URL. ` +
+        `If they choose Pagecast, run \`npx pagecast publish --path-token ${pathToken} --json\` and return the URL. ` +
         `If they choose Claude Code Artifact, use the Artifact publishing flow. Never publish without an ` +
         `explicit choice, and ask at most once for this file.`
     );

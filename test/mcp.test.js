@@ -17,6 +17,31 @@ function parseToolText(response) {
   return JSON.parse(response.result.content[0].text);
 }
 
+test("MCP page reads never initialize an unleased report-state writer", async () => {
+  const root = await makeTempDir();
+  const dataDir = path.join(root, "not-created-by-a-reader");
+  const server = createPagecastMcpServer({ dataDir });
+
+  const listed = await server.handleJsonRpc({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: { name: "list_pages", arguments: {} }
+  });
+  assert.deepEqual(parseToolText(listed), { reports: [] });
+
+  const read = await server.handleJsonRpc({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "resources/read",
+    params: { uri: "pagecast://pages" }
+  });
+  assert.deepEqual(JSON.parse(read.result.contents[0].text), { reports: [] });
+  await assert.rejects(fs.access(dataDir), (error) => error?.code === "ENOENT");
+
+  await fs.rm(root, { recursive: true, force: true });
+});
+
 test("MCP initialize and tools/list expose Pagecast capabilities", async () => {
   const server = createPagecastMcpServer({ version: "test-version" });
 
@@ -61,6 +86,7 @@ test("MCP publish_content writes content then reuses the publish helper", async 
         url: "https://pagecast.pages.dev/p/test/",
         token: "test-token",
         label: input.label,
+        linkKind: "unlisted",
         expiresAt: null
       };
     }
@@ -91,6 +117,7 @@ test("MCP publish_content writes content then reuses the publish helper", async 
 
   const payload = parseToolText(response);
   assert.equal(payload.url, "https://pagecast.pages.dev/p/test/");
+  assert.equal(payload.linkKind, "unlisted");
   assert.equal(payload.sourcePath, calls[0].path);
 });
 
@@ -265,7 +292,9 @@ test("MCP status and list_pages redact local metadata by default", async () => {
         accountId: "abcdef0123456789abcdef0123456789",
         accounts: [{ id: "abcdef0123456789abcdef0123456789", name: "Example Org" }],
         projectName: "pagecast",
-        baseUrl: "https://pagecast.pages.dev"
+        baseUrl: "https://pagecast.pages.dev",
+        managed: false,
+        requiresAdoption: true
       }
     }),
     createStore: () => ({
@@ -285,6 +314,7 @@ test("MCP status and list_pages redact local metadata by default", async () => {
               slug: "report",
               label: "Report",
               kind: "snapshot",
+              linkKind: "legacy",
               active: true,
               publicUrl: "https://pagecast.pages.dev/p/report/"
             }
@@ -306,6 +336,8 @@ test("MCP status and list_pages redact local metadata by default", async () => {
   assert.equal(status.accounts, undefined);
   assert.equal(status.accountName, undefined);
   assert.equal(status.projectName, "pagecast");
+  assert.equal(status.managed, false);
+  assert.equal(status.requiresAdoption, true);
 
   const pages = parseToolText(
     await server.handleJsonRpc({
@@ -318,6 +350,7 @@ test("MCP status and list_pages redact local metadata by default", async () => {
   assert.equal(pages.reports[0].sourcePath, undefined);
   assert.equal(pages.reports[0].buildCommand, undefined);
   assert.equal(pages.reports[0].publications[0].token, "token-1");
+  assert.equal(pages.reports[0].publications[0].linkKind, "legacy");
 });
 
 test("MCP resources/read returns Pagecast page state", async () => {

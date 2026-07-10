@@ -179,8 +179,8 @@ export const SURNAMES = clean([
   "armstrong", "gagarin", "ride", "jemison", "tereshkova", "aldrin"
 ]);
 
-// Short joining words used only to make long "unguessable" private names read
-// like a phrase ("hollow-paperclip-beneath-quiet-static") instead of a word pile.
+// Short joining words retained for the legacy long-name generator. They make a
+// word-only slug read naturally but do not provide an access-control boundary.
 export const CONNECTORS = clean([
   "of", "in", "by", "near", "beneath", "beyond", "amid", "under", "into",
   "through", "across", "beside", "atop", "within", "toward", "above", "below"
@@ -274,12 +274,9 @@ export function generateUniqueName(isTaken = () => false, { rng = cryptoRng, gen
   throw new Error("generateUniqueName: unable to find a unique name after retries");
 }
 
-// Generate a long, hard-to-guess private name with NO digits. Strings together
-// adjective-noun + connector + adjective-noun (+ sometimes one more noun) for
-// ~5-6 segments, e.g. "hollow-paperclip-beneath-quiet-static". That is roughly a
-// trillion-plus combinations (~40-49 bits) — enough that a public URL cannot be
-// casually stumbled onto. For true secrecy, layer password protection on top;
-// this only raises the cost of guessing.
+// Generate the historical long, word-only slug with no digits. This stays for
+// compatibility tests; new unlisted links use link-policy's explicit 128-bit
+// capability suffix because a memorable word sequence is not a privacy control.
 export function generateUnguessableName({ rng = cryptoRng } = {}) {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const parts = [

@@ -26,6 +26,7 @@ import {
   relativeTime
 } from "@/lib/format";
 import {
+  useAdoptPublicationTarget,
   useRenameSlug,
   useRevokePublication,
   useSetExpiry,
@@ -42,6 +43,7 @@ export function PublicationRow({ publication }: PublicationRowProps) {
   const sync = useSyncPublication();
   const revoke = useRevokePublication();
   const setExpiry = useSetExpiry();
+  const adoptTarget = useAdoptPublicationTarget();
 
   const [editing, setEditing] = useState(false);
   const [slugDraft, setSlugDraft] = useState(publication.slug);
@@ -146,6 +148,7 @@ export function PublicationRow({ publication }: PublicationRowProps) {
                 variant="ghost"
                 className="h-6 w-6 shrink-0"
                 onClick={() => setEditing(true)}
+                disabled={!publication.targetAttributed}
                 aria-label="Edit custom URL"
               >
                 <Pencil className="h-3 w-3" />
@@ -155,6 +158,24 @@ export function PublicationRow({ publication }: PublicationRowProps) {
         )}
         {!editing ? (
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            {!publication.targetAttributed ? (
+              <button
+                type="button"
+                className="font-medium text-amber-700 underline-offset-2 hover:underline"
+                disabled={adoptTarget.isPending}
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      "Attach this legacy link to the currently selected Cloudflare account and project?"
+                    )
+                  ) {
+                    adoptTarget.mutate(publication.token);
+                  }
+                }}
+              >
+                {adoptTarget.isPending ? "Attaching…" : "Attach selected project"}
+              </button>
+            ) : null}
             <span className="truncate">
               Last synced {relativeTime(publication.updatedAt)}
             </span>
@@ -163,7 +184,7 @@ export function PublicationRow({ publication }: PublicationRowProps) {
                 <span aria-hidden="true">·</span>
                 <Select
                   value=""
-                  disabled={setExpiry.isPending}
+                  disabled={setExpiry.isPending || !publication.targetAttributed}
                   onValueChange={(value) =>
                     setExpiry.mutate({ token: publication.token, expires: value })
                   }
@@ -214,7 +235,7 @@ export function PublicationRow({ publication }: PublicationRowProps) {
             variant="ghost"
             className="h-7 w-7"
             onClick={() => sync.mutate(publication.token)}
-            disabled={sync.isPending}
+            disabled={sync.isPending || !publication.targetAttributed}
             aria-label="Sync published link"
           >
             <RefreshCw
@@ -227,7 +248,7 @@ export function PublicationRow({ publication }: PublicationRowProps) {
           variant="ghost"
           className="h-7 w-7 text-muted-foreground hover:text-destructive"
           onClick={() => revoke.mutate(publication.token)}
-          disabled={revoke.isPending}
+          disabled={revoke.isPending || !publication.targetAttributed}
           aria-label="Take link offline"
         >
           {revoke.isPending ? (

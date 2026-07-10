@@ -50,6 +50,10 @@ async function setup() {
 
   const configStore = createConfigStore({ dataDir });
   await configStore.init();
+  await configStore.updatePages({
+    accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    adoptExisting: true
+  });
   const store = createReportStore({ dataDir });
   await store.init();
   const { spawnImpl } = fakeDeploySpawn();
@@ -61,12 +65,21 @@ async function setup() {
     getFeedback: () => configStore.get().feedback,
     getBadge: () => configStore.get().badge,
     getProtectedPublications: () => store.protectedPublicationManifest(),
-    getAuthCookieSecret: () => configStore.get().authCookieSecret
+    getAuthCookieSecret: () => configStore.get().authCookieSecret,
+    getOwnerId: () => configStore.getOwnerId(),
+    isTargetManaged: (projectRef) => configStore.isTargetManaged(projectRef),
+    claimTargetManaged: (projectRef) => configStore.claimManagedTarget(projectRef)
   });
 
   // Publish once (unprotected) so an active snapshot exists.
   const added = await store.addPath(path.join(reportDir, "index.html"));
   const draft = store.draftPublication(added.id, { kind: "snapshot" });
+  Object.assign(draft.publication, {
+    pagesProjectName: configStore.get().pages.projectName,
+    pagesAccountId: configStore.get().pages.accountId,
+    pagesBaseUrl: configStore.get().pages.baseUrl,
+    projectRef: configStore.get().pages
+  });
   draft.publication.publicUrl = await publisher.publish({
     report: draft.report,
     publication: draft.publication,
@@ -205,6 +218,13 @@ test("CLI publish --password protects the report and bakes the gate before servi
   await fs.mkdir(reportDir, { recursive: true });
   await fs.writeFile(path.join(reportDir, "report.html"), "<h1>Confidential</h1>");
 
+  const configStore = createConfigStore({ dataDir });
+  await configStore.init();
+  await configStore.updatePages({
+    accountId: "abcdef0123456789abcdef0123456789",
+    adoptExisting: true
+  });
+
   const { authSpawn, deploySpawn } = headlessFakes();
   const result = await publishReportSnapshot({
     path: path.join(reportDir, "report.html"),
@@ -217,7 +237,17 @@ test("CLI publish --password protects the report and bakes the gate before servi
   });
 
   assert.equal(result.passwordProtected, true);
-  const middleware = await fs.readFile(path.join(dataDir, "pages-site", "functions", "_middleware.js"), "utf8");
+  const middleware = await fs.readFile(
+    path.join(
+      dataDir,
+      "targets",
+      "abcdef0123456789abcdef0123456789--pagecast",
+      "last-deployed",
+      "functions",
+      "_middleware.js"
+    ),
+    "utf8"
+  );
   const slug = result.url.match(/\/p\/([^/]+)\//)[1];
   assert.ok(middleware.includes(slug), "gate covers the published slug");
 });

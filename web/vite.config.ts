@@ -1,8 +1,9 @@
 import path from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { createAdminProxyOptions } from "./vite-proxy.js";
 
-const PROXY_TARGET = "http://127.0.0.1:4173";
+const ADMIN_PROXY_TARGET = "http://127.0.0.1:4173";
 
 // The Node admin server serves the built bundle from `public/` via serveStatic
 // (no SPA fallback), so we build a single-route app straight into `../public`.
@@ -17,9 +18,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": { target: PROXY_TARGET, changeOrigin: true },
-      "/preview": { target: PROXY_TARGET, changeOrigin: true },
-      "/p": { target: PROXY_TARGET, changeOrigin: true }
+      "/api": createAdminProxyOptions(ADMIN_PROXY_TARGET)
     }
   },
   build: {

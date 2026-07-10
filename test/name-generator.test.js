@@ -104,7 +104,7 @@ test("generateUniqueName escalates with extra words when names keep colliding", 
   }
 });
 
-test("generateUnguessableName is a long, all-words, digit-free private name", () => {
+test("generateUnguessableName preserves the legacy long, all-words slug shape", () => {
   for (let i = 0; i < 3000; i += 1) {
     const name = generateUnguessableName();
     assert.match(name, DNS_LABEL, `"${name}" is not a valid DNS label`);

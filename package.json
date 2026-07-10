@@ -1,6 +1,6 @@
 {
   "name": "pagecast",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "description": "Preview local HTML reports and static mini apps, then publish them to shareable URLs.",
   "license": "MIT",
@@ -29,8 +29,17 @@
   "bin": {
     "pagecast": "src/cli.js"
   },
-  "exports": "./src/server.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./server": "./src/server.js",
+    "./package.json": "./package.json"
+  },
   "files": [
+    "ARCHITECTURE.md",
+    "CHANGELOG.md",
+    "PASSWORD-PROTECTION.md",
+    "PRIVACY.md",
+    "SECURITY.md",
     "src/",
     "public/",
     "plugin/",
@@ -41,12 +50,12 @@
   "scripts": {
     "start": "node src/cli.js",
     "build": "pnpm -C web install --frozen-lockfile --ignore-scripts && pnpm -C web run build",
-    "check": "node --check src/server.js && node --check src/cli.js && node --check src/mcp.js && node --check src/local-system.js && node --check src/markdown.js && node --check src/nameGenerator.js",
+    "check": "node --check src/index.js && node --check src/server.js && node --check src/publication-service.js && node --check src/cli.js && node --check src/mcp.js && node --check src/local-system.js && node --check src/markdown.js && node --check src/nameGenerator.js && node --check src/admin-security.js && node --check src/app-error.js && node --check src/wrangler-gateway.js && node --check src/path-token.js && node --check src/project-ref.js && node --check src/state-coordinator.js && node --check src/platform.js && node --check src/link-policy.js && node --check src/tunnel.js && node --check plugin/hooks/lib-path-token.mjs && node --check plugin/hooks/detect-report.mjs && node --check plugin/hooks/detect-artifacts-on-stop.mjs",
     "test": "node --test",
     "prepack": "npm run build && npm run check && npm test",
     "prepublishOnly": "npm run check && npm test"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19.0"
   }
 }

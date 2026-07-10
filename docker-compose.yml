@@ -13,13 +13,17 @@ services:
     # Persist config + published history across container restarts.
     volumes:
       - ./.pagecast:/app/.pagecast
-    # Map ONLY to the host loopback: the admin API is unauthenticated and can run
-    # shell commands, so it must never be published on a routable interface.
+    # Map ONLY to the host loopback: browser CSRF and private local capabilities
+    # protect admin mutations, but Pagecast is not a remote multi-user service
+    # and can run shell commands. Never publish it on a routable interface.
     ports:
       - "127.0.0.1:4173:4173"  # admin dashboard
       - "127.0.0.1:4174:4174"  # local published-page server
     environment:
       HOST: "0.0.0.0"
+      # Explicitly allow the container's wildcard bind. Keep the published
+      # admin port restricted to host loopback above.
+      PAGECAST_ALLOW_LOOPBACK_PROXY: "1"
       # Optional — enables Cloudflare publishing from the container (see .env).
       CLOUDFLARE_API_TOKEN: "${CLOUDFLARE_API_TOKEN:-}"
       CLOUDFLARE_ACCOUNT_ID: "${CLOUDFLARE_ACCOUNT_ID:-}"

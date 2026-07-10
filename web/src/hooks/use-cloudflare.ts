@@ -42,7 +42,10 @@ export function useCloudflareProject() {
     mutationFn: (project: CloudflareProject) => {
       const payload = {
         projectName: project.name,
-        baseUrl: project.baseUrl
+        baseUrl: project.baseUrl,
+        // Clicking a concrete project is the explicit adoption signal. Pagecast
+        // will not manage an unrelated existing project's /p tree otherwise.
+        adoptExisting: true
       };
       return api.configurePages({
         ...payload,

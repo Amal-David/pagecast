@@ -114,7 +114,9 @@ function summarizeStatus(status) {
     loggedIn: Boolean(cloudflare.loggedIn),
     tokenConfigured: Boolean(cloudflare.tokenConfigured),
     projectName: cloudflare.projectName || "",
-    baseUrl: cloudflare.baseUrl || ""
+    baseUrl: cloudflare.baseUrl || "",
+    managed: Boolean(cloudflare.managed),
+    requiresAdoption: Boolean(cloudflare.requiresAdoption)
   };
 }
 
@@ -124,6 +126,7 @@ function summarizePublication(publication) {
     slug: publication.slug,
     label: publication.label,
     kind: publication.kind,
+    linkKind: publication.linkKind,
     active: publication.active,
     publicUrl: publication.publicUrl,
     expiresAt: publication.expiresAt,
@@ -287,7 +290,10 @@ export function createPagecastMcpServer({
 } = {}) {
   async function listPages() {
     const store = createStore({ dataDir });
-    await store.init();
+    // MCP reads can run beside the dashboard process. They must not create
+    // directories, persist migrations, or otherwise become a second writer.
+    // A later leased writer will durably apply any in-memory normalization.
+    await store.init({ persist: false });
     return { reports: store.list({}) };
   }
 

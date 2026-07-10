@@ -1,8 +1,7 @@
 "use strict";
 
-const BASES = ["http://pagecast.localhost", "http://127.0.0.1:4173"];
 const PUBLISHABLE = /\.(html?|md|markdown)(?:[?#].*)?$/i;
-let activeBase = BASES[0];
+let activeBase = PagecastDiscovery.DEFAULT_BASES[0];
 
 const $ = (id) => document.getElementById(id);
 const statusEl = $("status");
@@ -17,6 +16,11 @@ const hintEl = $("hint");
 
 function showHint(html) {
   hintEl.innerHTML = html;
+  hintEl.hidden = false;
+}
+
+function showTextHint(text) {
+  hintEl.textContent = text;
   hintEl.hidden = false;
 }
 
@@ -40,22 +44,10 @@ async function getActiveTab() {
 }
 
 async function getStatus() {
-  for (const base of BASES) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2500);
-    try {
-      const res = await fetch(`${base}/api/status`, { signal: controller.signal });
-      if (res.ok) {
-        activeBase = base;
-        return { up: true, data: await res.json() };
-      }
-    } catch {
-      // Try the next local endpoint.
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  return { up: false };
+  const discovered = await PagecastDiscovery.discover(chrome, fetch, { timeoutMs: 2500 });
+  if (!discovered) return { up: false };
+  activeBase = discovered.base;
+  return { up: true, data: discovered.data };
 }
 
 async function main() {
@@ -100,8 +92,13 @@ async function main() {
     return;
   }
   const cf = status.data && status.data.cloudflare;
-  const connected = cf && cf.loggedIn && cf.projectName;
-  if (!connected) {
+  const configured = cf && cf.loggedIn && cf.projectName;
+  if (configured && cf.requiresAdoption) {
+    setStatus("Project adoption required.");
+    showHint('Open <a href="' + activeBase + '" target="_blank" rel="noopener">Pagecast</a> and click Adopt for the current project, then come back.');
+    return;
+  }
+  if (!configured) {
     setStatus("Cloudflare isn't connected yet.");
     showHint('Open <a href="' + activeBase + '" target="_blank" rel="noopener">Pagecast</a> and click Connect Cloudflare, then come back.');
     return;
@@ -122,14 +119,19 @@ async function publish(fileUrl) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 60000);
   try {
+    const csrfToken = await getCsrfToken(activeBase, controller.signal);
     const res = await fetch(`${activeBase}/api/publish-local`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Pagecast-Extension": "1",
+        "X-Pagecast-CSRF": csrfToken
+      },
       body: JSON.stringify({ path: fileUrl }),
       signal: controller.signal
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.url) {
+    if (!res.ok || !data?.url) {
       handleError(res.status, data);
       return;
     }
@@ -137,18 +139,36 @@ async function publish(fileUrl) {
     publishBtn.hidden = true;
     resultUrl.textContent = data.url;
     resultUrl.href = data.url;
-    resultNote.textContent = data.updated ? "Updated the existing link." : "New public link created.";
+    const expiryNote = PagecastExpiry.format(data.publication?.expiresAt);
+    resultNote.textContent = `${
+      data.updated ? "Updated the existing link." : "New public link created."
+    } ${expiryNote}`;
     resultEl.hidden = false;
     copyBtn.onclick = async () => { await navigator.clipboard.writeText(data.url); copyBtn.textContent = "Copied"; };
     openBtn.onclick = () => chrome.tabs.create({ url: data.url });
   } catch (err) {
     setStatus("Publish failed.");
-    showHint("The publish timed out or the connection dropped. Check the Pagecast terminal, then try again.");
+    showTextHint(PagecastExtensionErrors.publishFailureMessage(err));
     publishBtn.disabled = false;
     publishBtn.textContent = original;
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function getCsrfToken(base, signal) {
+  const response = await fetch(`${base}/api/session`, {
+    headers: { "X-Pagecast-Extension": "1" },
+    signal
+  });
+  if (!response.ok) {
+    throw PagecastExtensionErrors.adminSessionError(response.status);
+  }
+  const session = await response.json().catch(() => null);
+  if (!session || typeof session.csrfToken !== "string" || !session.csrfToken) {
+    throw PagecastExtensionErrors.adminSessionError();
+  }
+  return session.csrfToken;
 }
 
 function handleError(statusCode, data) {
@@ -166,11 +186,11 @@ function handleError(statusCode, data) {
     showHint("Is the file still on disk at this path?");
   } else {
     setStatus("Couldn't publish.");
-    showHint(msg ? String(msg) : "Check the Pagecast terminal for details.");
+    showTextHint(msg ? String(msg) : "Check the Pagecast terminal for details.");
   }
 }
 
 main().catch((err) => {
   setStatus("Something went wrong.");
-  showHint(String(err && err.message ? err.message : err));
+  showTextHint(PagecastExtensionErrors.publishFailureMessage(err));
 });

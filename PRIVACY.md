@@ -1,64 +1,85 @@
 # Privacy
 
-Pagecast is local-first. Your reports, config, and deploy history live in
-`.pagecast/` in your working directory, and publishing goes directly to **your
-own** Cloudflare account. Pagecast has no server of its own in that path.
+Pagecast is local-first. Reports, config, deploy history, and the local operation
+journal live under `.pagecast/` in the working directory. Publishing goes
+directly to **your own** Cloudflare account; Pagecast has no hosted backend in
+that path.
 
-The one thing Pagecast sends to the maintainer is anonymous usage telemetry,
-described below. It is optional and easy to turn off.
+Anonymous CLI usage telemetry is the only data Pagecast may send to a
+maintainer-operated endpoint. A genuinely fresh v0.5 install sends nothing
+until you explicitly consent.
 
 ## Anonymous usage telemetry
 
-To understand how Pagecast is actually used (and what to improve), the CLI sends a
-small, anonymous event when you run a command.
+### Consent and compatibility
 
-### What is collected
+- **Fresh install:** consent is pending and telemetry is disabled. Run
+  `pagecast telemetry enable` to opt in.
+- **Upgrade:** an existing saved enable/disable choice is preserved. A pre-v0.5
+  config with no telemetry field keeps the v0.4 enabled behavior rather than
+  silently changing an existing workspace's setting.
+- **Environment:** `DO_NOT_TRACK=1` always disables telemetry. An explicit
+  `PAGECAST_TELEMETRY=1` or `PAGECAST_TELEMETRY=0` overrides the saved choice;
+  CI is disabled unless explicitly enabled.
 
-| Field       | Example                              | Why |
-|-------------|--------------------------------------|-----|
-| `command`   | `publish`, `pages`, `serve`          | Which feature is used |
-| `subcommand`| `deploy`, `status` (allowlisted only)| Which sub-feature is used |
-| `outcome`   | `started`                            | Reserved for success/error signal |
-| `version`   | `0.3.0`                              | Which release is in the field |
-| `os`/`arch` | `darwin` / `arm64`                   | Which platforms to support |
-| `node`      | `v22.22.3`                           | Which Node versions to support |
-| `anonId`    | random 32-char hex                   | Coarse "distinct installs" counting |
+Check the effective state and its deciding reason at any time:
 
-`anonId` is a random opaque identifier generated once on your machine. It is not
-tied to your name, email, Cloudflare account, IP, or anything else.
+```sh
+pagecast telemetry status
+pagecast telemetry enable
+pagecast telemetry disable
+```
+
+### What is collected when enabled
+
+| Field | Example | Why |
+| --- | --- | --- |
+| `command` | `publish`, `pages`, `serve` | Which feature is used |
+| `subcommand` | `deploy`, `status` (allowlisted only) | Which sub-feature is used |
+| `outcome` | `started` | Reserved for success/error signal |
+| `version` | `0.5.0` | Which release is in the field |
+| `os`/`arch` | `darwin` / `arm64` | Which platforms to support |
+| `node` | `v22.22.3` | Which Node versions to support |
+| `anonId` | random 32-character hex | Coarse distinct-install counting |
+
+`anonId` is generated lazily only when telemetry is enabled and an event is
+about to be sent. It is random and is not tied to a name, email, Cloudflare
+account, or other user identity.
 
 ### What is never collected
 
-- File contents, file names, or file paths (e.g. a `publish <path>` argument)
-- Published URLs, tokens, slugs, or passwords
-- Cloudflare account IDs, account names, or API tokens
-- IP addresses or any personal information
+- File contents, file names, or file paths, including a `publish <path>` argument
+- Published URLs, origins, tokens, slugs, passwords, or expiry values
+- Cloudflare account IDs, account names, API/OAuth tokens, or project names
+- Local admin/CSRF/runtime capabilities, config secrets, or operation-journal data
+- IP addresses or other personal information stored by Pagecast
 
-The command classifier uses fixed allowlists, so positional arguments (like the
-path you publish) are never included in an event. The receiving Worker
-independently re-validates every field against the same allowlists.
+The command classifier uses fixed allowlists, so positional arguments never
+enter an event. The receiving Worker independently validates the same bounded
+schema.
 
 ### Where it goes
 
-Events are sent to the Pagecast site's own endpoint
-(`https://pagecasthq.pages.dev/api/v1/event`, a Cloudflare Pages Function operated
-by the maintainer) and stored in aggregate via Workers Analytics Engine. Nothing
-is shared with any third-party analytics provider.
+Events are sent to
+`https://pagecasthq.pages.dev/api/v1/event`, a Cloudflare Pages Function operated
+by the maintainer, and stored in aggregate through Workers Analytics Engine.
+Pagecast does not use a third-party analytics provider for these events.
 
-### How to opt out
+Network infrastructure may process connection metadata in the ordinary course
+of delivering an HTTPS request, but Pagecast does not put IP addresses into the
+event or store per-visitor records in its telemetry dataset.
 
-Telemetry is on by default. A one-time notice prints on first run. Turn it off at
-any time with any of these:
+## Other network activity
 
-```sh
-pagecast telemetry disable        # persisted in .pagecast/config.json
-pagecast telemetry status         # check the current state and why
-export PAGECAST_TELEMETRY=0       # environment override
-export DO_NOT_TRACK=1             # cross-tool standard, also honored
-```
-
-Telemetry is automatically disabled in CI environments, unless explicitly
-re-enabled with `PAGECAST_TELEMETRY=1`.
+- Report publishing, project discovery, and deployment management communicate
+  with Cloudflare through Wrangler or the Cloudflare API for the account you
+  selected.
+- Published report content lives on the actual Cloudflare production origin
+  returned by deployment, under your account and control.
+- The optional Chrome extension sends the selected local file path only to the
+  Pagecast server on your loopback interface. The extension has no telemetry and
+  does not send browsing data or file paths to the maintainer. See
+  [extension/store/PRIVACY.md](extension/store/PRIVACY.md).
 
 ## Questions
 
