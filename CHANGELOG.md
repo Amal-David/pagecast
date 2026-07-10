@@ -3,7 +3,7 @@
 All notable changes to Pagecast are documented here. This project follows
 [semantic versioning](https://semver.org/).
 
-## 0.5.0 — 2026-07-09
+## 0.5.0 — 2026-07-10
 
 ### Added
 
