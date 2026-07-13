@@ -29,10 +29,10 @@ backend (export static assets first).
 ## Quick Start
 
 Requires Node.js 20.19+ and a Cloudflare account for publishing. Run the exact
-Pagecast 0.5.0 release without a global install:
+Pagecast 0.6.0 release without a global install:
 
 ```sh
-npx pagecast@0.5.0
+npx pagecast@0.6.0
 ```
 
 The versioned command is reproducible. Unversioned `npx pagecast` follows npm's
@@ -53,30 +53,32 @@ One OS user profile owns one Pagecast Home and Cloudflare subdomain. Run the CLI
 from the relevant project so Pagecast can identify the workspace and source.
 Use `--data-dir` only for an intentionally isolated CI/container profile.
 
-### Upgrading from 0.4 to 0.5
+### Upgrading to 0.6
 
-- Stop any v0.4 foreground process with `Ctrl-C`. For a transient background
+- Stop any older foreground process with `Ctrl-C`. For a transient background
   process, switch versions explicitly:
 
   ```sh
-  npx pagecast@0.4.0 background stop
-  npx pagecast@0.5.0 background start
+  npx pagecast@0.5.0 background stop
+  npx pagecast@0.6.0 background start
   ```
 
 - If you installed the macOS login service, rerun
-  `npx pagecast@0.5.0 background service install`. The LaunchAgent captures the
+  `npx pagecast@0.6.0 background service install`. The LaunchAgent captures the
   exact Node and CLI paths, so restarting the old service does not upgrade it.
-- Replace the unpacked Chrome extension with the matching 0.5.0 release folder
+- Replace the unpacked Chrome extension with the matching 0.6.0 release folder
   (or the `extension/` folder from the same source checkout), then click
-  **Reload** in `chrome://extensions`. The 0.5.0 extension negotiates the new
-  admin-session token before publishing.
-- Existing URLs, passwords, expiries, redirects, Cloudflare selections, and
-  `.pagecast/` data remain readable. Existing word-only URLs are preserved as
-  issued; Pagecast does not silently rotate them.
-- A legacy publication whose Cloudflare account/project was never recorded is
-  readable but cannot be synced, renamed, re-expired, or revoked until you
-  select its original project and click **Attach selected project** for that
-  link.
+  **Reload** in `chrome://extensions`.
+- The first 0.6 launch creates `~/.pagecast/home/` and imports compatible
+  workspace publications without deleting `.pagecast/` state or changing
+  URLs. Publications on other Cloudflare projects remain legacy targets until
+  you explicitly attach or move them.
+- Connect Cloudflare from the main dashboard. Pagecast starts Wrangler's
+  browser authorization, explains the scopes, and resumes setup or publishing
+  after authorization succeeds.
+- Existing URLs, passwords, expiries, redirects, saved telemetry choices, and
+  workspace data remain readable. Enabling Activity analytics provisions the
+  required Cloudflare resources and redeploys active Home publications once.
 - On a genuinely fresh install, anonymous telemetry is enabled by
   default with a one-time disclosure. Disable it with
   `npx pagecast telemetry disable`, `PAGECAST_TELEMETRY=0`, or `DO_NOT_TRACK=1`.

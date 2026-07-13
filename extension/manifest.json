@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Pagecast — Local to Public",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvppHjQcznEeTBkKJU4f6zI+oWt3Z0YH7L+jFbLQ1EsbwKJd9pCyjded9XbC+cITveMupy5yeI424Zs7fKJCUgXMy2OKjRl8ZuNaLC8R3mPTPlgAAnFoZNvo/cSEvnvLi/A/yYPsRPJKT2fXCEIHNyTaXPzBmh30ij4MxVxb3ugNQFu/UKQ07LqAD0M0iDKqC5as9mDvQBi0vo1BgtSLHqJzfWcyWR5lNdLoRD4hUTPsd3I0lrXmrrRa6YYc/L/sYxiIJ1NdZMNnMRr5QUMSkmVZaaGZnVUQB7+ItdoU2duxDsqKo4ljf/yj/lPaCBnNbHp0zD4d/c3OeGG+OZEtUswIDAQAB",
   "description": "Turn a local HTML or Markdown file open in your browser into a public link, via your running Pagecast server.",
   "action": {

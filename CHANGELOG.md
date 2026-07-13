@@ -5,6 +5,8 @@ All notable changes to Pagecast are documented here. This project follows
 
 ## Unreleased
 
+## 0.6.0 — 2026-07-14
+
 ### Added
 
 - **Pagecast Home** — one user-level Cloudflare subdomain and managed state store
@@ -26,7 +28,7 @@ All notable changes to Pagecast are documented here. This project follows
   packaged skills execute them immediately; proactive suggestions still ask.
 - Interactive unauthenticated publishes start Wrangler login and resume the
   original operation. Non-interactive runs fail structurally.
-- **Anonymous CLI telemetry default** — fresh interactive installs now enable
+- **Anonymous CLI telemetry default** — fresh installs now enable
   the existing allowlisted telemetry by default and show a disclosure. Users can
   opt out with `pagecast telemetry disable`, `PAGECAST_TELEMETRY=0`, or
   `DO_NOT_TRACK=1`; CI remains disabled unless explicitly enabled.

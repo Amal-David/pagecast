@@ -31,7 +31,7 @@ This zips the extension WITHOUT the `store/` assets and dotfiles. Upload
 `pagecast-extension-v<VERSION>.zip` in the dashboard ("Package" → "Upload new
 package"). Tagged GitHub releases read the same manifest version and use the
 same `pagecast-extension-v<VERSION>.zip` convention, for example
-`pagecast-extension-v0.5.0.zip`.
+`pagecast-extension-v0.6.0.zip`.
 
 ## 3. Privacy practices answers (Web Store form)
 
@@ -62,7 +62,7 @@ same `pagecast-extension-v<VERSION>.zip` convention, for example
 ## 5. Before you submit
 
 - Confirm `extension/manifest.json` matches the npm package and plugin release
-  version. For v0.5 all package-facing metadata is `0.5.0`.
+  version. For v0.6 all package-facing metadata is `0.6.0`.
 - Replace the placeholder developer/brand details as needed.
 - One-time: a Chrome Web Store **developer account** ($5 registration).
 - Test the packaged zip via Load unpacked once more (`chrome://extensions`).
