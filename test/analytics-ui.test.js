@@ -22,3 +22,25 @@ test("page and Home Activity surfaces expose the privacy-safe access contract", 
   assert.match(activity, /Password protected/);
   assert.match(activity, /audit visibility, not visitor identity or prevention/);
 });
+
+test("Settings navigation opens real sections and makes analytics discoverable", () => {
+  const app = source("web/src/App.tsx");
+  const navigation = /const settingsSections[\s\S]*?function settingsSectionId/.exec(app)?.[0] || "";
+  const sidebar = /function SettingsSidebar[\s\S]*?function PageSidebar/.exec(app)?.[0] || "";
+  const settings = /function SettingsView[\s\S]*$/.exec(app)?.[0] || "";
+
+  for (const label of ["Publishing", "Deploy history", "Link defaults", "Analytics"]) {
+    assert.match(navigation, new RegExp(`label: "${label}"`));
+  }
+  assert.match(sidebar, /type="button"/);
+  assert.match(sidebar, /onClick=\{\(\) => onSelect\(id\)\}/);
+  assert.match(sidebar, /aria-current=/);
+
+  for (const section of ["publishing", "deploy-history", "link-defaults", "analytics"]) {
+    assert.match(
+      settings,
+      new RegExp(`id=\\{settingsSectionId\\("${section}"\\)\\}`)
+    );
+  }
+  assert.match(settings, /<ActivityPanel[\s\S]*global/);
+});

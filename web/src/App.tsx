@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import {
   Activity,
   AlertCircle,
+  BarChart3,
   Check,
   CheckCircle2,
   Cloud,
@@ -92,6 +93,7 @@ import { copyToClipboard, relativeTime } from "@/lib/format";
 import type { CloudflareProject, CloudflareStatus, FeedbackConfig, Report } from "@/lib/types";
 
 type ActiveView = "pages" | "activity" | "settings";
+type SettingsSection = "publishing" | "deploy-history" | "link-defaults" | "analytics";
 
 interface ActivityItem extends ActivityEventDetail {
   id: string;
@@ -116,6 +118,21 @@ const buildStatusLabels: Record<string, string> = {
   ready: "Ready",
   failed: "Build failed"
 };
+
+const settingsSections: Array<{
+  id: SettingsSection;
+  label: string;
+  icon: typeof Cloud;
+}> = [
+  { id: "publishing", label: "Publishing", icon: Cloud },
+  { id: "deploy-history", label: "Deploy history", icon: RefreshCw },
+  { id: "link-defaults", label: "Link defaults", icon: Link2 },
+  { id: "analytics", label: "Analytics", icon: BarChart3 }
+];
+
+function settingsSectionId(section: SettingsSection) {
+  return `settings-${section}`;
+}
 
 function formatElapsed(ms: number) {
   return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
@@ -221,6 +238,8 @@ export function App() {
 
   const reportItems = useMemo(() => reports.data ?? [], [reports.data]);
   const [activeView, setActiveView] = useState<ActiveView>("pages");
+  const [activeSettingsSection, setActiveSettingsSection] =
+    useState<SettingsSection>("publishing");
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
   const [previewReport, setPreviewReport] = useState<Report | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -342,7 +361,18 @@ export function App() {
     });
   };
 
-  const goToSettings = () => setActiveView("settings");
+  const openSettingsSection = (section: SettingsSection) => {
+    setActiveView("settings");
+    setActiveSettingsSection(section);
+    window.requestAnimationFrame(() => {
+      document.getElementById(settingsSectionId(section))?.scrollIntoView({
+        behavior: "smooth",
+        block: "start"
+      });
+    });
+  };
+
+  const goToSettings = () => openSettingsSection("publishing");
 
   const confirmDelete = () => {
     if (!pendingDelete) return;
@@ -369,7 +399,9 @@ export function App() {
   );
   const cloudflareReady = !status.isLoading && status.data !== undefined;
   const feedback = status.data?.config?.feedback ?? null;
-  const feedbackEnabled = Boolean(feedback?.url);
+  const feedbackEnabled = Boolean(
+    feedback?.url && feedback.analyticsEnabled !== false
+  );
   const cloudflareSyncEnabled = status.data?.config?.cloudflareSyncEnabled !== false;
   const showOnboarding =
     activeView === "pages" && !connected && reportItems.length === 0 && !reports.isLoading;
@@ -444,7 +476,10 @@ export function App() {
             <>
           <AppRail activeView={activeView} onPages={() => setActiveView("pages")} onActivity={() => setActiveView("activity")} onSettings={goToSettings} />
               {activeView === "settings" ? (
-                <SettingsSidebar />
+                <SettingsSidebar
+                  activeSection={activeSettingsSection}
+                  onSelect={openSettingsSection}
+                />
               ) : (
                 <PageSidebar
               reports={reportItems}
@@ -472,12 +507,14 @@ export function App() {
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.18 }}
-                  className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8"
+                  className="h-full overflow-hidden"
                 >
                   <SettingsView
+                    reports={reportItems}
                     cloudflare={cloudflare}
                     connected={connected}
                     feedback={feedback}
+                    analyticsEnabled={feedbackEnabled}
                     defaultExpiry={status.data?.config?.defaultExpiry}
                     cloudflareSyncEnabled={cloudflareSyncEnabled}
                     cloudflareSyncPending={setCloudflareSyncEnabled.isPending}
@@ -787,7 +824,13 @@ function AppRail({
   );
 }
 
-function SettingsSidebar() {
+function SettingsSidebar({
+  activeSection,
+  onSelect
+}: {
+  activeSection: SettingsSection;
+  onSelect: (section: SettingsSection) => void;
+}) {
   return (
     <aside className="hidden min-h-0 border-r bg-background lg:block">
       <div className="border-b p-4">
@@ -797,22 +840,20 @@ function SettingsSidebar() {
         </div>
       </div>
       <nav className="space-y-1 p-2" aria-label="Settings sections">
-        {[
-          ["Publishing", Cloud],
-          ["Deploy history", RefreshCw],
-          ["Link defaults", Link2],
-          ["Feedback", Activity]
-        ].map(([label, Icon]) => (
-          <div
-            key={label as string}
+        {settingsSections.map(({ id, label, icon: Icon }) => (
+          <button
+            type="button"
+            key={id}
+            onClick={() => onSelect(id)}
+            aria-current={activeSection === id ? "page" : undefined}
             className={cn(
-              "flex items-center gap-2 rounded-md px-3 py-2 text-sm",
-              label === "Publishing" ? "bg-accent font-medium" : "text-muted-foreground"
+              "flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              activeSection === id ? "bg-accent font-medium" : "text-muted-foreground"
             )}
           >
             <Icon className="h-4 w-4" />
-            <span>{label as string}</span>
-          </div>
+            <span>{label}</span>
+          </button>
         ))}
       </nav>
     </aside>
@@ -1974,40 +2015,81 @@ function activityColor(status: ActivityStatus) {
 }
 
 function SettingsView({
+  reports,
   cloudflare,
   connected,
   feedback,
+  analyticsEnabled,
   defaultExpiry,
   cloudflareSyncEnabled,
   cloudflareSyncPending,
   onToggleCloudflareSync
 }: {
+  reports: Report[];
   cloudflare: CloudflareStatus | undefined;
   connected: boolean;
   feedback: FeedbackConfig | null;
+  analyticsEnabled: boolean;
   defaultExpiry: string | undefined;
   cloudflareSyncEnabled: boolean;
   cloudflareSyncPending: boolean;
   onToggleCloudflareSync: (enabled: boolean) => void;
 }) {
   return (
-    <div className="min-h-full overflow-y-auto bg-background">
+    <div className="h-full overflow-y-auto scroll-smooth bg-background">
       <section className="mx-auto max-w-4xl space-y-5 px-5 py-6">
         <div>
           <h2 className="text-xl font-semibold tracking-tight">Settings</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Publishing account, project, link expiry, and audience feedback.
+            Publishing account, project, link expiry, private analytics, and optional audience reactions.
           </p>
         </div>
-        <CloudflareConnect
-          cloudflare={cloudflare}
-          autoSyncEnabled={cloudflareSyncEnabled}
-          autoSyncPending={cloudflareSyncPending}
-          onToggleAutoSync={onToggleCloudflareSync}
-        />
-        <DeployHistory connected={connected} />
-        <DefaultExpiryCard defaultExpiry={defaultExpiry} />
-        <FeedbackCard connected={connected} feedback={feedback} />
+        <section
+          id={settingsSectionId("publishing")}
+          aria-label="Publishing"
+          className="scroll-mt-5"
+        >
+          <CloudflareConnect
+            cloudflare={cloudflare}
+            autoSyncEnabled={cloudflareSyncEnabled}
+            autoSyncPending={cloudflareSyncPending}
+            onToggleAutoSync={onToggleCloudflareSync}
+          />
+        </section>
+        <section
+          id={settingsSectionId("deploy-history")}
+          aria-label="Deploy history"
+          className="scroll-mt-5"
+        >
+          <DeployHistory connected={connected} />
+        </section>
+        <section
+          id={settingsSectionId("link-defaults")}
+          aria-label="Link defaults"
+          className="scroll-mt-5"
+        >
+          <DefaultExpiryCard defaultExpiry={defaultExpiry} />
+        </section>
+        <section
+          id={settingsSectionId("analytics")}
+          aria-labelledby="settings-analytics-title"
+          className="scroll-mt-5 space-y-4"
+        >
+          <div>
+            <h3 id="settings-analytics-title" className="text-base font-semibold">
+              Analytics
+            </h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Enable private tracking, review access activity, and optionally collect audience reactions.
+            </p>
+          </div>
+          <FeedbackCard connected={connected} feedback={feedback} />
+          <ActivityPanel
+            publications={reports.flatMap((report) => report.publications)}
+            enabled={analyticsEnabled}
+            global
+          />
+        </section>
       </section>
     </div>
   );
