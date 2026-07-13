@@ -38,7 +38,7 @@ pagecast telemetry disable
 | `command` | `publish`, `pages`, `serve` | Which feature is used |
 | `subcommand` | `deploy`, `status` (allowlisted only) | Which sub-feature is used |
 | `outcome` | `started` | Reserved for success/error signal |
-| `version` | `0.5.0` | Which release is in the field |
+| `version` | `0.6.0` | Which release is in the field |
 | `os`/`arch` | `darwin` / `arm64` | Which platforms to support |
 | `node` | `v22.22.3` | Which Node versions to support |
 | `anonId` | random 32-character hex | Coarse distinct-install counting |
