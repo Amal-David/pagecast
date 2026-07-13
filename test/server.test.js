@@ -1557,7 +1557,6 @@ test("Headless publishReportSnapshot auto-provisions and returns a public URL", 
   const result = await publishReportSnapshot({
     path: reportPath,
     dataDir,
-    env: { ...process.env, CI: "" },
     cloudflareAuthSpawnImpl: authSpawn,
     pagesDeploySpawnImpl: fakeDeploy,
     cloudflareListTimeoutMs: 1000,
@@ -2208,6 +2207,9 @@ test("Headless interactive publish logs in and resumes the original publish", as
   const result = await publishReportSnapshot({
     path: reportPath,
     dataDir,
+    // This test exercises the interactive auth-resume path even when the test
+    // runner itself sets CI=true.
+    env: { ...process.env, CI: "" },
     cloudflareAuthSpawnImpl: authSpawn,
     pagesDeploySpawnImpl: fakeDeploy,
     cloudflareListTimeoutMs: 1000,
