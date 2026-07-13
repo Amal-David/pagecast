@@ -5,6 +5,8 @@ them to shareable Cloudflare Pages URLs — from the terminal or your coding age
 
 **Feature HTML:** <https://pagecasthq.pages.dev/>
 
+**Agent skill:** [install `publish-report` from Skills.sh](https://www.skills.sh/amal-david/pagecast/publish-report)
+
 <p align="center">
   <img src="media/admin.png" alt="Pagecast admin UI: published reports with per-page password protection" width="900">
 </p>
@@ -269,14 +271,17 @@ returns whether the link was created or updated. A proactive agent suggestion
 still asks once; a command-only request returns only the command.
 
 ```sh
-# Codex
+# Skills.sh (Codex, Claude Code, Cursor, Gemini CLI, and other supported agents)
+npx skills add https://github.com/amal-david/pagecast --skill publish-report
+
+# Manual Codex install from a Pagecast clone
 cp -R .codex/skills/publish-report ~/.codex/skills/
 
-# Claude Code
+# Claude Code plugin (includes the report-detection hook)
 /plugin marketplace add Amal-David/pagecast
 /plugin install pagecast@pagecast
 
-# Any other agent
+# Manual Agent-Skills install
 cp plugin/skills/publish-report/SKILL.md /path/to/your-agent/skills/publish-report/SKILL.md
 ```
 

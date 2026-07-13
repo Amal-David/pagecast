@@ -7,12 +7,14 @@
 - Website: https://pagecasthq.pages.dev/
 - GitHub: https://github.com/Amal-David/pagecast
 - README: https://github.com/Amal-David/pagecast/blob/main/README.md
+- Skills.sh: https://www.skills.sh/amal-david/pagecast/publish-report
 - Codex skill: https://github.com/Amal-David/pagecast/tree/main/.codex/skills/publish-report
 - Portable agent skill: https://github.com/Amal-David/pagecast/blob/main/plugin/skills/publish-report/SKILL.md
 
 ## Install
 
 - One-command app: `npx pagecast`
+- Agent skill: `npx skills add https://github.com/amal-david/pagecast --skill publish-report`
 - From source: `git clone https://github.com/Amal-David/pagecast.git && cd pagecast && npm start`
 
 ## Command discovery
