@@ -2,7 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { emitActivity } from "@/lib/activity";
-import type { CloudflareProject, CloudflareProjectsResponse } from "@/lib/types";
+import type {
+  CloudflareProject,
+  CloudflareProjectsResponse
+} from "@/lib/types";
 
 function message(error: unknown, fallback: string) {
   if (error instanceof ApiError || error instanceof Error) {
@@ -24,6 +27,22 @@ export function useCloudflareConnect() {
       const text = message(error, "Could not connect to Cloudflare.");
       toast.error(text);
       emitActivity({ status: "error", title: "Cloudflare connect failed", message: text });
+    }
+  });
+}
+
+export function useCloudflareConnectionJob() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { projectName: string; accountId?: string }) =>
+      api.startCloudflareConnectionJob(payload),
+    onError: (error) => {
+      const text = message(error, "Could not start Cloudflare connection.");
+      toast.error(text);
+      emitActivity({ status: "error", title: "Cloudflare connect failed", message: text });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["status"] });
     }
   });
 }

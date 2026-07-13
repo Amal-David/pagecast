@@ -337,8 +337,13 @@ export function createPublicationService(options = {}, dependencies = {}) {
     }
 
     const feedback = getFeedback();
-    if (feedback?.url) {
-      html = injectFeedbackWidget(html, { url: feedback.url, slug });
+    if (feedback?.url && feedback.analyticsEnabled !== false) {
+      html = injectFeedbackWidget(html, {
+        url: feedback.url,
+        slug,
+        publicationId: token,
+        reactionsEnabled: feedback.reactionsEnabled === true
+      });
     }
     const badgeOn = getBadge();
     if (badgeOn) {

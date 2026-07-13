@@ -3,6 +3,30 @@
 All notable changes to Pagecast are documented here. This project follows
 [semantic versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Pagecast Home** — one user-level Cloudflare subdomain and managed state store
+  now owns publications across workspaces; `--data-dir` remains an explicit
+  isolated profile and legacy targets remain quarantined until chosen.
+- **Agent-context upserts** — CLI and MCP publishing update the same item in the
+  same hashed agent context, with `--new-link`, `--update`, and created/updated
+  JSON results.
+- **Main-canvas Cloudflare onboarding** — resumable Wrangler authorization jobs,
+  Home subdomain confirmation, scope explanation, account selection, and retry
+  live outside Settings.
+- **Privacy-preserving Activity** — D1 access events, anonymous HMAC visitors,
+  30-day detailed retention, legacy KV-total migration, per-link summaries, and
+  Home-wide Activity. Analytics and reactions are independently enabled.
+
+### Changed
+
+- Explicit “Publish this as a Pagecast” instructions are sufficient consent and
+  packaged skills execute them immediately; proactive suggestions still ask.
+- Interactive unauthenticated publishes start Wrangler login and resume the
+  original operation. Non-interactive runs fail structurally.
+
 ## 0.5.0 — 2026-07-10
 
 ### Added

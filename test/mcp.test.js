@@ -73,6 +73,82 @@ test("MCP initialize and tools/list expose Pagecast capabilities", async () => {
       "revoke_publication"
     ]
   );
+  const publishFile = tools.result.tools.find((tool) => tool.name === "publish_file");
+  const publishContent = tools.result.tools.find((tool) => tool.name === "publish_content");
+  assert.deepEqual(publishFile.inputSchema.properties.mode.enum, ["upsert", "new", "update"]);
+  assert.ok(publishFile.inputSchema.properties.contextId);
+  assert.ok(publishFile.inputSchema.properties.publication);
+  assert.ok(publishContent.inputSchema.properties.itemKey);
+});
+
+test("MCP publishing forwards context modes and gives content upserts stable item storage", async () => {
+  const dataDir = await makeTempDir();
+  const calls = [];
+  const server = createPagecastMcpServer({
+    dataDir,
+    workspaceId: "workspace-1",
+    publishFile: async (input) => {
+      calls.push(input);
+      return {
+        action: input.newLink ? "created" : "updated",
+        url: "https://pagecast.pages.dev/p/context/",
+        token: "context-token",
+        publicationToken: "context-token"
+      };
+    }
+  });
+
+  for (const content of ["<h1>One</h1>", "<h1>Two</h1>"]) {
+    const response = await server.handleJsonRpc({
+      jsonrpc: "2.0",
+      id: calls.length + 1,
+      method: "tools/call",
+      params: {
+        name: "publish_content",
+        arguments: {
+          content,
+          filename: "report.html",
+          itemKey: "quarterly-report",
+          contextId: "thread-1",
+          mode: "upsert"
+        }
+      }
+    });
+    assert.equal(response.result.isError, undefined);
+  }
+  assert.equal(calls[0].path, calls[1].path);
+  assert.equal(calls[0].workspaceId, "workspace-1");
+  assert.equal(calls[0].contextId, "thread-1");
+  assert.equal(calls[0].itemKey, "quarterly-report");
+  assert.equal(calls[0].mode, "upsert");
+  assert.equal(await fs.readFile(calls[1].path, "utf8"), "<h1>Two</h1>");
+
+  await server.handleJsonRpc({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: {
+      name: "publish_content",
+      arguments: { content: "<h1>Fresh</h1>", filename: "fresh.html" }
+    }
+  });
+  assert.equal(calls[2].newLink, true, "content without itemKey must create a new link");
+
+  await server.handleJsonRpc({
+    jsonrpc: "2.0",
+    id: 4,
+    method: "tools/call",
+    params: {
+      name: "publish_content",
+      arguments: {
+        content: "<h1>Known</h1>",
+        filename: "known.html",
+        mode: "update",
+        publication: "context-token"
+      }
+    }
+  });
+  assert.equal(calls[3].update, "context-token");
 });
 
 test("MCP publish_content writes content then reuses the publish helper", async () => {

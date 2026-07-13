@@ -22,6 +22,7 @@ import {
   getGoalStatus,
   injectBadge,
   injectFeedbackWidget,
+  instrumentActiveHomePublications,
   assertSafeAdminBind,
   parseKvNamespaceId,
   parseWorkerDevUrl,
@@ -1409,6 +1410,106 @@ test("Cloudflare connect auto-detects one account and auto-creates the Pages pro
   }
 });
 
+test("Cloudflare connection jobs expose consent progress and create the chosen Pagecast Home", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  let loggedIn = false;
+  function fakeSpawn(command, args, options) {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.kill = () => child.emit("exit", null, "SIGTERM");
+    const finish = (output = "") => {
+      if (output) child.stdout.emit("data", Buffer.from(output));
+      child.exitCode = 0;
+      child.emit("exit", 0, null);
+    };
+    if (args.includes("login")) {
+      setTimeout(() => {
+        child.stdout.emit(
+          "data",
+          Buffer.from("Open https://dash.cloudflare.com/oauth2/auth?client_id=wrangler-test")
+        );
+      }, 5);
+      setTimeout(() => {
+        loggedIn = true;
+        finish("Successfully logged in");
+      }, 35);
+    } else if (args.includes("whoami")) {
+      setImmediate(() =>
+        finish(
+          loggedIn
+            ? JSON.stringify({
+                accounts: [{ name: "Personal", id: "abcdef0123456789abcdef0123456789" }]
+              })
+            : "You are not authenticated."
+        )
+      );
+    } else if (args.includes("list")) {
+      setImmediate(() =>
+        finish(
+          loggedIn && args.includes("project")
+            ? JSON.stringify([])
+            : ""
+        )
+      );
+    } else if (args.includes("create")) {
+      setImmediate(() => finish("Project created"));
+    } else {
+      setImmediate(() => finish(""));
+    }
+    return child;
+  }
+  const runtime = await startServers({
+    adminPort: 0,
+    publicPort: 0,
+    dataDir,
+    staticDir: path.resolve("public"),
+    cloudflareAuthSpawnImpl: fakeSpawn,
+    cloudflareLoginTimeoutMs: 1000,
+    cloudflareListTimeoutMs: 1000
+  });
+
+  try {
+    const started = await fetch(`${runtime.adminUrl}/api/cloudflare/connect-jobs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectName: "quiet-copper-pagecast" })
+    });
+    assert.equal(started.status, 202);
+    const initial = await started.json();
+    assert.match(initial.jobId, /^[a-f0-9]{32}$/);
+    assert.equal(initial.status, "preparing_wrangler");
+
+    let consent = null;
+    let completed = null;
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline && !completed) {
+      const response = await fetch(
+        `${runtime.adminUrl}/api/cloudflare/connect-jobs/${initial.jobId}`
+      );
+      assert.equal(response.status, 200);
+      const job = await response.json();
+      if (job.status === "awaiting_consent" && job.authorizationUrl) consent = job;
+      if (job.status === "connected" || job.status === "failed") completed = job;
+      if (!completed) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(consent, "expected the authorization URL while consent was pending");
+    assert.match(consent.authorizationUrl, /^https:\/\/dash\.cloudflare\.com\/oauth2\/auth/);
+    assert.equal(completed?.status, "connected");
+    assert.equal(completed?.projectName, "quiet-copper-pagecast");
+    assert.equal(completed?.baseUrl, "https://quiet-copper-pagecast.pages.dev");
+    assert.deepEqual(completed?.requestedScopes, ["account:read", "user:read", "pages:write"]);
+
+    const missing = await fetch(`${runtime.adminUrl}/api/cloudflare/connect-jobs/${"f".repeat(32)}`);
+    assert.equal(missing.status, 404);
+  } finally {
+    await runtime.close();
+  }
+});
+
 test("Headless publishReportSnapshot auto-provisions and returns a public URL", async () => {
   const tempDir = await makeTempDir();
   const dataDir = path.join(tempDir, "data");
@@ -1466,6 +1567,88 @@ test("Headless publishReportSnapshot auto-provisions and returns a public URL", 
   assert.equal(result.projectName, "pagecast");
   assert.equal(result.linkKind, "unlisted");
   assert.ok(deployCommands.length >= 1, "expected a Pages deploy");
+});
+
+test("Headless publish upserts by workspace, item, and agent context with explicit overrides", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportPath = path.join(tempDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>First</h1>");
+  const { fakeSpawn: authSpawn } = makeWranglerFake((args) => {
+    if (args.includes("whoami")) {
+      return {
+        output: JSON.stringify({
+          accounts: [{ name: "Personal", id: "abcdef0123456789abcdef0123456789" }]
+        })
+      };
+    }
+    if (args.includes("list")) {
+      return {
+        output: JSON.stringify([
+          { name: "pagecast", account_id: "abcdef0123456789abcdef0123456789" }
+        ])
+      };
+    }
+    return { output: "" };
+  });
+  function fakeDeploy() {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => child.emit("exit", null, "SIGTERM");
+    setImmediate(() => {
+      child.stdout.emit("data", Buffer.from("deploy complete"));
+      child.emit("exit", 0, null);
+    });
+    return child;
+  }
+  await adoptTestPagesTarget(dataDir);
+  const publish = (overrides = {}) =>
+    publishReportSnapshot({
+      path: reportPath,
+      dataDir,
+      workspaceId: "workspace-1",
+      itemKey: "quarterly-report",
+      contextId: "thread-1",
+      cloudflareAuthSpawnImpl: authSpawn,
+      pagesDeploySpawnImpl: fakeDeploy,
+      cloudflareListTimeoutMs: 1000,
+      pagesDeployTimeoutMs: 1000,
+      ...overrides
+    });
+
+  const created = await publish();
+  assert.equal(created.action, "created");
+  assert.equal(created.contextMatched, false);
+  assert.equal(created.publicationToken, created.token);
+
+  await fs.writeFile(reportPath, "<h1>Updated</h1>");
+  const updated = await publish();
+  assert.equal(updated.action, "updated");
+  assert.equal(updated.contextMatched, true);
+  assert.equal(updated.token, created.token);
+  assert.equal(updated.url, created.url);
+
+  const otherContext = await publish({ contextId: "thread-2" });
+  assert.equal(otherContext.action, "created");
+  assert.notEqual(otherContext.token, created.token);
+
+  const explicitUpdate = await publish({
+    contextId: "thread-3",
+    update: created.url
+  });
+  assert.equal(explicitUpdate.action, "updated");
+  assert.equal(explicitUpdate.contextMatched, false);
+  assert.equal(explicitUpdate.token, created.token);
+
+  const forcedNew = await publish({ newLink: true });
+  assert.equal(forcedNew.action, "created");
+  assert.notEqual(forcedNew.token, created.token);
+
+  const state = JSON.parse(await fs.readFile(path.join(dataDir, "reports.json"), "utf8"));
+  assert.equal(state.reports.length, 1);
+  assert.equal(state.reports[0].publications.length, 3);
+  assert.equal(JSON.stringify(state).includes("thread-1"), false);
 });
 
 test("Headless revoke uses the publication's remembered Pages target", async () => {
@@ -1949,7 +2132,7 @@ test("Publish uses the REAL Cloudflare subdomain from the deploy output (name co
   assert.match(result.url, /^https:\/\/pagecast-6cv\.pages\.dev\/p\/.+\/$/);
 });
 
-test("Headless publishReportSnapshot fails clearly when not signed in", async () => {
+test("Headless publishReportSnapshot fails clearly when non-interactive and not signed in", async () => {
   const tempDir = await makeTempDir();
   const dataDir = path.join(tempDir, "data");
   const reportPath = path.join(tempDir, "report.html");
@@ -1967,6 +2150,7 @@ test("Headless publishReportSnapshot fails clearly when not signed in", async ()
       publishReportSnapshot({
         path: reportPath,
         dataDir,
+        nonInteractive: true,
         cloudflareAuthSpawnImpl: authSpawn,
         cloudflareListTimeoutMs: 1000
       }),
@@ -1976,6 +2160,61 @@ test("Headless publishReportSnapshot fails clearly when not signed in", async ()
       return true;
     }
   );
+});
+
+test("Headless interactive publish logs in and resumes the original publish", async () => {
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportPath = path.join(tempDir, "report.html");
+  await fs.writeFile(reportPath, "<h1>Resume me</h1>");
+  let loggedIn = false;
+  const { fakeSpawn: authSpawn, captured } = makeWranglerFake((args) => {
+    if (args.includes("login")) {
+      loggedIn = true;
+      return { output: "Successfully logged in" };
+    }
+    if (args.includes("whoami")) {
+      return loggedIn
+        ? {
+            output: JSON.stringify({
+              accounts: [{ name: "Personal", id: "abcdef0123456789abcdef0123456789" }]
+            })
+          }
+        : { output: "You are not authenticated." };
+    }
+    if (args.includes("list")) {
+      return {
+        output: JSON.stringify([
+          { name: "pagecast", account_id: "abcdef0123456789abcdef0123456789" }
+        ])
+      };
+    }
+    return { output: "" };
+  });
+  function fakeDeploy() {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => child.emit("exit", null, "SIGTERM");
+    setImmediate(() => {
+      child.stdout.emit("data", Buffer.from("deploy complete"));
+      child.emit("exit", 0, null);
+    });
+    return child;
+  }
+  await adoptTestPagesTarget(dataDir);
+
+  const result = await publishReportSnapshot({
+    path: reportPath,
+    dataDir,
+    cloudflareAuthSpawnImpl: authSpawn,
+    pagesDeploySpawnImpl: fakeDeploy,
+    cloudflareListTimeoutMs: 1000,
+    pagesDeployTimeoutMs: 1000
+  });
+  assert.equal(result.action, "created");
+  assert.ok(captured.some((call) => call.args.includes("login")));
+  assert.ok(captured.some((call) => call.args.includes("--scopes") && call.args.includes("pages:write")));
 });
 
 test("Cloudflare connect surfaces an account choice when multiple accounts exist", async () => {
@@ -4264,7 +4503,7 @@ test("injectFeedbackWidget adds the widget script before </body> exactly once", 
   const out = injectFeedbackWidget(html, { url: "https://fb.example.workers.dev", slug: "q3" });
   assert.match(
     out,
-    /<script src="https:\/\/fb\.example\.workers\.dev\/widget\.js" data-slug="q3" defer><\/script>\s*<\/body>/
+    /<script src="https:\/\/fb\.example\.workers\.dev\/widget\.js" data-slug="q3" data-publication="q3" data-reactions="false" defer><\/script>\s*<\/body>/
   );
   // Idempotent: re-injecting the same widget does not duplicate it.
   const twice = injectFeedbackWidget(out, { url: "https://fb.example.workers.dev", slug: "q3" });
@@ -4302,13 +4541,18 @@ test("config store persists and clears feedback settings", async () => {
   const updated = await store.updateFeedback({
     url: "https://pagecast-feedback.acme.workers.dev/",
     statsToken: "secret",
+    visitorSecret: "visitor-secret",
     workerName: "pagecast-feedback",
-    kvId: "abc123"
+    kvId: "abc123",
+    d1Id: "d1-secret-id"
   });
   // Trailing slash is normalized away.
   assert.equal(updated.feedback.url, "https://pagecast-feedback.acme.workers.dev");
   assert.equal(Object.hasOwn(updated.feedback, "statsToken"), false);
+  assert.equal(Object.hasOwn(updated.feedback, "visitorSecret"), false);
+  assert.equal(Object.hasOwn(updated.feedback, "d1Id"), false);
   assert.equal(store.get().feedback.statsToken, "secret");
+  assert.equal(store.get().feedback.visitorSecret, "visitor-secret");
 
   // Reloading from disk keeps it.
   const reopened = createConfigStore({ dataDir: dir });
@@ -4320,6 +4564,54 @@ test("config store persists and clears feedback settings", async () => {
   assert.equal(bad.feedback, null);
 
   await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("analytics summary and event APIs proxy cursor data without leaking upstream secrets or raw IP", async () => {
+  const rawIp = ["203", "0", "113", "42"].join(".");
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-analytics-api-"));
+  const config = createConfigStore({ dataDir });
+  await config.init();
+  await config.updateFeedback({
+    url: "https://pagecast-feedback.example.workers.dev",
+    workerName: "pagecast-feedback",
+    statsToken: "stats-secret",
+    visitorSecret: "visitor-secret",
+    analyticsEnabled: true,
+    d1Id: "private-database-id"
+  });
+  const upstreamUrls = [];
+  const fetchImpl = async (input) => {
+    const requested = String(input);
+    upstreamUrls.push(requested);
+    if (requested.includes("/summary")) {
+      return new Response(JSON.stringify({
+        ok: true,
+        accountId: "private-account",
+        summaries: [{ publicationId: "a".repeat(32), views: 7, uniqueVisitors: 3, lastAccessAt: "2026-07-13T00:00:00.000Z", rawIp }]
+      }), { headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({
+      ok: true,
+      events: [{ eventId: "e1", publicationId: "a".repeat(32), occurredAt: "2026-07-13T00:00:00.000Z", visitorId: "b".repeat(64), country: "US", region: "CA", city: "SF", asn: 64500, organization: "Example", device: "mobile", referrerHostname: "example.com", rawIp, analyticsSecret: "leak" }],
+      nextCursor: "cursor-1"
+    }), { headers: { "Content-Type": "application/json" } });
+  };
+  const runtime = await startServers({ dataDir, adminPort: 0, publicPort: 0, fetchImpl });
+  try {
+    const summary = await (await fetch(`${runtime.adminUrl}/api/analytics/summary?publicationId=${"a".repeat(32)}`)).json();
+    const events = await (await fetch(`${runtime.adminUrl}/api/analytics/events?cursor=cursor-0&limit=20`)).json();
+    assert.equal(summary.summaries[0].views, 7);
+    assert.equal(events.events[0].visitorId, "b".repeat(64));
+    assert.equal(events.nextCursor, "cursor-1");
+    const publicJson = JSON.stringify({ summary, events });
+    assert.equal(publicJson.includes(rawIp), false);
+    assert.doesNotMatch(publicJson, /private-account|private-database-id|stats-secret|visitor-secret|analyticsSecret/);
+    assert.ok(upstreamUrls.some((value) => value.includes("token=stats-secret")));
+    assert.ok(upstreamUrls.some((value) => value.includes("cursor=cursor-0")));
+  } finally {
+    await runtime.close();
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
 });
 
 test("Cloudflare auto-sync config defaults on, persists, and survives pages updates", async () => {
@@ -4421,6 +4713,11 @@ test("setupFeedback creates KV, deploys the worker, and returns the url", async 
     if (line.includes("kv namespace create")) {
       return { code: 0, output: 'id = "0123456789abcdef0123456789abcdef"' };
     }
+    if (line.includes("d1 list")) return { code: 0, output: "[]" };
+    if (line.includes("d1 create")) {
+      return { code: 0, output: '{"uuid":"11111111-2222-4333-8444-555555555555"}' };
+    }
+    if (line.includes("d1 execute")) return { code: 0, output: "ok" };
     if (line.includes("deploy")) {
       return { code: 0, output: "Uploaded\nhttps://pagecast-feedback.acme.workers.dev" };
     }
@@ -4440,6 +4737,7 @@ test("setupFeedback creates KV, deploys the worker, and returns the url", async 
 
   assert.equal(result.url, "https://pagecast-feedback.acme.workers.dev");
   assert.equal(result.kvId, "0123456789abcdef0123456789abcdef");
+  assert.equal(result.d1Id, "11111111-2222-4333-8444-555555555555");
   assert.equal(result.statsToken, "tok-123");
 
   // The generated wrangler.toml binds the KV namespace and the stats token.
@@ -4447,6 +4745,8 @@ test("setupFeedback creates KV, deploys the worker, and returns the url", async 
   assert.match(toml, /binding = "PAGECAST_FEEDBACK"/);
   assert.match(toml, /id = "0123456789abcdef0123456789abcdef"/);
   assert.match(toml, /PAGECAST_STATS_TOKEN = "tok-123"/);
+  assert.match(toml, /binding = "PAGECAST_ANALYTICS"/);
+  assert.match(toml, /database_id = "11111111-2222-4333-8444-555555555555"/);
   // The worker source was staged next to it.
   assert.match(await fs.readFile(path.join(deployDir, "worker.js"), "utf8"), /export default/);
 
@@ -4469,6 +4769,11 @@ test("setupFeedback deploys with a relative --config from deployDir (space-safe 
     if (line.includes("kv namespace create")) {
       return { code: 0, output: 'id = "0123456789abcdef0123456789abcdef"' };
     }
+    if (line.includes("d1 list")) return { code: 0, output: "[]" };
+    if (line.includes("d1 create")) {
+      return { code: 0, output: '{"uuid":"11111111-2222-4333-8444-555555555555"}' };
+    }
+    if (line.includes("d1 execute")) return { code: 0, output: "ok" };
     if (line.includes("deploy")) {
       return { code: 0, output: "Uploaded\nhttps://pagecast-feedback.acme.workers.dev" };
     }
@@ -4515,6 +4820,10 @@ test("setupFeedback reuses an existing KV namespace by title", async () => {
         output: JSON.stringify([{ id: "dddddddddddddddddddddddddddddddd", title: "pagecast-feedback-store" }])
       };
     }
+    if (line.includes("d1 list")) {
+      return { code: 0, output: '[{"name":"pagecast-feedback-analytics","uuid":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"}]' };
+    }
+    if (line.includes("d1 execute")) return { code: 0, output: "ok" };
     if (line.includes("deploy")) {
       return { code: 0, output: "https://pagecast-feedback.acme.workers.dev" };
     }
@@ -4532,6 +4841,79 @@ test("setupFeedback reuses an existing KV namespace by title", async () => {
   assert.equal(result.kvId, "dddddddddddddddddddddddddddddddd");
   assert.ok(!calls.some((c) => c.includes("kv namespace create")), "should not create when one exists");
   await fs.rm(deployDir, { recursive: true, force: true });
+});
+
+test("analytics-only setup provisions D1 without creating or binding a reactions KV namespace", async () => {
+  const calls = [];
+  const { fakeSpawn } = makeWranglerFake((args) => {
+    const line = args.join(" ");
+    calls.push(line);
+    if (line.includes("kv namespace list")) return { code: 0, output: "[]" };
+    if (line.includes("d1 list")) return { code: 0, output: "[]" };
+    if (line.includes("d1 create")) return { code: 0, output: '{"uuid":"11111111-2222-4333-8444-555555555555"}' };
+    if (line.includes("d1 execute")) return { code: 0, output: "ok" };
+    if (line.includes("deploy")) return { code: 0, output: "https://pagecast-feedback.acme.workers.dev" };
+    return { code: 0, output: "" };
+  });
+  const manager = createCloudflareAuthManager({ spawnImpl: fakeSpawn });
+  const deployDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-analytics-only-"));
+  try {
+    const result = await manager.setupFeedback({
+      workerSource: "export default {}",
+      schemaSource: "CREATE TABLE example (id TEXT);",
+      statsToken: "stats",
+      visitorSecret: "visitor",
+      reactionsEnabled: false,
+      deployDir
+    });
+    assert.equal(result.kvId, "");
+    assert.equal(result.d1Id, "11111111-2222-4333-8444-555555555555");
+    assert.ok(!calls.some((line) => line.includes("kv namespace create")));
+    const toml = await fs.readFile(path.join(deployDir, "wrangler.toml"), "utf8");
+    assert.doesNotMatch(toml, /PAGECAST_FEEDBACK/);
+    assert.match(toml, /PAGECAST_ANALYTICS/);
+  } finally {
+    await fs.rm(deployDir, { recursive: true, force: true });
+  }
+});
+
+test("analytics setup instruments each active Home publication once and journals partial failure", async () => {
+  const pages = { accountId: "a".repeat(32), projectName: "pagecast-home", baseUrl: "https://pagecast-home.pages.dev" };
+  const reports = [
+    { id: "r1", publications: [{ token: "p1", slug: "one" }, { token: "p2", slug: "two" }] },
+    { id: "r2", publications: [{ token: "p3", slug: "three" }] }
+  ];
+  const calls = { begin: [], clear: [], failed: [], deployed: [] };
+  const store = {
+    list: () => reports.map(({ id }) => ({ id })),
+    get: (id) => reports.find((report) => report.id === id),
+    beginOperations: async (operations) => calls.begin.push(...operations),
+    clearOperations: async (operations) => calls.clear.push(...operations),
+    recordOperationFailure: async (operation) => calls.failed.push(operation)
+  };
+  const result = await instrumentActiveHomePublications({
+    store,
+    configStore: {},
+    pagesPublisher: {},
+    deployQueue: {},
+    currentPages: pages,
+    targetsForReport: (_store, report) => [{
+      publication: report.publications[0],
+      publications: report.publications,
+      pagesConfig: pages
+    }],
+    deployTarget: async ({ report, publications }) => {
+      calls.deployed.push(...publications.map((publication) => publication.token));
+      if (report.id === "r2") throw new Error("simulated deploy failure");
+    }
+  });
+  assert.deepEqual(calls.deployed, ["p1", "p2", "p3"]);
+  assert.equal(new Set(calls.deployed).size, 3);
+  assert.equal(result.attempted, 3);
+  assert.equal(result.completed, 2);
+  assert.deepEqual(result.failed.map((item) => item.publicationToken), ["p3"]);
+  assert.deepEqual(calls.clear.map((operation) => operation.token), ["p1", "p2"]);
+  assert.deepEqual(calls.failed.map((operation) => operation.token), ["p3"]);
 });
 
 test("updatePages preserves an already-provisioned feedback config", async () => {

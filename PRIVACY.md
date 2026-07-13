@@ -1,7 +1,9 @@
 # Privacy
 
-Pagecast is local-first. Reports, config, deploy history, and the local operation
-journal live under `.pagecast/` in the working directory. Publishing goes
+Pagecast is local-first. Managed publication state, deploy history, analytics
+configuration, and the operation journal live under `~/.pagecast/home/`.
+Workspace `.pagecast/` directories retain workspace/source identity and Home
+mappings. An explicit `--data-dir` creates an isolated profile. Publishing goes
 directly to **your own** Cloudflare account; Pagecast has no hosted backend in
 that path.
 
@@ -52,7 +54,7 @@ account, or other user identity.
 - Published URLs, origins, tokens, slugs, passwords, or expiry values
 - Cloudflare account IDs, account names, API/OAuth tokens, or project names
 - Local admin/CSRF/runtime capabilities, config secrets, or operation-journal data
-- IP addresses or other personal information stored by Pagecast
+- IP addresses or other personal information stored in maintainer telemetry
 
 The command classifier uses fixed allowlists, so positional arguments never
 enter an event. The receiving Worker independently validates the same bounded
@@ -68,6 +70,36 @@ Pagecast does not use a third-party analytics provider for these events.
 Network infrastructure may process connection metadata in the ordinary course
 of delivering an HTTPS request, but Pagecast does not put IP addresses into the
 event or store per-visitor records in its telemetry dataset.
+
+## Page access analytics
+
+Page access analytics is separate from maintainer telemetry and is opt-in. When
+enabled, Pagecast deploys a Worker and D1 database into your Cloudflare account.
+The reactions bar is a separate option and may remain disabled.
+
+For each page access, the Worker stores:
+
+- Immutable Pagecast publication ID and access time
+- A stable anonymous visitor ID
+- Country, region/city when Cloudflare provides them
+- ASN/organization, coarse device class, and referrer hostname
+
+The Worker may read `CF-Connecting-IP` while handling the request. It immediately
+HMACs that value with a random per-Home secret and discards the raw address. A
+full IP address is never written to D1, KV, Pagecast logs, local APIs, or browser
+payloads. Referrers are reduced to hostnames; complete referrer URLs are not
+stored. Analytics uses no cookies.
+
+Detailed access events are retained for 30 days. Aggregate view totals remain
+after detailed cleanup. Existing aggregate KV totals are migrated without
+inventing historical visitor details; detailed history begins only after the
+upgrade. Renaming a URL does not lose history because events use immutable
+publication IDs rather than slugs.
+
+Analytics is audit visibility, not visitor identity or access prevention. An
+unlisted link can be opened by anyone who has its URL. Pagecast password
+protection is the current access-control option; named Cloudflare Access identity
+is not part of this release.
 
 ## Other network activity
 

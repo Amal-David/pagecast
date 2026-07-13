@@ -2,16 +2,17 @@
 
 Lets your coding agent (Claude Code, Codex, or any Agent-Skills-compatible tool)
 offer to publish a freshly created **HTML or Markdown** report, plan, or doc to a
-shareable public URL.
+shareable public URL—and execute an explicit Pagecast request immediately.
 
 How it works: a passive `PostToolUse` hook notices when an HTML/Markdown file is
 written and hints the agent. The `publish-report` skill tells the agent to offer
 (once, only for finished/shareable artifacts) *"Want me to publish this with
-Pagecast?"* and, on an explicit **yes**, run the headless CLI:
+Pagecast?"* for proactive suggestions. When you say “Publish this as a
+Pagecast,” that instruction is already consent and the agent runs the CLI:
 
 ```sh
 npx pagecast publish "/absolute/path/file.md" --json
-# → {"ok":true,"url":"https://<actual-origin>.pages.dev/p/<token>/", ...}
+# → {"ok":true,"action":"created","url":"https://<home>.pages.dev/p/<token>/", ...}
 ```
 
 ## Setup (one time)
@@ -84,21 +85,19 @@ audit model.
 npx pagecast
 ```
 
-Click **Connect Cloudflare** in the panel. Or sign in directly:
-
-```sh
-npx pagecast pages setup --project pagecast
-```
-
-That's the whole setup. **After this, publishing is headless** — when your agent
-makes a report and you say "yes", it publishes with no further prompts.
+The main canvas shows **Connect Cloudflare**, the Wrangler permission scopes,
+and an editable Pagecast Home subdomain. Cloudflare labels the authorizing app
+Wrangler. Pagecast shows progress and resumes setup after consent; Settings is
+not required. An interactive publish can also start this flow and resume itself.
 
 ## What to expect
 
 Once installed and connected: when your agent writes a report, plan, dashboard, or
 other shareable HTML/Markdown, it offers *"Want me to publish this with Pagecast?"*
 Say **yes** and you get back a Cloudflare Pages URL you own. Say no and it drops
-it — it won't nag. You can rename, re-sync, or revoke any link from `npx pagecast`.
+it—it won't nag. An explicit Pagecast instruction skips the extra question.
+Repeating it for the same item and agent context updates the same URL; the JSON
+result says `created` or `updated`. Use `--new-link` for another URL.
 
 New links are unlisted capability URLs, not private links: anyone with the URL
 can view one. Use `--password` when recipients must authenticate. Pagecast uses

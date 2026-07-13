@@ -33,12 +33,14 @@ import {
   useSyncPublication
 } from "@/hooks/use-pagecast";
 import type { Publication } from "@/lib/types";
+import { PublicationActivitySummary } from "@/components/activity-panel";
 
 interface PublicationRowProps {
   publication: Publication;
+  analyticsEnabled?: boolean;
 }
 
-export function PublicationRow({ publication }: PublicationRowProps) {
+export function PublicationRow({ publication, analyticsEnabled = false }: PublicationRowProps) {
   const rename = useRenameSlug();
   const sync = useSyncPublication();
   const revoke = useRevokePublication();
@@ -157,7 +159,7 @@ export function PublicationRow({ publication }: PublicationRowProps) {
           </div>
         )}
         {!editing ? (
-          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+          <><div className="flex items-center gap-2 text-[11px] text-muted-foreground">
             {!publication.targetAttributed ? (
               <button
                 type="button"
@@ -214,7 +216,7 @@ export function PublicationRow({ publication }: PublicationRowProps) {
                 </Select>
               </>
             ) : null}
-          </div>
+          </div><PublicationActivitySummary publicationId={publication.token} enabled={analyticsEnabled} /></>
         ) : null}
       </div>
 

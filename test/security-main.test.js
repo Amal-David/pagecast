@@ -115,7 +115,9 @@ test("public config is an allowlist and never exposes nested feedback or interna
     url: "https://pagecast-feedback.example.workers.dev",
     workerName: "pagecast-feedback",
     statsToken: "stats-token-sentinel",
-    kvId: "kv-id-sentinel"
+    visitorSecret: "visitor-secret-sentinel",
+    kvId: "kv-id-sentinel",
+    d1Id: "d1-id-sentinel"
   });
 
   const publicConfig = store.getPublicConfig();
@@ -130,7 +132,9 @@ test("public config is an allowlist and never exposes nested feedback or interna
   ]);
   assert.deepEqual(publicConfig.feedback, {
     url: "https://pagecast-feedback.example.workers.dev",
-    workerName: "pagecast-feedback"
+    workerName: "pagecast-feedback",
+    analyticsEnabled: true,
+    reactionsEnabled: false
   });
   const serialized = JSON.stringify(publicConfig);
   for (const forbidden of [
@@ -138,8 +142,12 @@ test("public config is an allowlist and never exposes nested feedback or interna
     "syncSecret",
     "telemetryId",
     "statsToken",
+    "visitorSecret",
     "kvId",
+    "d1Id",
     "stats-token-sentinel",
+    "visitor-secret-sentinel",
+    "d1-id-sentinel",
     "kv-id-sentinel"
   ]) {
     assert.equal(serialized.includes(forbidden), false, `public config leaked ${forbidden}`);

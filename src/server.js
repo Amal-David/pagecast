@@ -112,6 +112,12 @@ import {
   renderAuthMiddleware,
   renderRoutesJson
 } from "./crypto.js";
+import {
+  findPublicationForPublish,
+  normalizePublishMode,
+  resolvePublicationContext
+} from "./publication-context.js";
+import { registerPagecastWorkspace } from "./pagecast-home.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -634,8 +640,12 @@ function normalizeFeedback(feedback) {
   return {
     url,
     statsToken: String(feedback.statsToken || ""),
+    visitorSecret: String(feedback.visitorSecret || ""),
     workerName: String(feedback.workerName || ""),
-    kvId: String(feedback.kvId || "")
+    kvId: String(feedback.kvId || ""),
+    d1Id: String(feedback.d1Id || ""),
+    analyticsEnabled: feedback.analyticsEnabled !== false,
+    reactionsEnabled: feedback.reactionsEnabled === true
   };
 }
 
@@ -1516,7 +1526,9 @@ export function createConfigStore({
       feedback: config.feedback
         ? {
             url: config.feedback.url,
-            workerName: config.feedback.workerName
+            workerName: config.feedback.workerName,
+            analyticsEnabled: config.feedback.analyticsEnabled !== false,
+            reactionsEnabled: config.feedback.reactionsEnabled === true
           }
         : null,
       badge: config.badge,
@@ -1698,10 +1710,14 @@ export function createDeployQueue() {
 // Injected just before </body> so it loads after page content. `url` is the
 // Worker origin and `slug` keys this page's stats. Returns the HTML unchanged
 // when feedback is not configured. Pure + exported for testing.
-export function injectFeedbackWidget(html, { url, slug } = {}) {
+export function injectFeedbackWidget(
+  html,
+  { url, slug, publicationId, reactionsEnabled = false } = {}
+) {
   const baseUrl = String(url || "").trim().replace(/\/+$/, "");
   const pageSlug = String(slug || "").trim();
-  if (!baseUrl || !pageSlug) {
+  const immutablePublicationId = String(publicationId || pageSlug).trim();
+  if (!baseUrl || !pageSlug || !immutablePublicationId) {
     return html;
   }
   const esc = (value) =>
@@ -1711,7 +1727,7 @@ export function injectFeedbackWidget(html, { url, slug } = {}) {
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
   const tag =
-    `<script src="${esc(`${baseUrl}/widget.js`)}" data-slug="${esc(pageSlug)}" defer></script>`;
+    `<script src="${esc(`${baseUrl}/widget.js`)}" data-slug="${esc(pageSlug)}" data-publication="${esc(immutablePublicationId)}" data-reactions="${reactionsEnabled === true ? "true" : "false"}" defer></script>`;
   // Avoid double-injecting if the document already carries the widget.
   if (html.includes(`data-slug="${esc(pageSlug)}"`) && html.includes("/widget.js")) {
     return html;
@@ -2529,6 +2545,33 @@ export function createReportStore({
     reports.set(report.id, report);
     await save();
     return report;
+  }
+
+  async function replaceSourceWithPath(id, sourcePath) {
+    const report = reports.get(id);
+    if (!report) {
+      throw appError("Report was not found.", 404);
+    }
+    const normalizedPath = await normalizeLocalHtmlPath(sourcePath);
+    report.kind = "path";
+    report.name = deriveReportName(normalizedPath);
+    report.sourcePath = normalizedPath;
+    report.rootDir = path.dirname(normalizedPath);
+    report.entryFile = path.basename(normalizedPath);
+    report.workingDir = null;
+    report.buildCommand = "";
+    report.buildOutputDir = "";
+    report.buildOutputRoot = null;
+    report.buildStatus = "ready";
+    report.buildError = "";
+    report.sourceMode = "source-tracked";
+    report.updatedAt = nowIso();
+    await save();
+    return report;
+  }
+
+  function findPublishMatch(options = {}) {
+    return findPublicationForPublish(Array.from(reports.values()), options);
   }
 
   async function addFolder({
@@ -4012,6 +4055,7 @@ export function createReportStore({
     list,
     get,
     addPath: serializeStoreMutation(addPath),
+    replaceSourceWithPath: serializeStoreMutation(replaceSourceWithPath),
     addFolder: serializeStoreMutation(addFolder),
     addUpload: serializeStoreMutation(addUpload),
     addFolderUpload: serializeStoreMutation(addFolderUpload),
@@ -4023,6 +4067,7 @@ export function createReportStore({
     importPublishedPage: serializeStoreMutation(importPublishedPage),
     importPublishedPages: serializeStoreMutation(importPublishedPages),
     findPublication,
+    findPublishMatch,
     findActivePublication,
     findActivePublicationBySlug,
     activeSnapshotPublications,
@@ -4314,6 +4359,45 @@ function targetManagementState(configStore, pages = configStore.get().pages) {
   return { managed, requiresAdoption: configured && !managed };
 }
 
+function suggestedPagecastHomeProjectName(configStore) {
+  const config = configStore.get();
+  if (config.pages.projectName && config.pages.projectName !== DEFAULT_PAGES_PROJECT_NAME) {
+    return config.pages.projectName;
+  }
+  const suffix = String(config.installationId || "").slice(0, 8) || "home";
+  return normalizePagesProjectName(`pagecast-${suffix}`);
+}
+
+function cloudflareAuthorizationUrl(value) {
+  const match = cleanCommandOutput(value).match(/https:\/\/dash\.cloudflare\.com\/[^\s]+/i);
+  if (!match) return "";
+  const candidate = match[0].replace(/[),.;]+$/, "");
+  try {
+    const url = new URL(candidate);
+    return url.protocol === "https:" && url.hostname === "dash.cloudflare.com"
+      ? url.toString()
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+function publicConnectionJob(job) {
+  return {
+    jobId: job.jobId,
+    status: job.status,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    authorizationUrl: job.authorizationUrl || "",
+    requestedScopes: [...CLOUDFLARE_OAUTH_SCOPES],
+    projectName: job.projectName || "",
+    baseUrl: job.baseUrl || "",
+    needsAccountChoice: job.needsAccountChoice === true,
+    accounts: Array.isArray(job.accounts) ? job.accounts : [],
+    error: job.error || ""
+  };
+}
+
 async function detectAndPersistCloudflareProjects({ cloudflareAuth, configStore }) {
   const currentConfig = configStore.getPublicConfig();
   const projects = await cloudflareAuth.listProjects({
@@ -4574,6 +4658,8 @@ export function createAdminHandler({
   deployQueue,
   mutationQueue = null,
   watchManager,
+  connectionJobs = new Map(),
+  serviceFetch = fetch,
   commandCapability = "",
   bindHost = DEFAULT_HOST,
   allowedHosts = []
@@ -4671,6 +4757,8 @@ export function createAdminHandler({
           deployQueue,
           mutationQueue,
           watchManager,
+          connectionJobs,
+          serviceFetch,
           commandCapability
         });
         if (
@@ -4831,6 +4919,54 @@ function reportDeploymentTargets(store, report, currentPages) {
     }
   }
   return [...targets.values()];
+}
+
+export async function instrumentActiveHomePublications({
+  store,
+  configStore,
+  pagesPublisher,
+  deployQueue,
+  currentPages,
+  targetsForReport = reportDeploymentTargets,
+  deployTarget = deployReportTargetState
+}) {
+  const instrumentation = { attempted: 0, completed: 0, failed: [] };
+  for (const formatted of store.list()) {
+    const report = store.get(formatted.id);
+    for (const target of targetsForReport(store, report, currentPages)) {
+      if (!projectRefEquals(target.pagesConfig, currentPages)) continue;
+      const operations = target.publications.map((publication) => ({
+        type: "analytics_setup",
+        token: publication.token,
+        slug: publication.slug || publication.token,
+        projectRef: target.pagesConfig,
+        reportId: report.id
+      }));
+      instrumentation.attempted += target.publications.length;
+      await store.beginOperations(operations);
+      try {
+        await deployTarget({
+          store,
+          configStore,
+          pagesPublisher,
+          deployQueue,
+          report,
+          ...target
+        });
+        instrumentation.completed += target.publications.length;
+        await store.clearOperations(operations);
+      } catch (error) {
+        for (const operation of operations) {
+          await store.recordOperationFailure({ ...operation, error }).catch(() => {});
+          instrumentation.failed.push({
+            publicationToken: operation.token,
+            error: error.message || String(error)
+          });
+        }
+      }
+    }
+  }
+  return instrumentation;
 }
 
 async function deployReportTargetState({
@@ -5110,10 +5246,107 @@ async function handleApi(
     deployQueue,
     mutationQueue,
     watchManager,
+    connectionJobs,
+    serviceFetch,
     commandCapability
   }
 ) {
   const options = reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl });
+
+  function updateConnectionJob(job, status, patch = {}) {
+    Object.assign(job, patch, { status, updatedAt: nowIso() });
+    connectionJobs.set(job.jobId, job);
+  }
+
+  function publicAnalyticsPayload(endpoint, data) {
+    if (endpoint === "summary") {
+      return {
+        ok: data?.ok !== false,
+        summaries: (Array.isArray(data?.summaries) ? data.summaries : []).map((item) => ({
+          publicationId: String(item?.publicationId || ""),
+          views: Math.max(0, Number(item?.views) || 0),
+          uniqueVisitors: Math.max(0, Number(item?.uniqueVisitors) || 0),
+          lastAccessAt: item?.lastAccessAt ? String(item.lastAccessAt) : null
+        }))
+      };
+    }
+    return {
+      ok: data?.ok !== false,
+      events: (Array.isArray(data?.events) ? data.events : []).map((item) => ({
+        eventId: String(item?.eventId || ""),
+        publicationId: String(item?.publicationId || ""),
+        occurredAt: String(item?.occurredAt || ""),
+        visitorId: String(item?.visitorId || ""),
+        country: String(item?.country || "XX"),
+        region: String(item?.region || ""),
+        city: String(item?.city || ""),
+        asn: Number.isFinite(Number(item?.asn)) ? Number(item.asn) : null,
+        organization: String(item?.organization || ""),
+        device: String(item?.device || "desktop"),
+        referrerHostname: String(item?.referrerHostname || "direct")
+      })),
+      nextCursor: String(data?.nextCursor || "")
+    };
+  }
+
+  async function runConnectionJob(job) {
+    try {
+      const credential = cloudflareCredentialStatus();
+      if (!credential.tokenConfigured) {
+        let session = await cloudflareAuth.refreshSession();
+        if (!session.loggedIn) {
+          updateConnectionJob(job, "awaiting_consent");
+          await cloudflareAuth.login(CLOUDFLARE_OAUTH_SCOPES, {
+            onProgress: (chunk) => {
+              const authorizationUrl = cloudflareAuthorizationUrl(chunk);
+              if (authorizationUrl) {
+                updateConnectionJob(job, "awaiting_consent", { authorizationUrl });
+              }
+            }
+          });
+          session = await cloudflareAuth.refreshSession();
+          if (!session.loggedIn) {
+            throw appError("Cloudflare sign-in did not complete.", 401);
+          }
+        }
+      }
+
+      updateConnectionJob(job, "discovering_accounts");
+      if (job.accountId) {
+        await configStore.updatePages({
+          projectName: job.projectName,
+          accountId: job.accountId
+        });
+      } else {
+        await configStore.updatePages({ projectName: job.projectName });
+      }
+      updateConnectionJob(job, "creating_home");
+      const result = await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
+      if (result.cloudflare.needsAccountChoice) {
+        updateConnectionJob(job, "discovering_accounts", {
+          needsAccountChoice: true,
+          accounts: result.cloudflare.accounts || []
+        });
+        return;
+      }
+      if (!result.cloudflare.authenticated || !result.cloudflare.selectedProject) {
+        throw appError("Cloudflare did not return a publishable Pages project.", 502);
+      }
+      updateConnectionJob(job, "connected", {
+        projectName: result.config.pages.projectName,
+        baseUrl: result.config.pages.baseUrl,
+        needsAccountChoice: false,
+        accounts: []
+      });
+    } catch (error) {
+      updateConnectionJob(job, "failed", {
+        error:
+          error?.statusCode === 504
+            ? "Cloudflare sign-in timed out. Retry when the consent window is ready."
+            : "Cloudflare connection did not complete. Review the consent window and try again."
+      });
+    }
+  }
 
   async function updatePasswordProtection(id, { enabled, password } = {}) {
     return updateReportPasswordProtection({
@@ -5142,6 +5375,14 @@ async function handleApi(
       expiresAt,
       drop: body.drop === true
     });
+    if (body.publicationContext && typeof body.publicationContext === "object") {
+      Object.assign(draft.publication, {
+        contextKey: String(body.publicationContext.contextKey || ""),
+        contextHash: String(body.publicationContext.contextHash || ""),
+        itemHash: String(body.publicationContext.itemHash || ""),
+        workspaceHash: String(body.publicationContext.workspaceHash || "")
+      });
+    }
     // An expiring or password-protected snapshot needs an edge gate built from
     // committed snapshots. Its `pending` flag keeps it inactive until both the
     // remote deploy and local finalization finish.
@@ -5229,6 +5470,17 @@ async function handleApi(
       sendJson(res, 200, { configEnabled: configStore.get().telemetry });
       return;
     }
+    if (body.command === "register_workspace") {
+      const result = await runOwnedMutation(() =>
+        registerPagecastWorkspace({
+          dataDir: store.dataDir,
+          workspaceDataDir: String(payload.workspaceDataDir || ""),
+          cwd: String(payload.cwd || "")
+        })
+      );
+      sendJson(res, 200, result);
+      return;
+    }
     if (body.command === "telemetry_set") {
       if (typeof payload.enabled !== "boolean") {
         throw appError("Telemetry enabled must be a boolean.", 400);
@@ -5310,7 +5562,25 @@ async function handleApi(
     }
     if (body.command === "publish_report") {
       const publishReport = async () => {
-        const report = await store.addPath(String(payload.path || ""));
+        const publishMode = normalizePublishMode({
+          mode: payload.mode,
+          newLink: payload.newLink === true,
+          update: payload.update
+        });
+        const publicationContext = resolvePublicationContext({
+          contextId: payload.contextId,
+          workspaceId: payload.workspaceId,
+          itemKey: payload.itemKey,
+          sourcePath: String(payload.path || ""),
+          env: {}
+        });
+        const existing = store.findPublishMatch({
+          ...publishMode,
+          contextKey: publicationContext.contextKey
+        });
+        const report = existing
+          ? await store.replaceSourceWithPath(existing.report.id, String(payload.path || ""))
+          : await store.addPath(String(payload.path || ""));
         if (typeof payload.password === "string" && payload.password.trim()) {
           await updatePasswordProtection(report.id, {
             enabled: true,
@@ -5319,13 +5589,38 @@ async function handleApi(
         } else if (payload.disableProtection === true) {
           await updatePasswordProtection(report.id, { enabled: false });
         }
-        const published = await publishSnapshot(report.id, {
-          label: payload.label,
-          expires: payload.expires
-        });
+        let published;
+        if (existing) {
+          const publication = existing.publication;
+          Object.assign(publication, {
+            contextKey: publicationContext.contextKey,
+            contextHash: publicationContext.contextHash,
+            itemHash: publicationContext.itemHash,
+            workspaceHash: publicationContext.workspaceHash
+          });
+          if (typeof payload.label === "string" && payload.label.trim()) {
+            publication.label = payload.label.trim();
+          }
+          if (payload.expires !== undefined && payload.expires !== "") {
+            publication.expiresAt = resolveExpiresAt({
+              expires: payload.expires,
+              defaultExpiry: configStore.get().defaultExpiry
+            });
+          }
+          published = await syncSnapshotPublication({ report, publication });
+        } else {
+          published = await publishSnapshot(report.id, {
+            label: payload.label,
+            expires: payload.expires,
+            publicationContext
+          });
+        }
         return {
+          action: existing ? "updated" : "created",
+          contextMatched: Boolean(existing && publishMode.mode === "upsert"),
           url: published.publication.publicUrl,
           token: published.publication.token,
+          publicationToken: published.publication.token,
           label: published.publication.label,
           projectName: configStore.get().pages.projectName,
           reportId: report.id,
@@ -5757,6 +6052,11 @@ async function handleApi(
     sendJson(res, 200, {
       admin: { ok: true, product: "pagecast", protocolVersion: 1 },
       public: { localBaseUrl: getLocalPublicBaseUrl() },
+      home: {
+        suggestedProjectName: suggestedPagecastHomeProjectName(configStore),
+        projectName: pages.accountId ? pages.projectName : "",
+        baseUrl: pages.accountId ? pages.baseUrl : ""
+      },
       operations: formatOperationsForApi(store),
       cloudflare: {
         ...credential,
@@ -5865,24 +6165,64 @@ async function handleApi(
     const accountId = normalizeAccountId(body.accountId || pages.accountId || "");
     const workerPath = path.join(PROJECT_ROOT, "feedback", "worker.js");
     let workerSource;
+    let schemaSource;
     try {
       workerSource = await fs.readFile(workerPath, "utf8");
+      schemaSource = await fs.readFile(path.join(PROJECT_ROOT, "feedback", "schema.sql"), "utf8");
     } catch {
       sendError(res, appError("Feedback Worker source not found in the package.", 500));
       return;
     }
     const existing = configStore.get().feedback;
     const statsToken = existing?.statsToken || randomBytes(24).toString("hex");
+    const visitorSecret = existing?.visitorSecret || randomBytes(32).toString("hex");
+    const reactionsEnabled = body.reactions === true;
     const dataDir = path.dirname(configStore.configPath);
     try {
       const result = await cloudflareAuth.setupFeedback({
         accountId,
         workerSource,
+        schemaSource,
         statsToken,
+        visitorSecret,
+        reactionsEnabled,
         deployDir: path.join(dataDir, "feedback-deploy")
       });
-      const config = await configStore.updateFeedback(result);
-      sendJson(res, 200, { config, feedback: config.feedback });
+      const config = await configStore.updateFeedback({
+        ...result,
+        analyticsEnabled: true,
+        reactionsEnabled
+      });
+      const migrationPublications = store.list().flatMap((formatted) => {
+        const report = store.get(formatted.id);
+        return store.activeSnapshotPublications(report).map((publication) => ({
+          publicationId: publication.token,
+          slug: publication.slug || publication.token
+        }));
+      });
+      let migration = { migrated: 0 };
+      try {
+        const migrationResponse = await serviceFetch(`${result.url}/api/v1/analytics/migrate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: statsToken, publications: migrationPublications })
+        });
+        if (migrationResponse.ok) {
+          migration = await migrationResponse.json();
+        }
+      } catch {
+        // KV history stays intact and the compatibility stats endpoint remains
+        // available; migration can be retried by running setup again.
+      }
+      const currentPages = configStore.get().pages;
+      const instrumentation = await instrumentActiveHomePublications({
+        store,
+        configStore,
+        pagesPublisher,
+        deployQueue,
+        currentPages
+      });
+      sendJson(res, 200, { config, feedback: config.feedback, instrumentation, migration });
     } catch (error) {
       sendError(res, error);
     }
@@ -5898,11 +6238,13 @@ async function handleApi(
       return;
     }
     const slug = url.searchParams.get("slug") || "";
+    const publicationId = url.searchParams.get("publicationId") || "";
     const statsUrl =
       `${feedback.url}/api/v1/stats?slug=${encodeURIComponent(slug)}` +
+      `&publicationId=${encodeURIComponent(publicationId || slug)}` +
       `&token=${encodeURIComponent(feedback.statsToken)}`;
     try {
-      const response = await fetch(statsUrl);
+      const response = await serviceFetch(statsUrl);
       const data = await response.json().catch(() => ({}));
       sendJson(res, 200, { ok: response.ok, configured: true, ...data });
     } catch {
@@ -5911,10 +6253,84 @@ async function handleApi(
     return;
   }
 
+  if (
+    (url.pathname === "/api/analytics/summary" || url.pathname === "/api/analytics/events") &&
+    req.method === "GET"
+  ) {
+    const feedback = configStore.get().feedback;
+    if (!feedback?.url || feedback.analyticsEnabled === false) {
+      sendJson(res, 200, url.pathname.endsWith("summary")
+        ? { ok: true, configured: false, summaries: [] }
+        : { ok: true, configured: false, events: [], nextCursor: "" });
+      return;
+    }
+    const endpoint = url.pathname.endsWith("summary") ? "summary" : "events";
+    const params = new URLSearchParams({ token: feedback.statsToken });
+    for (const name of ["publicationId", "cursor", "limit"]) {
+      if (url.searchParams.has(name)) params.set(name, url.searchParams.get(name) || "");
+    }
+    try {
+      const response = await serviceFetch(`${feedback.url}/api/v1/analytics/${endpoint}?${params}`);
+      const data = await response.json().catch(() => ({}));
+      sendJson(res, response.ok ? 200 : 502, {
+        configured: true,
+        ...publicAnalyticsPayload(endpoint, data)
+      });
+    } catch {
+      sendError(res, appError("Could not reach the analytics service.", 502));
+    }
+    return;
+  }
+
   if (url.pathname === "/api/cloudflare/login" && req.method === "POST") {
     await readJsonBody(req);
     await cloudflareAuth.login();
     sendJson(res, 200, await detectAndPersistCloudflareProjects({ cloudflareAuth, configStore }));
+    return;
+  }
+
+  if (url.pathname === "/api/cloudflare/connect-jobs" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    const projectName = normalizePagesProjectName(
+      body.projectName || suggestedPagecastHomeProjectName(configStore)
+    );
+    const accountId = body.accountId ? normalizeAccountId(body.accountId) : "";
+    const timestamp = nowIso();
+    const job = {
+      jobId: randomBytes(16).toString("hex"),
+      status: "preparing_wrangler",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      projectName,
+      baseUrl: pagesBaseUrl(projectName),
+      accountId,
+      authorizationUrl: "",
+      needsAccountChoice: false,
+      accounts: [],
+      error: ""
+    };
+    connectionJobs.set(job.jobId, job);
+    while (connectionJobs.size > 20) {
+      connectionJobs.delete(connectionJobs.keys().next().value);
+    }
+    sendJson(res, 202, publicConnectionJob(job));
+    setImmediate(() => {
+      const execute = () => runConnectionJob(job);
+      const running = mutationQueue ? mutationQueue.enqueue(execute) : execute();
+      void running.catch(() => {});
+    });
+    return;
+  }
+
+  const connectJobMatch = /^\/api\/cloudflare\/connect-jobs\/([a-f0-9]{32})$/.exec(
+    url.pathname
+  );
+  if (connectJobMatch && req.method === "GET") {
+    const job = connectionJobs.get(connectJobMatch[1]);
+    if (!job) {
+      throw appError("Cloudflare connection job was not found.", 404);
+    }
+    sendJson(res, 200, publicConnectionJob(job));
     return;
   }
 
@@ -6804,6 +7220,7 @@ export async function startServers({
         deployQueue,
         mutationQueue,
         watchManager,
+        serviceFetch: fetchImpl,
         commandCapability,
         bindHost: urlHost,
         allowedHosts: [displayHostname]
@@ -7191,23 +7608,33 @@ async function setupCloudflareFeedbackOneShot({
 
   const workerPath = path.join(PROJECT_ROOT, "feedback", "worker.js");
   let workerSource;
+  let schemaSource;
   try {
     workerSource = await fs.readFile(workerPath, "utf8");
+    schemaSource = await fs.readFile(path.join(PROJECT_ROOT, "feedback", "schema.sql"), "utf8");
   } catch {
     throw appError("Feedback Worker source not found in the package.", 500);
   }
 
   const existing = configStore.get().feedback;
   const statsToken = existing?.statsToken || randomBytes(24).toString("hex");
+  const visitorSecret = existing?.visitorSecret || randomBytes(32).toString("hex");
 
   const result = await cloudflareAuth.setupFeedback({
     accountId: resolvedAccountId,
     workerSource,
+    schemaSource,
     statsToken,
+    visitorSecret,
+    reactionsEnabled: false,
     deployDir: path.join(dataDir, "feedback-deploy")
   });
 
-  const config = await configStore.updateFeedback(result);
+  const config = await configStore.updateFeedback({
+    ...result,
+    analyticsEnabled: true,
+    reactionsEnabled: false
+  });
   return { config, feedback: config.feedback };
 }
 
@@ -7685,6 +8112,13 @@ async function deployCloudflarePagesSiteOneShot({
 // caller can turn it into clear guidance instead of a stack trace.
 export async function publishReportSnapshot(options = {}) {
   const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  const callerEnv = options.env || process.env;
+  const routedContextId =
+    options.contextId ||
+    callerEnv.PAGECAST_CONTEXT_ID ||
+    callerEnv.CODEX_THREAD_ID ||
+    callerEnv.CLAUDE_SESSION_ID ||
+    "";
   if (options.routeToDaemon !== false) {
     const routed = await tryInvokeLiveCommand(
       dataDir,
@@ -7694,7 +8128,13 @@ export async function publishReportSnapshot(options = {}) {
         label: options.label,
         password: options.password,
         disableProtection: options.disableProtection === true,
-        expires: options.expires
+        expires: options.expires,
+        contextId: routedContextId,
+        workspaceId: options.workspaceId,
+        itemKey: options.itemKey,
+        mode: options.mode,
+        newLink: options.newLink === true,
+        update: options.update
       },
       { fetchImpl: options.commandFetchImpl || fetch }
     );
@@ -7717,6 +8157,14 @@ async function publishReportSnapshotOneShot({
   password,
   disableProtection = false,
   expires,
+  contextId = "",
+  workspaceId = "",
+  itemKey = "",
+  mode = "",
+  newLink = false,
+  update = "",
+  nonInteractive = false,
+  env = process.env,
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
   pagesDeploySpawnImpl = spawn,
@@ -7740,12 +8188,19 @@ async function publishReportSnapshotOneShot({
 
   const credential = cloudflareCredentialStatus();
   if (!credential.tokenConfigured) {
-    const session = await cloudflareAuth.refreshSession();
+    let session = await cloudflareAuth.refreshSession();
     if (!session.loggedIn) {
-      throw appError(
-        "Not signed in to Cloudflare. Run `npx pagecast` once, click Connect Cloudflare, then retry.",
-        401
-      );
+      if (nonInteractive || String(env.CI || "").trim()) {
+        throw appError(
+          "Not signed in to Cloudflare. Run `npx pagecast` interactively to connect, then retry.",
+          401
+        );
+      }
+      await cloudflareAuth.login(CLOUDFLARE_OAUTH_SCOPES);
+      session = await cloudflareAuth.refreshSession();
+      if (!session.loggedIn) {
+        throw appError("Cloudflare sign-in did not complete. Retry the publish when ready.", 401);
+      }
     }
   }
 
@@ -7757,7 +8212,21 @@ async function publishReportSnapshotOneShot({
     );
   }
 
-  const report = await store.addPath(reportPath);
+  const publishMode = normalizePublishMode({ mode, newLink, update });
+  const publicationContext = resolvePublicationContext({
+    contextId,
+    workspaceId,
+    itemKey,
+    sourcePath: reportPath,
+    env
+  });
+  const existing = store.findPublishMatch({
+    ...publishMode,
+    contextKey: publicationContext.contextKey
+  });
+  const report = existing
+    ? await store.replaceSourceWithPath(existing.report.id, reportPath)
+    : await store.addPath(reportPath);
   // --password sets/replaces protection; --no-password removes it. Otherwise any
   // existing protection on a reused report is left untouched.
   if (typeof password === "string" && password.trim()) {
@@ -7781,10 +8250,83 @@ async function publishReportSnapshotOneShot({
     });
   }
 
+  const resolvedExpiresAt =
+    existing && (expires === undefined || expires === "")
+      ? existing.publication.expiresAt || null
+      : resolveExpiresAt({ expires, defaultExpiry: configStore.get().defaultExpiry });
+
+  if (existing) {
+    const publication = existing.publication;
+    publication.contextKey = publicationContext.contextKey;
+    publication.contextHash = publicationContext.contextHash;
+    publication.itemHash = publicationContext.itemHash;
+    publication.workspaceHash = publicationContext.workspaceHash;
+    if (typeof label === "string" && label.trim()) {
+      publication.label = label.trim();
+    }
+    publication.expiresAt = resolvedExpiresAt;
+    const pagesConfig = pagesConfigForPublication(publication, configStore.get().pages);
+    rememberPublicationPagesTarget(publication, pagesConfig);
+    await store.beginOperations([
+      {
+        type: "sync",
+        token: publication.token,
+        slug: publication.slug || publication.token,
+        projectRef: pagesConfig,
+        reportId: report.id
+      }
+    ]);
+    try {
+      publication.publicUrl = await pagesPublisher.syncPublication({
+        report: store.get(report.id),
+        publication,
+        pagesConfig
+      });
+      await persistActualPublicationOrigin(publication, configStore);
+      await store.syncSnapshot(publication.token);
+      await store.clearOperation("sync", publication.token);
+    } catch (error) {
+      await store
+        .recordOperationFailure({
+          type: "sync",
+          token: publication.token,
+          slug: publication.slug || publication.token,
+          projectRef: pagesConfig,
+          error
+        })
+        .catch(() => {});
+      throw error;
+    }
+    const updatedReport = store.get(report.id);
+    return {
+      action: "updated",
+      contextMatched: publishMode.mode === "upsert",
+      url: publication.publicUrl,
+      token: publication.token,
+      publicationToken: publication.token,
+      label: publication.label,
+      projectName: pagesConfig.projectName,
+      reportId: report.id,
+      passwordProtected: updatedReport.passwordProtected === true,
+      linkKind: classifyLinkKind({
+        slug: publication.slug || publication.token,
+        drop: publication.drop === true,
+        passwordProtected: updatedReport.passwordProtected === true
+      }),
+      expiresAt: publication.expiresAt || null
+    };
+  }
+
   const draft = store.draftPublication(report.id, {
     label,
     kind: "snapshot",
-    expiresAt: resolveExpiresAt({ expires, defaultExpiry: configStore.get().defaultExpiry })
+    expiresAt: resolvedExpiresAt
+  });
+  Object.assign(draft.publication, {
+    contextKey: publicationContext.contextKey,
+    contextHash: publicationContext.contextHash,
+    itemHash: publicationContext.itemHash,
+    workspaceHash: publicationContext.workspaceHash
   });
   const gated = Boolean(store.get(report.id).passwordProtected || draft.publication.expiresAt);
   const pagesConfig = configStore.get().pages;
@@ -7840,8 +8382,11 @@ async function publishReportSnapshotOneShot({
   }
 
   return {
+    action: "created",
+    contextMatched: false,
     url: draft.publication.publicUrl,
     token: draft.publication.token,
+    publicationToken: draft.publication.token,
     label: draft.publication.label,
     projectName: configStore.get().pages.projectName,
     reportId: report.id,

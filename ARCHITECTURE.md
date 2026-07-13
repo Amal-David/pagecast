@@ -28,13 +28,16 @@ Consequences:
 
 ## Core invariants
 
-### One workspace, one writer
+### One Home, one writer
 
-The live server owns an exclusive workspace lease. CLI, extension, goal, and
-MCP mutations route through its authenticated local command service. Without a
-live owner, a one-shot mutation must acquire the same lease. State and config
-files use atomic replacement, private permissions, ordered saves, and loud
-corruption failures.
+The user-level `~/.pagecast/home/` owns the managed Cloudflare target,
+publication registry, analytics configuration, operation journal, and exclusive
+lease. Workspace `.pagecast/` state contains only workspace/source identity and
+Home mappings. CLI, extension, goal, and MCP mutations route through the Home
+owner's authenticated local command service. Without a live owner, a one-shot
+mutation must acquire the same lease. An explicit `--data-dir` is a separate
+profile. State and config files use atomic replacement, private permissions,
+ordered saves, and loud corruption failures.
 
 Compound managed-state mutations own one serialized transaction. Cloudflare and
 the local filesystem cannot participate in one atomic commit, so these managed
@@ -73,8 +76,17 @@ retryable.
 
 Dashboard, CLI, MCP, extension, goal, and auto-sync calls are adapters over the
 same service contracts. They must agree on target selection, expiry, link kind,
-rollback, and response fields. A running daemon may change transport, but must
-not change behavior or JSON shape.
+context-aware publication identity, rollback, and response fields. A running
+daemon may change transport, but must not change behavior or JSON shape.
+
+### Analytics privacy boundary
+
+Access events are keyed by immutable publication token, not slug. D1 owns
+append-only detailed events and atomic aggregate totals; old KV aggregates are
+migration input and reactions storage only. The Worker HMACs a transient
+connecting address with a per-Home secret before constructing an event and
+never persists or returns the raw value. Detailed events expire after 30 days;
+aggregates remain. Local APIs expose an allowlisted event shape only.
 
 ### Stable package boundary
 

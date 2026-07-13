@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -87,7 +87,7 @@ function normalizeContentFileName({ filename, format }) {
   return `${name || "pagecast-mcp-content"}${extension}`;
 }
 
-async function writeMcpContentFile({ dataDir, content, filename, format }) {
+async function writeMcpContentFile({ dataDir, content, filename, format, itemKey = "" }) {
   if (typeof content !== "string" || !content.trim()) {
     throw appError("`content` is required.", 400);
   }
@@ -95,7 +95,12 @@ async function writeMcpContentFile({ dataDir, content, filename, format }) {
     throw appError("Content is too large for MCP publishing.", 413);
   }
   const safeName = normalizeContentFileName({ filename, format });
-  const contentDir = path.join(dataDir, "mcp-content", `${Date.now()}-${randomUUID()}`);
+  const itemDigest = itemKey
+    ? createHash("sha256").update(String(itemKey), "utf8").digest("hex")
+    : "";
+  const contentDir = itemDigest
+    ? path.join(dataDir, "mcp-content", "items", itemDigest)
+    : path.join(dataDir, "mcp-content", `${Date.now()}-${randomUUID()}`);
   await fs.mkdir(contentDir, { recursive: true });
   const filePath = path.join(contentDir, safeName);
   await fs.writeFile(filePath, content, "utf8");
@@ -148,13 +153,34 @@ function summarizeReport(report) {
   };
 }
 
-async function publishIsolatedFile({ dataDir, filePath, args, publishFile, writeContentFile }) {
+function publishContextOptions(args, { workspaceId, itemKey, forceNew = false } = {}) {
+  const mode = optionalString(args, "mode") || "upsert";
+  const publication = optionalString(args, "publication");
+  return {
+    contextId: optionalString(args, "contextId"),
+    workspaceId,
+    itemKey,
+    mode: forceNew ? "new" : mode,
+    newLink: forceNew || mode === "new",
+    update: mode === "update" ? publication : ""
+  };
+}
+
+async function publishIsolatedFile({
+  dataDir,
+  workspaceId,
+  filePath,
+  args,
+  publishFile,
+  writeContentFile
+}) {
   normalizeContentFileName({ filename: path.basename(filePath) });
   const content = await fs.readFile(filePath, "utf8");
   const isolatedPath = await writeContentFile({
     dataDir,
     content,
-    filename: path.basename(filePath)
+    filename: path.basename(filePath),
+    itemKey: optionalString(args, "itemKey") || path.resolve(filePath)
   });
   const result = await publishFile({
     path: isolatedPath,
@@ -162,6 +188,10 @@ async function publishIsolatedFile({ dataDir, filePath, args, publishFile, write
     password: optionalString(args, "password"),
     disableProtection: optionalBoolean(args, "noPassword"),
     expires: optionalString(args, "expires"),
+    ...publishContextOptions(args, {
+      workspaceId,
+      itemKey: optionalString(args, "itemKey") || path.resolve(filePath)
+    }),
     dataDir
   });
   return { ...result, sourcePath: isolatedPath, includedAssets: false };
@@ -221,7 +251,11 @@ function toolDefinitions() {
           confirmAssets: {
             type: "boolean",
             description: "Must be true with includeAssets because sibling files may become public."
-          }
+          },
+          mode: { type: "string", enum: ["upsert", "new", "update"], description: "Update the matching agent-context link, create a new link, or update a known publication." },
+          contextId: { type: "string", description: "Optional agent session or conversation identifier; Pagecast stores only its hash." },
+          publication: { type: "string", description: "Existing URL, slug, or token required by update mode." },
+          itemKey: { type: "string", description: "Stable logical item key; defaults to the absolute source path." }
         }
       },
       annotations: {
@@ -246,7 +280,11 @@ function toolDefinitions() {
           label: { type: "string", description: "Optional Pagecast display label." },
           expires: { type: "string", description: "Expiry such as 7d, 12h, or never." },
           password: { type: "string", description: "Optional password for edge protection." },
-          noPassword: { type: "boolean", description: "Remove existing password protection for this content filename." }
+          noPassword: { type: "boolean", description: "Remove existing password protection for this content filename." },
+          mode: { type: "string", enum: ["upsert", "new", "update"], description: "Update the matching agent-context link, create a new link, or update a known publication." },
+          contextId: { type: "string", description: "Optional agent session or conversation identifier; Pagecast stores only its hash." },
+          publication: { type: "string", description: "Existing URL, slug, or token required by update mode." },
+          itemKey: { type: "string", description: "Stable logical item key for deterministic content upserts." }
         }
       },
       annotations: {
@@ -281,6 +319,7 @@ function toolDefinitions() {
 
 export function createPagecastMcpServer({
   dataDir = path.join(process.cwd(), ".pagecast"),
+  workspaceId = dataDir,
   version = "0.0.0",
   getStatus = getCloudflarePagesStatus,
   publishFile = publishReportSnapshot,
@@ -329,6 +368,7 @@ export function createPagecastMcpServer({
         return textResult(
           await publishIsolatedFile({
             dataDir,
+            workspaceId,
             filePath,
             args,
             publishFile,
@@ -342,6 +382,10 @@ export function createPagecastMcpServer({
         password: optionalString(args, "password"),
         disableProtection: optionalBoolean(args, "noPassword"),
         expires: optionalString(args, "expires"),
+        ...publishContextOptions(args, {
+          workspaceId,
+          itemKey: optionalString(args, "itemKey") || path.resolve(filePath)
+        }),
         dataDir
       });
       return textResult({ ...result, includedAssets: true });
@@ -354,14 +398,19 @@ export function createPagecastMcpServer({
         dataDir,
         content: requiredContent(args),
         filename: optionalString(args, "filename"),
-        format: optionalString(args, "format")
+        format: optionalString(args, "format"),
+        itemKey: optionalString(args, "itemKey")
       });
+      const itemKey = optionalString(args, "itemKey");
+      const requestedMode = optionalString(args, "mode") || "upsert";
+      const forceNew = requestedMode === "upsert" && !itemKey;
       const result = await publishFile({
         path: filePath,
         label: optionalString(args, "label") || path.basename(filePath),
         password: optionalString(args, "password"),
         disableProtection: optionalBoolean(args, "noPassword"),
         expires: optionalString(args, "expires"),
+        ...publishContextOptions(args, { workspaceId, itemKey, forceNew }),
         dataDir
       });
       return textResult({ ...result, sourcePath: filePath });

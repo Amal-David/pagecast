@@ -52,8 +52,9 @@ import { CloudflareConnect } from "@/components/cloudflare-connect";
 import { DeployHistory } from "@/components/deploy-history";
 import { FeedbackCard } from "@/components/feedback-card";
 import { DefaultExpiryCard } from "@/components/default-expiry-card";
-import { FeedbackStatsPanel } from "@/components/feedback-stats";
+import { ActivityPanel, GlobalActivity } from "@/components/activity-panel";
 import { AddReport } from "@/components/add-report";
+import { PagecastHomeOnboarding } from "@/components/pagecast-home-onboarding";
 import { PublicationRow } from "@/components/publication-row";
 import { OperationJournal } from "@/components/operation-journal";
 import { PreviewDialog } from "@/components/preview-dialog";
@@ -90,7 +91,7 @@ import { cn } from "@/lib/utils";
 import { copyToClipboard, relativeTime } from "@/lib/format";
 import type { CloudflareProject, CloudflareStatus, FeedbackConfig, Report } from "@/lib/types";
 
-type ActiveView = "pages" | "settings";
+type ActiveView = "pages" | "activity" | "settings";
 
 interface ActivityItem extends ActivityEventDetail {
   id: string;
@@ -370,6 +371,8 @@ export function App() {
   const feedback = status.data?.config?.feedback ?? null;
   const feedbackEnabled = Boolean(feedback?.url);
   const cloudflareSyncEnabled = status.data?.config?.cloudflareSyncEnabled !== false;
+  const showOnboarding =
+    activeView === "pages" && !connected && reportItems.length === 0 && !reports.isLoading;
 
   useEffect(() => {
     syncPendingRef.current = syncCloudflare.isPending;
@@ -407,6 +410,7 @@ export function App() {
             void operations.refetch();
           }}
           onSync={() => syncCloudflare.mutate({})}
+          onOpenActivity={() => setActiveView("activity")}
           onOpenSettings={goToSettings}
         />
 
@@ -432,12 +436,17 @@ export function App() {
           onRetry={(operation) => retryOperation.mutate(operation)}
         />
 
-        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[52px_320px_minmax(0,1fr)]">
-          <AppRail activeView={activeView} onPages={() => setActiveView("pages")} onSettings={goToSettings} />
-          {activeView === "settings" ? (
-            <SettingsSidebar />
-          ) : (
-            <PageSidebar
+        <div className={cn(
+          "grid min-h-0 flex-1 grid-cols-1",
+          !showOnboarding && "lg:grid-cols-[52px_320px_minmax(0,1fr)]"
+        )}>
+          {!showOnboarding ? (
+            <>
+          <AppRail activeView={activeView} onPages={() => setActiveView("pages")} onActivity={() => setActiveView("activity")} onSettings={goToSettings} />
+              {activeView === "settings" ? (
+                <SettingsSidebar />
+              ) : (
+                <PageSidebar
               reports={reportItems}
               selectedReportId={selectedReportId}
               activeView={activeView}
@@ -449,11 +458,15 @@ export function App() {
               onOpenSettings={() => setActiveView("settings")}
               onRequestDelete={setPendingDelete}
               onRequestRevokeAll={setPendingRevoke}
-            />
-          )}
+                />
+              )}
+            </>
+          ) : null}
 
           <main className="min-w-0 overflow-hidden bg-muted/20">
-            {activeView === "settings" ? (
+            {activeView === "activity" ? (
+              <GlobalActivity reports={reportItems} enabled={feedbackEnabled} />
+            ) : activeView === "settings" ? (
                 <motion.div
                   key="settings"
                   initial={{ opacity: 0, y: 8 }}
@@ -481,7 +494,11 @@ export function App() {
                   transition={{ duration: 0.18 }}
                   className="mx-auto flex max-w-[1180px] flex-col gap-5 px-4 py-4 sm:px-5 lg:px-6"
                 >
-                  <PageWorkspace
+                  {showOnboarding ? (
+                    <PagecastHomeOnboarding
+                      suggestedProjectName={status.data?.home?.suggestedProjectName || "pagecast-home"}
+                    />
+                  ) : <PageWorkspace
                     report={selectedReport}
                     cloudflareProjectPreview={cloudflareProjectPreview}
                     isLoading={reports.isLoading}
@@ -514,7 +531,7 @@ export function App() {
                     onConnect={goToSettings}
                     onRequestDelete={setPendingDelete}
                     onRequestRevokeAll={setPendingRevoke}
-                  />
+                  />}
                 </motion.div>
               )}
           </main>
@@ -618,6 +635,7 @@ function TopBar({
   syncDisabled,
   onRefresh,
   onSync,
+  onOpenActivity,
   onOpenSettings
 }: {
   connected: boolean;
@@ -628,6 +646,7 @@ function TopBar({
   syncDisabled: boolean;
   onRefresh: () => void;
   onSync: () => void;
+  onOpenActivity: () => void;
   onOpenSettings: () => void;
 }) {
   return (
@@ -693,6 +712,10 @@ function TopBar({
           >
             <RefreshCw className={cn("h-4 w-4", isRefreshing && "animate-spin")} />
           </Button>
+          <Button size="sm" variant="outline" onClick={onOpenActivity}>
+            <Activity className="h-4 w-4" />
+            Activity
+          </Button>
           <Button size="sm" variant="outline" onClick={onOpenSettings}>
             <Settings className="h-4 w-4" />
             Settings
@@ -706,10 +729,12 @@ function TopBar({
 function AppRail({
   activeView,
   onPages,
+  onActivity,
   onSettings
 }: {
   activeView: ActiveView;
   onPages: () => void;
+  onActivity: () => void;
   onSettings: () => void;
 }) {
   return (
@@ -728,6 +753,20 @@ function AppRail({
             </Button>
           </TooltipTrigger>
           <TooltipContent side="right">Pages</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              size="icon"
+              variant={activeView === "activity" ? "secondary" : "ghost"}
+              className="h-9 w-9"
+              onClick={onActivity}
+              aria-label="Activity"
+            >
+              <Activity className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="right">Activity</TooltipContent>
         </Tooltip>
       </div>
       <Tooltip>
@@ -1325,6 +1364,7 @@ function PageWorkspace({
                   <PublicationRow
                     key={publication.token}
                     publication={publication}
+                    analyticsEnabled={feedbackEnabled}
                   />
                 ))}
               </div>
@@ -1334,6 +1374,13 @@ function PageWorkspace({
               </div>
             )}
           </section>
+
+          {hasActiveLinks ? (
+            <ActivityPanel
+              publications={activePublications}
+              enabled={feedbackEnabled}
+            />
+          ) : null}
 
           <section className="rounded-lg border bg-background">
             <div className="border-b px-4 py-3">
@@ -1491,12 +1538,6 @@ function PageWorkspace({
             </section>
           ) : null}
 
-          {feedbackEnabled && hasActiveLinks ? (
-            <FeedbackStatsPanel
-              slug={latestSnapshot?.slug || activePublications[0]?.slug || null}
-              enabled={feedbackEnabled}
-            />
-          ) : null}
         </div>
       </div>
     </div>

@@ -24,6 +24,8 @@ const FORBIDDEN_DTO_KEYS = new Set([
   "adminToken",
   "authCookieSecret",
   "statsToken",
+  "visitorSecret",
+  "d1Id",
   "syncSecret",
   "telemetryId"
 ]);
@@ -53,6 +55,12 @@ function fakeWranglerSpawn(command, args) {
           title: "pagecast-feedback-store"
         }
       ]);
+    } else if (line.includes("d1 list")) {
+      output = JSON.stringify([
+        { name: "pagecast-feedback-analytics", uuid: "11111111-2222-4333-8444-555555555555" }
+      ]);
+    } else if (line.includes("d1 execute")) {
+      output = "ok";
     } else if (line.includes("deploy")) {
       output = "Uploaded\nhttps://pagecast-feedback.example.workers.dev";
     }
@@ -133,8 +141,10 @@ async function seedSecrets(dataDir) {
   await configStore.updateFeedback({
     url: "https://pagecast-feedback.example.workers.dev",
     statsToken: "seed-feedback-stats-token",
+    visitorSecret: "seed-feedback-visitor-secret",
     workerName: "pagecast-feedback",
-    kvId: "11111111111111111111111111111111"
+    kvId: "11111111111111111111111111111111",
+    d1Id: "11111111-2222-4333-8444-555555555555"
   });
   const telemetryId = await configStore.ensureTelemetryId();
   const internal = configStore.get();

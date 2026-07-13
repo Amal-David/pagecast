@@ -7,8 +7,17 @@ version: 0.5.0
 # Publish with Pagecast
 
 Pagecast turns a local **HTML or Markdown** file (a report, plan, doc, or
-dashboard) into a shareable public URL backed by the user's Cloudflare Pages
-project. Use this skill to offer that at the right moment, then do it on a yes.
+dashboard) into a shareable public URL in the user's Pagecast Home. Execute an
+explicit Pagecast request immediately; offer once when publishing would be
+useful but the user did not request it.
+
+## Consent and intent
+
+- “Publish this as a Pagecast”, “Pagecast this”, or equivalent is sufficient
+  consent. Run the publish command immediately and return the URL; do not ask
+  again.
+- A proactive suggestion still asks once before publishing.
+- If the user asks only for the command, provide the command and do not run it.
 
 Claude Code Artifacts are also a valid publishing path. Do **not** disable or
 block Artifacts. When the user explicitly asks for a Claude Artifact, `claude.ai`
@@ -61,7 +70,9 @@ When the user has not specified a publishing path, ask:
 > re-sync, revoke, password-protect, or expire.
 > 3. Don't publish."
 
-Accept the number or the name. Only proceed after an explicit choice. If they
+Accept the number or the name. Only proceed after an explicit choice. An
+explicit request for Pagecast already selects Pagecast and provides publishing
+consent. If they
 choose Pagecast, run the Pagecast CLI below. If they choose Claude Code Artifact,
 use the Claude Artifact publishing flow and do not run Pagecast. Publishing may
 make content reachable outside the current chat, especially with Pagecast —
@@ -83,6 +94,11 @@ opaque entropy. Anyone with the URL can view it; unlisted does not mean private.
 The user can rename a link, add password protection, or make a short, shareable
 "drop" link from the `npx pagecast` app. Existing word-only links remain valid.
 
+Managed links live in one user-level Home at `~/.pagecast/home/`, under
+`/p/<slug>/`. The same item in the same agent context updates the existing URL;
+a new item or context creates a new URL. Pagecast stores only a local hash of
+the agent context identifier.
+
 ### Publish options
 
 Add any of these to a `publish` command:
@@ -94,6 +110,11 @@ Add any of these to a `publish` command:
   every file of a multi-file report is covered. `--no-password` removes protection.
   The result JSON reports `passwordProtected: true`.
 - `--label "<name>"` — set the page's display name in the Pagecast app.
+- `--context-id "<id>"` — explicitly select the local agent context.
+- `--new-link` — force a fresh URL.
+- `--update "<url|slug|token>"` — update a known publication.
+- `--non-interactive` — never open browser authentication; return a structured
+  authentication-required result instead.
 
 ```sh
 npx pagecast publish "/absolute/path/to/report.html" --expires 7d --password "hunter2" --json
@@ -136,8 +157,8 @@ On an explicit **yes**:
 2. Run `npx pagecast goal publish "<abs path>/pagecast-goal.md" --json` and give
    the user the returned `url`.
 3. **After each meaningful step**, rewrite `pagecast-goal.md` and re-run the
-   **same** `npx pagecast goal publish … --json` — it updates the **same URL** in
-   place (do NOT use plain `publish`, which mints a new link each time).
+   **same** `npx pagecast goal publish … --json` — it guarantees the dedicated
+   goal URL and keeps goal lifecycle separate from normal context upserts.
 4. When the goal is met, do a final update; optionally `npx pagecast goal stop`.
 
 There is one goal page per workspace. If a command reports `recreated: true`, the
@@ -172,18 +193,17 @@ replacing that managed site is intentional.
 
 Parse the JSON on stdout:
 
-- **Success** → `{ "ok": true, "url": "https://<actual-origin>.pages.dev/p/<slug>/", ... }`
-  - Give the user the `url`. Offer to drop it into a PR/Slack message, and
+- **Success** → `{ "ok": true, "action": "created" | "updated", "publicationToken": "...", "contextMatched": true | false, "url": "https://<home>.pages.dev/p/<slug>/", ... }`
+  - Give the user the `url`, say whether Pagecast created or updated it, offer to drop it into a PR/Slack message, and
     mention they can rename the URL, re-sync, or revoke it from `npx pagecast`.
 - **Not signed in** → `{ "ok": false, "statusCode": 401, ... }`
-  - This is the one-time setup. Tell the user to run
-    **`npx pagecast pages setup`** once, or run **`npx pagecast`** and click
-    **Connect Cloudflare**, then offer to retry. After that, publishing is
-    headless — a plain "yes" is enough every time.
+  - Interactive publishing normally starts Wrangler's browser authorization and
+    resumes automatically. This result is expected only for CI,
+    `--non-interactive`, rejection, or timeout; relay it without sending the user
+    to Settings.
 - **Multiple accounts** → `{ "ok": false, "statusCode": 409, ... }`
-  - Tell the user to run `npx pagecast pages setup --account <account-id>` once,
-    or run `npx pagecast` to pick which Cloudflare account to publish from, then
-    retry.
+  - Open `npx pagecast`, choose the Home account in the main onboarding canvas,
+    then retry. Settings remains available for later account switching.
 - **Any other error** → relay `error` concisely and offer to retry.
 
 ## Cloudflare Pages commands
@@ -204,12 +224,11 @@ If the user does not specify a branch, omit `--branch`; Pagecast deploys to
 ## Notes
 
 - Always pass an **absolute** path (resolve relative paths against the cwd first).
-- The first publish auto-creates the user's Pages project — no manual setup beyond
-  the one-time Connect Cloudflare login.
+- The first interactive publish starts Wrangler login, creates the Home, and
+  resumes automatically.
 - Use `npx pagecast publish site` or `npx pagecast pages deploy` for direct
   static-folder deploys to a named Pages project.
 - Use `npx pagecast` for source-folder build settings, URL renaming, re-sync,
   and revoke controls.
-- To update a page **in place at the same URL**, the user can re-sync from the
-  Pagecast app; re-running `publish` creates a new link. Old links keep working
-  until revoked.
+- Re-running `publish` for the same item and agent context updates the same URL.
+  Use `--new-link` only when the user asks for another URL.

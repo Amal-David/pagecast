@@ -1,4 +1,4 @@
-import { Check, Loader2, MessageCircleHeart } from "lucide-react";
+import { BarChart3, Check, Loader2 } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -18,19 +18,19 @@ interface FeedbackCardProps {
 
 export function FeedbackCard({ connected, feedback }: FeedbackCardProps) {
   const setup = useFeedbackSetup();
-  const enabled = Boolean(feedback?.url);
+  const enabled = Boolean(feedback?.url && feedback.analyticsEnabled !== false);
+  const reactionsEnabled = feedback?.reactionsEnabled === true;
 
   return (
     <Card>
       <CardHeader className="flex flex-row items-start justify-between space-y-0">
         <div className="space-y-1.5">
           <CardTitle className="flex items-center gap-2 text-base">
-            <MessageCircleHeart className="h-4 w-4" />
-            Reactions &amp; analytics
+            <BarChart3 className="h-4 w-4" />
+            Private analytics
           </CardTitle>
           <CardDescription>
-            Let viewers react, and see views by country, referrer, and device —
-            on your own free Cloudflare account, cookieless.
+            See cookieless page activity in your own Cloudflare D1 database.
           </CardDescription>
         </div>
         {enabled ? (
@@ -44,29 +44,35 @@ export function FeedbackCard({ connected, feedback }: FeedbackCardProps) {
       </CardHeader>
       <CardContent className="space-y-3">
         {enabled ? (
-          <p className="text-sm text-muted-foreground">
-            A reactions bar and view tracking now attach to every page you
-            publish. Stats appear on each page in the workspace.
+          <><p className="text-sm text-muted-foreground">
+            View tracking is active on every Home page. Detailed events are kept
+            for 30 days; aggregate totals remain. Raw IP addresses are never stored.
           </p>
+          {!reactionsEnabled ? (
+            <Button variant="outline" className="w-full" disabled={setup.isPending} onClick={() => setup.mutate({ reactions: true })}>
+              {setup.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              Enable optional reactions bar
+            </Button>
+          ) : null}</>
         ) : (
           <>
             <p className="text-sm text-muted-foreground">
               {connected
-                ? "One-time setup deploys a tiny Worker + KV store to your Cloudflare account. New publishes include the widget automatically."
-                : "Connect Cloudflare first — feedback is deployed to your own account."}
+                ? "One-time setup deploys a tiny Worker + D1 database to your Cloudflare account and instruments existing Home pages. Reactions remain off."
+                : "Connect Cloudflare first — analytics is deployed to your own account."}
             </p>
             <Button
               className="w-full"
               disabled={!connected || setup.isPending}
-              onClick={() => setup.mutate(undefined)}
+              onClick={() => setup.mutate({ reactions: false })}
             >
               {setup.isPending ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  Deploying feedback Worker…
+                  Deploying analytics…
                 </>
               ) : (
-                "Enable reactions & analytics"
+                "Enable analytics"
               )}
             </Button>
             {setup.isError ? (
