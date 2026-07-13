@@ -123,6 +123,28 @@ export interface CloudflareStatus {
   requiresAdoption: boolean;
 }
 
+export type CloudflareConnectionJobStatus =
+  | "preparing_wrangler"
+  | "awaiting_consent"
+  | "discovering_accounts"
+  | "creating_home"
+  | "connected"
+  | "failed";
+
+export interface CloudflareConnectionJob {
+  jobId: string;
+  status: CloudflareConnectionJobStatus;
+  createdAt: string;
+  updatedAt: string;
+  authorizationUrl: string;
+  requestedScopes: string[];
+  projectName: string;
+  baseUrl: string;
+  needsAccountChoice: boolean;
+  accounts: CloudflareAccount[];
+  error: string;
+}
+
 export interface PagesConfig {
   projectName: string;
   accountId: string;
@@ -134,6 +156,42 @@ export interface PagesConfig {
 export interface FeedbackConfig {
   url: string;
   workerName: string;
+  analyticsEnabled: boolean;
+  reactionsEnabled: boolean;
+}
+
+export interface AnalyticsSummary {
+  publicationId: string;
+  views: number;
+  uniqueVisitors: number;
+  lastAccessAt: string | null;
+}
+
+export interface AccessEvent {
+  eventId: string;
+  publicationId: string;
+  occurredAt: string;
+  visitorId: string;
+  country: string;
+  region: string;
+  city: string;
+  asn: number | null;
+  organization: string;
+  device: string;
+  referrerHostname: string;
+}
+
+export interface AnalyticsSummaryResponse {
+  ok: boolean;
+  configured: boolean;
+  summaries: AnalyticsSummary[];
+}
+
+export interface AccessEventsResponse {
+  ok: boolean;
+  configured: boolean;
+  events: AccessEvent[];
+  nextCursor: string;
 }
 
 export interface LocalConfig {
@@ -190,11 +248,21 @@ export interface FeedbackStatsResponse {
 export interface FeedbackSetupResponse {
   config: AppConfig;
   feedback: FeedbackConfig | null;
+  instrumentation?: {
+    attempted: number;
+    completed: number;
+    failed: { publicationToken: string; error: string }[];
+  };
 }
 
 export interface StatusResponse {
   admin: { ok: boolean; product: "pagecast"; protocolVersion: 1 };
   public: { localBaseUrl: string | null };
+  home: {
+    suggestedProjectName: string;
+    projectName: string;
+    baseUrl: string;
+  };
   operations: OperationJournalEntry[];
   cloudflare: CloudflareStatus;
   config: AppConfig;

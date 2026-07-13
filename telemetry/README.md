@@ -2,9 +2,9 @@
 
 This directory holds the server-side validation logic for anonymous usage
 telemetry, plus an optional standalone-Worker deployment. End users control
-whether anything is sent at all. A fresh v0.5 install sends nothing until
-`pagecast telemetry enable`; existing persisted choices remain compatible.
-`PAGECAST_TELEMETRY=0` and `DO_NOT_TRACK=1` disable delivery, while an explicit
+whether anything is sent at all. Fresh installs enable telemetry by
+default; existing persisted choices remain compatible. `PAGECAST_TELEMETRY=0`
+and `DO_NOT_TRACK=1` disable delivery, while an explicit
 `PAGECAST_TELEMETRY=1` enables it outside a `DO_NOT_TRACK` environment. See the
 repository `PRIVACY.md` for exactly what is and isn't collected.
 

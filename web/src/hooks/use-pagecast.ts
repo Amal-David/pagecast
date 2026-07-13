@@ -585,12 +585,13 @@ export function useRenameSlug() {
 export function useFeedbackSetup() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (accountId?: string) => api.feedbackSetup(accountId),
+    mutationFn: (options: { accountId?: string; reactions?: boolean } = {}) =>
+      api.feedbackSetup(options),
     onSuccess: (data) => {
-      toast.success("Reactions & analytics enabled.");
+      toast.success(data.feedback?.reactionsEnabled ? "Analytics and reactions enabled." : "Analytics enabled.");
       emitActivity({
         status: "success",
-        title: "Feedback enabled",
+        title: "Analytics enabled",
         message: data.feedback?.url ?? undefined
       });
       void queryClient.invalidateQueries({ queryKey: STATUS_KEY });
@@ -671,6 +672,24 @@ export function useFeedbackStats(slug: string | null, enabled: boolean) {
     queryKey: ["feedback-stats", slug],
     queryFn: () => api.feedbackStats(slug as string),
     enabled: Boolean(slug) && enabled,
+    refetchInterval: 30_000
+  });
+}
+
+export function useAnalyticsSummary(publicationId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["analytics-summary", publicationId || "all"],
+    queryFn: () => api.analyticsSummary(publicationId || undefined),
+    enabled,
+    refetchInterval: 30_000
+  });
+}
+
+export function useAnalyticsEvents(publicationId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["analytics-events", publicationId || "all"],
+    queryFn: () => api.analyticsEvents({ publicationId: publicationId || undefined, limit: 50 }),
+    enabled,
     refetchInterval: 30_000
   });
 }

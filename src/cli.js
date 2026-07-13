@@ -39,6 +39,10 @@ import {
   pfRulesTargetPortMatches
 } from "./local-system.js";
 import { startMcpStdioServer } from "./mcp.js";
+import {
+  initializePagecastHome,
+  resolvePagecastHomePaths
+} from "./pagecast-home.js";
 import { resolvePathArgument } from "./path-token.js";
 import {
   WorkspaceLease,
@@ -49,15 +53,58 @@ import { classifyCommand, createReporter, resolveTelemetry } from "./telemetry.j
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageVersion = createRequire(import.meta.url)("../package.json").version;
-// When invoked via npx, the package lives in the npm cache, so reports and config
-// must live in the user's working directory, not next to the installed code.
-const dataDir = path.join(process.cwd(), ".pagecast");
+function explicitDataDirFromArgs(args = process.argv.slice(2)) {
+  for (let index = 0; index < args.length; index += 1) {
+    const value = String(args[index] || "");
+    if (value.startsWith("--data-dir=")) {
+      return value.slice("--data-dir=".length);
+    }
+    if (value === "--data-dir") {
+      return String(args[index + 1] || "");
+    }
+  }
+  return "";
+}
+
+// Managed publications are owned by one per-user Pagecast Home. An explicit
+// data directory remains a fully isolated profile for CI and advanced use.
+const explicitDataDir = explicitDataDirFromArgs();
+const homePaths = resolvePagecastHomePaths({
+  cwd: process.cwd(),
+  explicitDataDir
+});
+const dataDir = homePaths.dataDir;
 const staticDir = path.join(packageRoot, "public");
 const cliPath = fileURLToPath(import.meta.url);
 const backgroundPidPath = path.join(dataDir, "pagecast.pid");
 const execFileAsync = promisify(execFile);
 const PROCESS_LOOKUP_TIMEOUT_MS = 1000;
 const WINDOWS_PROCESS_LOOKUP_TIMEOUT_MS = 5000;
+let homeInitialization = null;
+
+async function initializeCliHome() {
+  try {
+    return await initializePagecastHome({
+      cwd: process.cwd(),
+      explicitDataDir
+    });
+  } catch (error) {
+    if (error?.code !== "PAGECAST_WORKSPACE_BUSY" || homePaths.isolated) {
+      throw error;
+    }
+    const routed = await tryInvokeLiveCommand(
+      dataDir,
+      "register_workspace",
+      {
+        cwd: process.cwd(),
+        workspaceDataDir: homePaths.workspaceDataDir
+      },
+      { fetchImpl: fetch }
+    );
+    if (routed !== null) return routed;
+    throw error;
+  }
+}
 
 function openBrowser(url) {
   const platform = process.platform;
@@ -383,7 +430,7 @@ function printTelemetryNotice() {
     [
       "Pagecast collects anonymous usage stats (which command ran, version, OS) to guide development.",
       "No file contents, paths, URLs, or account info are ever sent.",
-      "Telemetry is enabled by your saved preference or PAGECAST_TELEMETRY=1. Disable it anytime with `pagecast telemetry disable`.",
+      "Telemetry is enabled by default. Disable it anytime with `pagecast telemetry disable`, PAGECAST_TELEMETRY=0, or DO_NOT_TRACK=1.",
       ""
     ].join("\n")
   );
@@ -422,11 +469,13 @@ const VALUE_FLAGS = new Set([
   "account",
   "account-id",
   "branch",
+  "context-id",
   "data-dir",
   "expires",
   "host",
   "keep",
   "label",
+  "item-key",
   "mode",
   "output",
   "password",
@@ -435,7 +484,8 @@ const VALUE_FLAGS = new Set([
   "project",
   "project-name",
   "public-port",
-  "slug"
+  "slug",
+  "update"
 ]);
 
 function parseFlags(args) {
@@ -934,12 +984,20 @@ async function publish(args) {
       password,
       disableProtection,
       expires,
+      contextId: optionValue(parsed, "context-id"),
+      workspaceId: homeInitialization?.workspaceId || dataDir,
+      itemKey: optionValue(parsed, "item-key"),
+      mode: optionValue(parsed, "mode"),
+      newLink: parsed.flags.has("new-link"),
+      update: optionValue(parsed, "update"),
+      nonInteractive: parsed.flags.has("non-interactive"),
+      env: process.env,
       dataDir
     });
     if (json) {
       console.log(JSON.stringify({ ok: true, ...result }));
     } else {
-      console.log(`Published: ${result.url}`);
+      console.log(`${result.action === "updated" ? "Updated" : "Published"}: ${result.url}`);
       if (result.passwordProtected) {
         console.log("Password protection: on (visitors must enter the password).");
       }
@@ -962,7 +1020,11 @@ async function mcp(args) {
   const mcpDataDir = optionValue(parsed, "data-dir") || dataDir;
 
   if (subcommand === "stdio") {
-    await startMcpStdioServer({ dataDir: mcpDataDir, version: packageVersion });
+    await startMcpStdioServer({
+      dataDir: mcpDataDir,
+      version: packageVersion,
+      workspaceId: homeInitialization?.workspaceId || mcpDataDir
+    });
     return;
   }
 
@@ -1283,7 +1345,7 @@ function usage() {
       "  pagecast background service install|uninstall|status Keep Pagecast running after login/restart (macOS)",
       "  pagecast setup-local-url [--yes]                     Use http://pagecast.localhost and install the login service (macOS)",
       "  pagecast local-url install|remove|status [--yes]     Manage the no-port local URL redirect (macOS)",
-      "  pagecast publish <path> [--password <pw>|--no-password] [--expires <7d|12h|never>] [--json]",
+      "  pagecast publish <path> [--context-id <id>] [--new-link|--update <publication>] [--non-interactive] [--json]",
       "                                                        Publish an HTML/Markdown snapshot",
       "  pagecast publish --path-token <token> [publish options]   Publish an opaque hook-selected path",
       "  pagecast publish site <dir> --project <name> [--json] Deploy a static folder to Pages",
@@ -1312,6 +1374,13 @@ async function run() {
   const argv = process.argv.slice(2);
   const [command, ...rest] = argv;
 
+  if (command === "--help" || command === "-h" || command === "help") {
+    usage();
+    return;
+  }
+
+  homeInitialization = await initializeCliHome();
+
   // The telemetry command manages its own state; don't emit an event for it
   // (avoids phoning home on the very command used to opt out).
   if (command === "telemetry") {
@@ -1330,11 +1399,6 @@ async function run() {
   // never awaited, never throws, bounded by the reporter's own timeout.
   const reporter = await setupTelemetry();
   reporter.record(classifyCommand(argv)).catch(() => {});
-
-  if (command === "--help" || command === "-h" || command === "help") {
-    usage();
-    return;
-  }
 
   if (command === "publish") {
     await publish(rest);

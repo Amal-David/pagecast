@@ -28,13 +28,16 @@ Consequences:
 
 ## Core invariants
 
-### One workspace, one writer
+### One Home, one writer
 
-The live server owns an exclusive workspace lease. CLI, extension, goal, and
-MCP mutations route through its authenticated local command service. Without a
-live owner, a one-shot mutation must acquire the same lease. State and config
-files use atomic replacement, private permissions, ordered saves, and loud
-corruption failures.
+The user-level `~/.pagecast/home/` owns the managed Cloudflare target,
+publication registry, analytics configuration, operation journal, and exclusive
+lease. Workspace `.pagecast/` state contains only workspace/source identity and
+Home mappings. CLI, extension, goal, and MCP mutations route through the Home
+owner's authenticated local command service. Without a live owner, a one-shot
+mutation must acquire the same lease. An explicit `--data-dir` is a separate
+profile. State and config files use atomic replacement, private permissions,
+ordered saves, and loud corruption failures.
 
 Compound managed-state mutations own one serialized transaction. Cloudflare and
 the local filesystem cannot participate in one atomic commit, so these managed
@@ -73,8 +76,17 @@ retryable.
 
 Dashboard, CLI, MCP, extension, goal, and auto-sync calls are adapters over the
 same service contracts. They must agree on target selection, expiry, link kind,
-rollback, and response fields. A running daemon may change transport, but must
-not change behavior or JSON shape.
+context-aware publication identity, rollback, and response fields. A running
+daemon may change transport, but must not change behavior or JSON shape.
+
+### Analytics privacy boundary
+
+Access events are keyed by immutable publication token, not slug. D1 owns
+append-only detailed events and atomic aggregate totals; old KV aggregates are
+migration input and reactions storage only. The Worker HMACs a transient
+connecting address with a per-Home secret before constructing an event and
+never persists or returns the raw value. Detailed events expire after 30 days;
+aggregates remain. Local APIs expose an allowlisted event shape only.
 
 ### Stable package boundary
 
@@ -90,7 +102,7 @@ helper must not silently make it a package export.
 | v0.1 tokens → PR #10 memorable names → PR #11 drops | Replacing entropy with word-only names made default links guessable and blurred unlisted links with public drops. | New unlisted links combine a memorable prefix with 128 random bits. Existing word-only links remain valid. Word-only custom/goal links are explicit drops. |
 | PR #5 expiry and later password/expiry rollback fixes | Each endpoint implemented its own deploy-then-save ordering, so composed mutations could expose gates or state that the remote site did not have. | Shared workflows journal intent, compensate earlier targets after partial failure, retain retryable reconciliation state, and expose effective expiry on every adapter. |
 | PR #9 Docker support | A container wildcard bind was treated like a normal local bind even though the admin API can execute builds. | Routable binds are rejected. Wildcard bind requires explicit loopback-proxy mode and loopback-only host port mapping. |
-| PR #12 telemetry | Opt-out telemetry made a fresh install send before an explicit product choice. | Fresh installs are consent-pending; saved legacy choices and explicit environment overrides remain compatible. |
+| PR #12 telemetry | Product telemetry needs a clear default without widening its anonymous payload. | Fresh installs are default-on with a first-run disclosure; saved choices, `DO_NOT_TRACK`, explicit environment overrides, and CI safeguards remain authoritative. |
 | PR #15 sync/workbench → PR #17 target selection/recovery | Project selection, URL-derived identity, and a shared staging tree allowed current UI state to influence older publications. | `ProjectRef`, ownership markers, target-scoped desired-state trees, and explicit legacy adoption determine every mutation. |
 | PR #15 preview workbench | Arbitrary preview HTML shared the privileged admin origin. | Preview content is isolated on the public origin with restrictive framing and response headers. |
 | PR #16 MCP | A second in-process store was acceptable for listing but became a competing writer once initialization/migrations persisted state. | Reads are non-persisting or routed; mutations use the live owner or exclusive lease. |

@@ -58,7 +58,7 @@ function isTruthyEnv(value) {
 
 // Resolve whether telemetry should actually run, plus the deciding reason.
 // Precedence (highest first): DO_NOT_TRACK, explicit PAGECAST_TELEMETRY, CI,
-// stored consent. A fresh install with no saved choice never sends an event.
+// then the saved choice. Fresh installs are enabled by default.
 export function resolveTelemetry({ configEnabled = null, env = process.env } = {}) {
   if (isTruthyEnv(env.DO_NOT_TRACK)) {
     return { enabled: false, reason: "do-not-track" };
@@ -78,7 +78,7 @@ export function resolveTelemetry({ configEnabled = null, env = process.env } = {
   if (configEnabled === true) {
     return { enabled: true, reason: "config" };
   }
-  return { enabled: false, reason: "consent-required" };
+  return { enabled: true, reason: "default" };
 }
 
 // Map raw argv (process.argv.slice(2)) to a safe { command, subcommand } pair

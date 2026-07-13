@@ -38,15 +38,15 @@ test("resolveTelemetry: CI disables when no explicit flag", () => {
   assert.deepEqual(resolveTelemetry({ env: { CI: "true" } }), { enabled: false, reason: "ci" });
 });
 
-test("resolveTelemetry: fresh installs require consent and saved choices are honored", () => {
+test("resolveTelemetry: fresh installs default to enabled and saved choices are honored", () => {
   assert.equal(resolveTelemetry({ configEnabled: false, env: {} }).enabled, false);
   assert.deepEqual(resolveTelemetry({ configEnabled: true, env: {} }), {
     enabled: true,
     reason: "config"
   });
   assert.deepEqual(resolveTelemetry({ env: {} }), {
-    enabled: false,
-    reason: "consent-required"
+    enabled: true,
+    reason: "default"
   });
 });
 

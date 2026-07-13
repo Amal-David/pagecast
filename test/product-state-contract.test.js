@@ -226,14 +226,14 @@ test("config and report saves preserve mutator invocation order", async () => {
   );
 });
 
-test("fresh telemetry is consent-pending while existing config choices migrate compatibly", async () => {
+test("fresh telemetry defaults to enabled while existing config choices migrate compatibly", async () => {
   const root = await makeWorkspace("pagecast-telemetry-consent-");
 
   const freshDir = path.join(root, "fresh");
   const fresh = createConfigStore({ dataDir: freshDir });
   await fresh.init();
-  assert.equal(fresh.get().telemetry, null);
-  assert.equal(fresh.getPublicConfig().telemetryConsent, null);
+  assert.equal(fresh.get().telemetry, true);
+  assert.equal(fresh.getPublicConfig().telemetryConsent, true);
   assert.equal(fresh.get().telemetryId, null);
 
   const legacyDir = path.join(root, "legacy");

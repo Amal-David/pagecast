@@ -44,10 +44,14 @@ This starts the local app and opens the admin UI:
 - Local preview/public origin — `http://pagecast.localhost:4174` (the admin
   embeds this separate origin; raw report HTML is never served by the admin
   origin)
-- Local data/config — `.pagecast/` in the current directory
+- Pagecast Home — `~/.pagecast/home/` (Cloudflare target, publication registry,
+  analytics settings, operation journal, and single-writer lease)
+- Workspace metadata — `.pagecast/` in the current directory (workspace/source
+  identity and mappings back to Home publications)
 
-Pagecast state is workspace-scoped. Run the CLI, background service, and MCP
-server from the same directory to use the same reports and Cloudflare target.
+One OS user profile owns one Pagecast Home and Cloudflare subdomain. Run the CLI
+from the relevant project so Pagecast can identify the workspace and source.
+Use `--data-dir` only for an intentionally isolated CI/container profile.
 
 ### Upgrading from 0.4 to 0.5
 
@@ -73,9 +77,10 @@ server from the same directory to use the same reports and Cloudflare target.
   readable but cannot be synced, renamed, re-expired, or revoked until you
   select its original project and click **Attach selected project** for that
   link.
-- On a genuinely fresh install, telemetry sends nothing until you run
-  `npx pagecast telemetry enable`. Existing saved choices and explicit
-  environment overrides keep their previous behavior.
+- On a genuinely fresh install, anonymous telemetry is enabled by
+  default with a one-time disclosure. Disable it with
+  `npx pagecast telemetry disable`, `PAGECAST_TELEMETRY=0`, or `DO_NOT_TRACK=1`.
+  Existing saved choices and explicit environment overrides keep their behavior.
 
 Want Pagecast waiting in the background instead of keeping a terminal tab open?
 
@@ -103,7 +108,7 @@ npx pagecast background service status
 npx pagecast background service uninstall
 ```
 
-Pagecast remembers the local ports in `.pagecast/config.json`. If 4173/4174 are
+Pagecast remembers the local ports in the Home config. If 4173/4174 are
 busy the first time it starts, it falls forward to the next available pair and
 keeps using that pair on future launches. The bundled extension discovers that
 exact origin from the dashboard tab opened by Pagecast and remembers it; it does
@@ -113,19 +118,19 @@ tab open long enough for discovery. The extension supports Pagecast's standard
 bound to another loopback address (for example `127.0.0.2` or `::1`) still works
 through the CLI/dashboard but is outside the extension's host permissions.
 
-In the admin UI, click **Connect Cloudflare**. Pagecast uses scoped Wrangler
-OAuth (`account:read`, `user:read`, `pages:write`), detects your account, and
-creates the Pages project if needed. Selecting an existing project is the
-explicit signal that this workspace may manage its `/p/...` publications;
-Pagecast will not silently adopt an unrelated project. From a clone, run
-`npm start`.
+In the main admin canvas, confirm the suggested Home subdomain and click
+**Connect Cloudflare**. Pagecast explains the exact scopes, starts Wrangler's
+Cloudflare-hosted authorization flow, shows progress, and resumes Home creation
+after consent. Cloudflare labels the authorizing application **Wrangler**.
+Existing project selection remains in Advanced/Legacy settings; Pagecast never
+silently adopts an unrelated project. From a clone, run `npm start`.
 
 Prefer containers? Pagecast ships with Docker support — see [Run with Docker](#run-with-docker).
 
-Prefer the terminal?
+For advanced/headless setup, the lower-level command remains available:
 
 ```sh
-npx pagecast pages setup --project pagecast
+npx pagecast pages setup --project your-pagecast-home
 # multiple accounts? add  --account <account-id>
 # automation? export CLOUDFLARE_API_TOKEN (scoped Pages:Edit) + CLOUDFLARE_ACCOUNT_ID
 ```
@@ -138,6 +143,10 @@ npx pagecast publish "/absolute/path/report.html" --json
 
 # Set an expiry — 7d, 12h, or never (default 30d)
 npx pagecast publish "/absolute/path/report.html" --expires 7d --json
+
+# Force another URL, or explicitly update a known one
+npx pagecast publish "/absolute/path/report.html" --new-link --json
+npx pagecast publish "/absolute/path/report.html" --update <url-or-token> --json
 
 # A built static project → publish its entry file
 npm run build && npx pagecast publish ./dist/index.html --json
@@ -167,6 +176,15 @@ leave links or social metadata pointing at the wrong host. Add `--json` for
 agents and CI, and use the admin UI for link renaming, re-sync, revoke, and
 build settings.
 
+Agent publishing is context-aware. Pagecast identifies a managed publication by
+workspace, canonical item, and a local hash of the agent context. Repeating an
+explicit “Publish this as a Pagecast” request for the same item in the same
+context updates the existing URL; another item or context creates a URL under
+the same Home. Precedence is `--context-id`, `PAGECAST_CONTEXT_ID`,
+`CODEX_THREAD_ID`, `CLAUDE_SESSION_ID`, then workspace/source fallback. Use
+`--new-link` or `--update` to override matching. JSON reports `action`,
+`publicationToken`, `contextMatched`, and `url`.
+
 `pages deploy` is a separate whole-site operation. It replaces the contents of
 the named Cloudflare Pages project and does not change the project selected for
 managed `/p/...` publications. Use a separate project unless replacing the
@@ -175,10 +193,28 @@ incomplete Cloudflare/local reconciliation in the operation journal and surface
 it for safe retry or manual action; direct `pages deploy` is stateless, so
 inspect deployment history before retrying an ambiguous timeout.
 
-Common errors: `statusCode 401` means Cloudflare setup or authentication is
-required. `statusCode 409` means a conflict; follow the returned message. For
-the explicit multiple-account conflict, run
-`npx pagecast pages setup --project pagecast --account <id>`.
+Interactive publishing starts Wrangler authentication automatically and resumes
+the original publish. In CI or with `--non-interactive`, `statusCode 401` is a
+structured authentication-required result. `statusCode 409` means a conflict;
+follow the returned message. Multiple accounts can be selected in the main Home
+onboarding canvas.
+
+## Activity and privacy
+
+Enable analytics independently from the optional reactions bar in Settings.
+Pagecast deploys a Worker plus D1 database to your Cloudflare account, migrates
+existing aggregate KV totals, and instruments every active Home page. Each page
+shows compact views, anonymous uniques, and last access beside its links, with a
+link selector and recent events immediately below. The global **Activity** view
+covers every Home link.
+
+Detailed events include coarse country, region/city when Cloudflare provides
+them, ASN/organization, device class, and referrer hostname. The Worker reads
+`CF-Connecting-IP` transiently, immediately HMACs it with a per-Home secret, and
+discards the raw address. Detailed events expire after 30 days; aggregate totals
+remain. Analytics provides audit visibility, not named identity or access
+prevention. An unlisted link is open to anyone who has its URL; use Pagecast
+password protection when access control is required.
 
 ## Password Protection
 
@@ -225,8 +261,10 @@ deleted. Prune history when those direct snapshot URLs must stop working.
 
 ## Use From Coding Agents
 
-Pagecast ships a Codex-native skill and a portable Agent-Skills file that offer
-to publish finished artifacts — only after you confirm.
+Pagecast ships a Codex-native skill and a portable Agent-Skills file. An
+explicit “Publish this as a Pagecast” instruction publishes immediately and
+returns whether the link was created or updated. A proactive agent suggestion
+still asks once; a command-only request returns only the command.
 
 ```sh
 # Codex
@@ -261,10 +299,10 @@ For local agents, configure the stdio server:
 }
 ```
 
-That command shares the same `.pagecast/` config, Cloudflare credentials, expiry,
+That command shares the same user-level Home, Cloudflare credentials, expiry,
 and password-protection behavior as `npx pagecast publish`. Add
-`"--data-dir", "/path/to/.pagecast"` to the args only when you intentionally want
-the MCP server to use a different Pagecast workspace.
+`"--data-dir", "/path/to/profile"` only when you intentionally want an isolated
+MCP profile.
 
 ### MCP tools
 
@@ -272,8 +310,8 @@ the MCP server to use a different Pagecast workspace.
 | --- | --- | --- |
 | `status` | Show Cloudflare/Pagecast connection state. | Redacted by default; pass `verbose: true` only for trusted local clients. |
 | `list_pages` | List locally known reports and published links. | Redacted by default; pass `verbose: true` only when local paths/build settings are safe to reveal. |
-| `publish_content` | Publish supplied HTML or Markdown content. | Preferred for agents; writes content into isolated Pagecast storage first. |
-| `publish_file` | Publish a local `.html`, `.htm`, `.md`, or `.markdown` file. | Isolates the entry file by default. To include sibling assets, pass both `includeAssets: true` and `confirmAssets: true`. |
+| `publish_content` | Publish supplied HTML or Markdown content. | Supports `mode: upsert|new|update`, `contextId`, and `publication`; deterministic upserts require `itemKey`. Without one, upsert creates a new link. |
+| `publish_file` | Publish a local `.html`, `.htm`, `.md`, or `.markdown` file. | Uses canonical file identity for upserts and supports the same mode/context/publication controls. To include sibling assets, pass both `includeAssets: true` and `confirmAssets: true`. |
 | `revoke_publication` | Take a published token offline and redeploy the Pages site. | Requires `confirm: true` because it changes a live URL. |
 
 Example `publish_content` tool arguments:
@@ -436,19 +474,21 @@ Pagecast/Node version, and OS/arch — to guide what gets built next. It never
 sends file contents, file paths, published URLs, or Cloudflare tokens/account
 IDs. See [PRIVACY.md](PRIVACY.md) for the exact fields.
 
-Fresh installs are consent-pending and send nothing. Enable it explicitly:
+Fresh interactive installs have anonymous telemetry enabled by default. Disable it
+explicitly whenever you want:
 
 ```sh
-npx pagecast telemetry enable       # inspect with: npx pagecast telemetry status
+npx pagecast telemetry status       # inspect the effective state
 npx pagecast telemetry disable
+npx pagecast telemetry enable       # restore the saved opt-in after disabling
 # Explicit env overrides are also supported (DO_NOT_TRACK always wins).
 export PAGECAST_TELEMETRY=1
 export PAGECAST_TELEMETRY=0
 export DO_NOT_TRACK=1
 ```
 
-Existing persisted choices remain compatible. Telemetry is automatically off
-in CI unless explicitly re-enabled with `PAGECAST_TELEMETRY=1`.
+Existing persisted choices remain compatible. Telemetry is automatically off in
+CI unless explicitly re-enabled with `PAGECAST_TELEMETRY=1`.
 
 ## Development
 

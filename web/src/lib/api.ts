@@ -1,5 +1,8 @@
 import type {
   CloudflareSyncResponse,
+  CloudflareConnectionJob,
+  AccessEventsResponse,
+  AnalyticsSummaryResponse,
   CloudflareProjectsResponse,
   ConfigResponse,
   ContentResponse,
@@ -225,6 +228,14 @@ export const api = {
   cloudflareConnect: () =>
     request<unknown>("/api/cloudflare/connect", { json: {} }),
 
+  startCloudflareConnectionJob: (payload: { projectName: string; accountId?: string }) =>
+    request<CloudflareConnectionJob>("/api/cloudflare/connect-jobs", { json: payload }),
+
+  getCloudflareConnectionJob: (jobId: string) =>
+    request<CloudflareConnectionJob>(
+      `/api/cloudflare/connect-jobs/${encodeURIComponent(jobId)}`
+    ),
+
   cloudflareProjects: () =>
     request<CloudflareProjectsResponse>("/api/cloudflare/projects", { json: {} }),
 
@@ -237,15 +248,29 @@ export const api = {
   syncCloudflarePages: () =>
     request<CloudflareSyncResponse>("/api/cloudflare/sync", { json: {} }),
 
-  feedbackSetup: (accountId?: string) =>
+  feedbackSetup: (options: { accountId?: string; reactions?: boolean } = {}) =>
     request<FeedbackSetupResponse>("/api/feedback/setup", {
-      json: accountId ? { accountId } : {}
+      json: options
     }),
 
   feedbackStats: (slug: string) =>
     request<FeedbackStatsResponse>(
       `/api/feedback/stats?slug=${encodeURIComponent(slug)}`
     ),
+
+  analyticsSummary: (publicationId?: string) =>
+    request<AnalyticsSummaryResponse>(
+      `/api/analytics/summary${publicationId ? `?publicationId=${encodeURIComponent(publicationId)}` : ""}`
+    ),
+
+  analyticsEvents: (options: { publicationId?: string; cursor?: string; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (options.publicationId) params.set("publicationId", options.publicationId);
+    if (options.cursor) params.set("cursor", options.cursor);
+    if (options.limit) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return request<AccessEventsResponse>(`/api/analytics/events${query ? `?${query}` : ""}`);
+  },
 
   getDeployments: () => request<DeploymentsResponse>("/api/deployments"),
 

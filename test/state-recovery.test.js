@@ -603,11 +603,14 @@ test("authenticated daemon commands mutate the live server-owned store", async (
     assert.match(result.body.url, /command-service\.pages\.dev\/p\//);
     assert.equal(result.body.linkKind, "unlisted");
     assert.deepEqual(Object.keys(result.body).sort(), [
+      "action",
+      "contextMatched",
       "expiresAt",
       "label",
       "linkKind",
       "passwordProtected",
       "projectName",
+      "publicationToken",
       "reportId",
       "token",
       "url"
@@ -674,11 +677,14 @@ test("daemon publish is one mutation transaction and preserves one-shot result p
     assert.equal(expiry.response.status, 200);
     assert.equal(published.body.linkKind, "unlisted");
     assert.deepEqual(Object.keys(published.body).sort(), [
+      "action",
+      "contextMatched",
       "expiresAt",
       "label",
       "linkKind",
       "passwordProtected",
       "projectName",
+      "publicationToken",
       "reportId",
       "token",
       "url"
@@ -721,8 +727,15 @@ test("a one-shot publisher delegates to the live workspace owner instead of open
 
     const result = await publishReportSnapshot({ path: reportPath, dataDir });
     assert.match(result.url, /live-delegation\.pages\.dev\/p\//);
+    assert.equal(result.action, "created");
     assert.ok(runtime.store.findPublication(result.token));
-    assert.equal(deploy.count, 1);
+    await fs.writeFile(reportPath, "<h1>Delegated update</h1>", "utf8");
+    const updated = await publishReportSnapshot({ path: reportPath, dataDir });
+    assert.equal(updated.action, "updated");
+    assert.equal(updated.contextMatched, true);
+    assert.equal(updated.token, result.token);
+    assert.equal(updated.url, result.url);
+    assert.equal(deploy.count, 2);
   } finally {
     await runtime.close();
     await fs.rm(root, { recursive: true, force: true });
@@ -767,6 +780,15 @@ test("headless setup routes through the live config owner instead of opening a s
           { id: "33333333333333333333333333333333", title: "pagecast-feedback-store" }
         ])
       };
+    }
+    if (command.includes("d1 list")) {
+      return { code: 0, output: "[]" };
+    }
+    if (command.includes("d1 create")) {
+      return { code: 0, output: '{"uuid":"11111111-2222-4333-8444-555555555555"}' };
+    }
+    if (command.includes("d1 execute")) {
+      return { code: 0, output: "ok" };
     }
     if (command.includes("deploy")) {
       return {
@@ -1029,7 +1051,7 @@ test("real CLI telemetry preflight never opens a competing config writer", async
 
     const status = await execFileAsync(
       process.execPath,
-      [cliPath, "pages", "status", "--json"],
+      [cliPath, "pages", "status", "--data-dir", dataDir, "--json"],
       { cwd: root, env }
     );
     const statusBody = JSON.parse(status.stdout);
@@ -1043,7 +1065,7 @@ test("real CLI telemetry preflight never opens a competing config writer", async
 
     const telemetry = await execFileAsync(
       process.execPath,
-      [cliPath, "telemetry", "disable", "--json"],
+      [cliPath, "telemetry", "disable", "--data-dir", dataDir, "--json"],
       { cwd: root, env }
     );
     assert.deepEqual(JSON.parse(telemetry.stdout), {
@@ -1062,11 +1084,12 @@ test("real CLI telemetry preflight never opens a competing config writer", async
 
 test("standalone CLI telemetry mutations retain their JSON contract under the lease", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-cli-telemetry-"));
+  const dataDir = path.join(root, ".pagecast");
   const env = { ...process.env, CI: "", DO_NOT_TRACK: "", PAGECAST_TELEMETRY: "" };
   try {
     const result = await execFileAsync(
       process.execPath,
-      [path.resolve("src/cli.js"), "telemetry", "disable", "--json"],
+      [path.resolve("src/cli.js"), "telemetry", "disable", "--data-dir", dataDir, "--json"],
       { cwd: root, env }
     );
     assert.deepEqual(JSON.parse(result.stdout), {
@@ -1074,7 +1097,7 @@ test("standalone CLI telemetry mutations retain their JSON contract under the le
       telemetry: { configEnabled: false, enabled: false, reason: "config" }
     });
     const saved = JSON.parse(
-      await fs.readFile(path.join(root, ".pagecast", "config.json"), "utf8")
+      await fs.readFile(path.join(dataDir, "config.json"), "utf8")
     );
     assert.equal(saved.telemetry, false);
     assert.equal(saved.telemetryNotified, true);

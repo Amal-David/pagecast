@@ -15,13 +15,23 @@ export const DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 export const DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS = 60 * 1000;
 export const CLOUDFLARE_OAUTH_SCOPES = ["account:read", "user:read", "pages:write"];
 
-// Feedback provisioning needs Workers/KV scopes only after the user opts in.
+// Analytics provisioning is a second, explicit least-privilege grant. KV is
+// requested only when reactions or a legacy aggregate namespace are used.
 export const FEEDBACK_OAUTH_SCOPES = [
   "account:read",
   "user:read",
   "pages:write",
   "workers_scripts:write",
+  "d1:write",
   "workers_kv:write"
+];
+
+export const ANALYTICS_OAUTH_SCOPES = [
+  "account:read",
+  "user:read",
+  "pages:write",
+  "workers_scripts:write",
+  "d1:write"
 ];
 
 export function stripAnsi(value) {
@@ -64,6 +74,23 @@ export function normalizeAccountId(value) {
 export function normalizeAccountIdSafe(value) {
   try {
     return normalizeAccountId(value || "");
+  } catch {
+    return "";
+  }
+}
+
+function parseD1DatabaseId(output) {
+  const text = cleanCommandOutput(output);
+  const match = text.match(/(?:database_id|uuid|id)["'\s:=]+([a-f0-9-]{32,36})/i);
+  return match ? match[1].toLowerCase() : "";
+}
+
+function findD1DatabaseId(output, databaseName) {
+  try {
+    const parsed = JSON.parse(cleanCommandOutput(output));
+    const databases = Array.isArray(parsed) ? parsed : parsed?.result || [];
+    const match = databases.find((database) => database?.name === databaseName);
+    return String(match?.uuid || match?.id || "").toLowerCase();
   } catch {
     return "";
   }
@@ -555,7 +582,8 @@ export async function runSpawnCommand({
   args,
   timeoutMs,
   cwd = PROJECT_ROOT,
-  env = process.env
+  env = process.env,
+  onOutput = null
 }) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -591,7 +619,15 @@ export async function runSpawnCommand({
       return;
     }
     const recordOutput = (chunk) => {
-      output += chunk.toString();
+      const text = chunk.toString();
+      output += text;
+      if (typeof onOutput === "function") {
+        try {
+          onOutput(text);
+        } catch {
+          // Progress reporting must never change Wrangler command behavior.
+        }
+      }
     };
     child.stdout?.on("data", recordOutput);
     child.stderr?.on("data", recordOutput);
@@ -616,7 +652,7 @@ export function createCloudflareAuthManager({
   loginTimeoutMs = DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS,
   listTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS
 } = {}) {
-  async function runWrangler(args, timeoutMs, env = {}, cwd) {
+  async function runWrangler(args, timeoutMs, env = {}, cwd, onOutput = null) {
     const commandEnv = { ...process.env, ...env };
     const invocation = createWranglerInvocation(args, { env: commandEnv });
     const result = await runSpawnCommand({
@@ -625,7 +661,8 @@ export function createCloudflareAuthManager({
       args: invocation.args,
       timeoutMs,
       cwd,
-      env: commandEnv
+      env: commandEnv,
+      onOutput
     });
     if (result.code !== 0) {
       throw appError(
@@ -638,10 +675,13 @@ export function createCloudflareAuthManager({
 
   let sessionCache = null;
 
-  async function login(scopes = CLOUDFLARE_OAUTH_SCOPES) {
+  async function login(scopes = CLOUDFLARE_OAUTH_SCOPES, { onProgress } = {}) {
     await runWrangler(
       ["login", ...scopes.flatMap((scope) => ["--scopes", scope])],
-      loginTimeoutMs
+      loginTimeoutMs,
+      {},
+      undefined,
+      onProgress
     );
     sessionCache = null;
   }
@@ -776,6 +816,9 @@ export function createCloudflareAuthManager({
     workerName = "pagecast-feedback",
     workerSource = "",
     statsToken = "",
+    visitorSecret = "",
+    schemaSource = "",
+    reactionsEnabled = true,
     deployDir,
     timeoutMs = 120000
   } = {}) {
@@ -783,6 +826,7 @@ export function createCloudflareAuthManager({
     if (!deployDir) throw appError("A deploy directory is required to set up feedback.", 500);
     const env = accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {};
     const kvTitle = `${workerName}-store`;
+    const databaseName = `${workerName}-analytics`;
 
     const provision = async () => {
       let kvId = "";
@@ -794,31 +838,63 @@ export function createCloudflareAuthManager({
       } catch {
         // A missing listing permission still allows the create attempt below.
       }
-      if (!kvId) {
+      if (!kvId && reactionsEnabled) {
         kvId = parseKvNamespaceId(
           await runWrangler(["kv", "namespace", "create", kvTitle], timeoutMs, env)
         );
       }
-      if (!kvId) throw appError("Could not create the feedback KV namespace.", 502);
+      let d1Id = "";
+      try {
+        d1Id = findD1DatabaseId(
+          await runWrangler(["d1", "list", "--json"], timeoutMs, env),
+          databaseName
+        );
+      } catch {
+        // Continue to the create attempt when listing is unavailable.
+      }
+      if (!d1Id) {
+        d1Id = parseD1DatabaseId(
+          await runWrangler(["d1", "create", databaseName, "--json"], timeoutMs, env)
+        );
+      }
+      if (!d1Id) throw appError("Could not create the Pagecast analytics D1 database.", 502);
 
       await fs.rm(deployDir, { recursive: true, force: true });
       await fs.mkdir(deployDir, { recursive: true });
       await fs.writeFile(path.join(deployDir, "worker.js"), workerSource, "utf8");
+      const schema = schemaSource || "";
+      await fs.writeFile(path.join(deployDir, "schema.sql"), schema, "utf8");
+      await runWrangler(
+        ["d1", "execute", databaseName, "--remote", "--file", "schema.sql"],
+        timeoutMs,
+        env,
+        deployDir
+      );
       const toml = [
         `name = "${workerName}"`,
         `main = "worker.js"`,
         `compatibility_date = "2024-09-01"`,
         `workers_dev = true`,
         ``,
-        `[[kv_namespaces]]`,
-        `binding = "PAGECAST_FEEDBACK"`,
-        `id = "${kvId}"`,
+        `[[d1_databases]]`,
+        `binding = "PAGECAST_ANALYTICS"`,
+        `database_name = "${databaseName}"`,
+        `database_id = "${d1Id}"`,
         ``,
         `[vars]`,
         `PAGECAST_STATS_TOKEN = "${statsToken}"`,
+        `PAGECAST_VISITOR_SECRET = "${visitorSecret}"`,
         ``
-      ].join("\n");
-      await fs.writeFile(path.join(deployDir, "wrangler.toml"), toml, "utf8");
+      ];
+      if (kvId) {
+        toml.splice(8, 0,
+          `[[kv_namespaces]]`,
+          `binding = "PAGECAST_FEEDBACK"`,
+          `id = "${kvId}"`,
+          ``
+        );
+      }
+      await fs.writeFile(path.join(deployDir, "wrangler.toml"), toml.join("\n"), "utf8");
       const deployOut = await runWrangler(
         ["deploy", "--config", "wrangler.toml"],
         timeoutMs,
@@ -832,14 +908,14 @@ export function createCloudflareAuthManager({
           502
         );
       }
-      return { url, kvId, workerName, statsToken };
+      return { url, kvId, d1Id, workerName, statsToken, visitorSecret, reactionsEnabled };
     };
 
     try {
       return await provision();
     } catch (error) {
       if (/code:\s*10000|authentication error/i.test(stripAnsi(error.message || ""))) {
-        await login(FEEDBACK_OAUTH_SCOPES);
+        await login(reactionsEnabled ? FEEDBACK_OAUTH_SCOPES : ANALYTICS_OAUTH_SCOPES);
         return provision();
       }
       throw error;
