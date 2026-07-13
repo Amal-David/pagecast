@@ -58,7 +58,7 @@ function isTruthyEnv(value) {
 
 // Resolve whether telemetry should actually run, plus the deciding reason.
 // Precedence (highest first): DO_NOT_TRACK, explicit PAGECAST_TELEMETRY, CI,
-// then the saved choice. Fresh interactive installs are enabled by default.
+// then the saved choice. Fresh installs are enabled by default.
 export function resolveTelemetry({ configEnabled = null, env = process.env } = {}) {
   if (isTruthyEnv(env.DO_NOT_TRACK)) {
     return { enabled: false, reason: "do-not-track" };

@@ -8,7 +8,7 @@ directly to **your own** Cloudflare account; Pagecast has no hosted backend in
 that path.
 
 Anonymous CLI usage telemetry is the only data Pagecast may send to a
-maintainer-operated endpoint. A genuinely fresh interactive install enables it
+maintainer-operated endpoint. A genuinely fresh install enables it
 by default and shows a one-time disclosure before sending an event.
 
 ## Anonymous usage telemetry

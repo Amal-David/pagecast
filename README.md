@@ -77,7 +77,7 @@ Use `--data-dir` only for an intentionally isolated CI/container profile.
   readable but cannot be synced, renamed, re-expired, or revoked until you
   select its original project and click **Attach selected project** for that
   link.
-- On a genuinely fresh interactive install, anonymous telemetry is enabled by
+- On a genuinely fresh install, anonymous telemetry is enabled by
   default with a one-time disclosure. Disable it with
   `npx pagecast telemetry disable`, `PAGECAST_TELEMETRY=0`, or `DO_NOT_TRACK=1`.
   Existing saved choices and explicit environment overrides keep their behavior.

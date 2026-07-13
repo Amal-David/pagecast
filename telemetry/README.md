@@ -2,7 +2,7 @@
 
 This directory holds the server-side validation logic for anonymous usage
 telemetry, plus an optional standalone-Worker deployment. End users control
-whether anything is sent at all. Fresh interactive installs enable telemetry by
+whether anything is sent at all. Fresh installs enable telemetry by
 default; existing persisted choices remain compatible. `PAGECAST_TELEMETRY=0`
 and `DO_NOT_TRACK=1` disable delivery, while an explicit
 `PAGECAST_TELEMETRY=1` enables it outside a `DO_NOT_TRACK` environment. See the
