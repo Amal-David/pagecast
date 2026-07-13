@@ -19,6 +19,17 @@ npx pagecast publish "/absolute/path/file.md" --json
 
 ### 1. Install the agent integration
 
+**Skills.sh-compatible agents** — install the public `publish-report` skill in
+one command:
+
+```sh
+npx skills add https://github.com/amal-david/pagecast --skill publish-report
+```
+
+This supports Codex, Claude Code, Cursor, Gemini CLI, and the other agents
+supported by the Skills CLI. See the
+[Pagecast listing on Skills.sh](https://www.skills.sh/amal-david/pagecast/publish-report).
+
 **Codex CLI / Codex desktop** — copy the Codex-native skill:
 
 ```sh

@@ -80,9 +80,6 @@ Add any of these to a `publish` command:
 - `--expires <7d|12h|never>` — edge-enforced link expiry (default 30d). The page
   returns 410 once expired; `--expires never` keeps it live until revoked. The
   result JSON reports `expiresAt` (or none when never).
-- `--password "<pw>"` — gate the page behind a password, enforced at the edge so
-  every file of a multi-file report is covered. `--no-password` removes protection.
-  The result JSON reports `passwordProtected: true`.
 - `--label "<name>"` — set the page's display name in the Pagecast app.
 - `--context-id "<id>"` — explicitly select the local agent context.
 - `--new-link` — force a fresh URL.
@@ -91,8 +88,15 @@ Add any of these to a `publish` command:
   authentication-required result instead.
 
 ```sh
-npx pagecast publish "/absolute/path/to/report.html" --expires 7d --password "hunter2" --json
+npx pagecast publish "/absolute/path/to/report.html" --expires 7d --label "Launch report" --json
 ```
+
+### Password handling
+
+Never ask the user to provide a page password in chat and never place a secret
+in an agent-generated command or tool argument. Publish the page first, then
+tell the user to open the local `npx pagecast` app and set password protection
+there. This keeps the credential out of the model and tool transcript.
 
 **Publishing a plan** (e.g. after plan mode): the plan lives in your context, not
 a file yet. If the user wants it shared, first write the plan markdown to a file
