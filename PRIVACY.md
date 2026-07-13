@@ -8,18 +8,17 @@ directly to **your own** Cloudflare account; Pagecast has no hosted backend in
 that path.
 
 Anonymous CLI usage telemetry is the only data Pagecast may send to a
-maintainer-operated endpoint. A genuinely fresh v0.5 install sends nothing
-until you explicitly consent.
+maintainer-operated endpoint. A genuinely fresh interactive install enables it
+by default and shows a one-time disclosure before sending an event.
 
 ## Anonymous usage telemetry
 
 ### Consent and compatibility
 
-- **Fresh install:** consent is pending and telemetry is disabled. Run
-  `pagecast telemetry enable` to opt in.
-- **Upgrade:** an existing saved enable/disable choice is preserved. A pre-v0.5
-  config with no telemetry field keeps the v0.4 enabled behavior rather than
-  silently changing an existing workspace's setting.
+- **Fresh install:** telemetry is enabled by default. Run
+  `pagecast telemetry disable` to opt out at any time.
+- **Upgrade:** an existing saved enable/disable choice is preserved. A config
+  with no telemetry field resolves to the default enabled behavior.
 - **Environment:** `DO_NOT_TRACK=1` always disables telemetry. An explicit
   `PAGECAST_TELEMETRY=1` or `PAGECAST_TELEMETRY=0` overrides the saved choice;
   CI is disabled unless explicitly enabled.

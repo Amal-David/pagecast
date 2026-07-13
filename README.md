@@ -77,9 +77,10 @@ Use `--data-dir` only for an intentionally isolated CI/container profile.
   readable but cannot be synced, renamed, re-expired, or revoked until you
   select its original project and click **Attach selected project** for that
   link.
-- On a genuinely fresh install, telemetry sends nothing until you run
-  `npx pagecast telemetry enable`. Existing saved choices and explicit
-  environment overrides keep their previous behavior.
+- On a genuinely fresh interactive install, anonymous telemetry is enabled by
+  default with a one-time disclosure. Disable it with
+  `npx pagecast telemetry disable`, `PAGECAST_TELEMETRY=0`, or `DO_NOT_TRACK=1`.
+  Existing saved choices and explicit environment overrides keep their behavior.
 
 Want Pagecast waiting in the background instead of keeping a terminal tab open?
 
@@ -473,19 +474,21 @@ Pagecast/Node version, and OS/arch — to guide what gets built next. It never
 sends file contents, file paths, published URLs, or Cloudflare tokens/account
 IDs. See [PRIVACY.md](PRIVACY.md) for the exact fields.
 
-Fresh installs are consent-pending and send nothing. Enable it explicitly:
+Fresh interactive installs have anonymous telemetry enabled by default. Disable it
+explicitly whenever you want:
 
 ```sh
-npx pagecast telemetry enable       # inspect with: npx pagecast telemetry status
+npx pagecast telemetry status       # inspect the effective state
 npx pagecast telemetry disable
+npx pagecast telemetry enable       # restore the saved opt-in after disabling
 # Explicit env overrides are also supported (DO_NOT_TRACK always wins).
 export PAGECAST_TELEMETRY=1
 export PAGECAST_TELEMETRY=0
 export DO_NOT_TRACK=1
 ```
 
-Existing persisted choices remain compatible. Telemetry is automatically off
-in CI unless explicitly re-enabled with `PAGECAST_TELEMETRY=1`.
+Existing persisted choices remain compatible. Telemetry is automatically off in
+CI unless explicitly re-enabled with `PAGECAST_TELEMETRY=1`.
 
 ## Development
 

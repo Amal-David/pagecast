@@ -430,7 +430,7 @@ function printTelemetryNotice() {
     [
       "Pagecast collects anonymous usage stats (which command ran, version, OS) to guide development.",
       "No file contents, paths, URLs, or account info are ever sent.",
-      "Telemetry is enabled by your saved preference or PAGECAST_TELEMETRY=1. Disable it anytime with `pagecast telemetry disable`.",
+      "Telemetry is enabled by default. Disable it anytime with `pagecast telemetry disable`, PAGECAST_TELEMETRY=0, or DO_NOT_TRACK=1.",
       ""
     ].join("\n")
   );

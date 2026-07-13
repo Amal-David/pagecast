@@ -1557,6 +1557,7 @@ test("Headless publishReportSnapshot auto-provisions and returns a public URL", 
   const result = await publishReportSnapshot({
     path: reportPath,
     dataDir,
+    env: { ...process.env, CI: "" },
     cloudflareAuthSpawnImpl: authSpawn,
     pagesDeploySpawnImpl: fakeDeploy,
     cloudflareListTimeoutMs: 1000,

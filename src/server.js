@@ -801,10 +801,9 @@ function normalizeConfig(config = {}) {
       typeof config.syncSecret === "string" && config.syncSecret
         ? config.syncSecret
         : null,
-    // Fresh installs are consent-pending (null). Existing explicit choices and
-    // environment overrides remain compatible.
-    telemetry:
-      config.telemetry === true ? true : config.telemetry === false ? false : null,
+    // Telemetry is enabled by default. An explicit persisted false remains the
+    // durable opt-out; environment overrides are resolved at command time.
+    telemetry: config.telemetry !== false,
     // Opaque random install id (no PII). Generated lazily only when telemetry is
     // enabled and about to send; stripped from any client-/CLI-facing config.
     telemetryId:
@@ -1497,12 +1496,7 @@ export function createConfigStore({
       );
     }
     const persisted = JSON.stringify(parsed);
-    config = normalizeConfig({
-      ...parsed,
-      // v0.4 treated a missing field in an existing config as enabled. Preserve
-      // that historical choice; only a genuinely new config starts pending.
-      telemetry: Object.hasOwn(parsed, "telemetry") ? parsed.telemetry : true
-    });
+    config = normalizeConfig(parsed);
     ensureSecrets();
     // Read-only callers can load defaults/migrations without becoming a second
     // writer. Normal initialization persists only when canonicalization, a

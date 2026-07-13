@@ -18,15 +18,15 @@ test("default managed state resolves to one user-level Home while --data-dir sta
   const cwd = path.join(path.sep, "work", "quarterly-report");
 
   assert.deepEqual(resolvePagecastHomePaths({ homeDir, cwd }), {
-    dataDir: path.join(homeDir, ".pagecast", "home"),
-    workspaceDataDir: path.join(cwd, ".pagecast"),
+    dataDir: path.resolve(homeDir, ".pagecast", "home"),
+    workspaceDataDir: path.resolve(cwd, ".pagecast"),
     isolated: false
   });
   assert.deepEqual(
     resolvePagecastHomePaths({ homeDir, cwd, explicitDataDir: "./isolated" }),
     {
-      dataDir: path.join(cwd, "isolated"),
-      workspaceDataDir: path.join(cwd, "isolated"),
+      dataDir: path.resolve(cwd, "isolated"),
+      workspaceDataDir: path.resolve(cwd, "isolated"),
       isolated: true
     }
   );
