@@ -275,6 +275,7 @@ still asks once; a command-only request returns only the command.
 npx skills add https://github.com/amal-david/pagecast --skill publish-report
 
 # Manual Codex install from a Pagecast clone
+mkdir -p ~/.codex/skills
 cp -R .codex/skills/publish-report ~/.codex/skills/
 
 # Claude Code plugin (includes the report-detection hook)
