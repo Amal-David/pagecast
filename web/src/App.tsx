@@ -88,7 +88,7 @@ import {
   cloudflareProjectValue,
   getCloudflareProjectSelection
 } from "@/lib/cloudflare";
-import { cn } from "@/lib/utils";
+import { cn, isAnalyticsEnabled } from "@/lib/utils";
 import { copyToClipboard, relativeTime } from "@/lib/format";
 import type { CloudflareProject, CloudflareStatus, FeedbackConfig, Report } from "@/lib/types";
 
@@ -399,9 +399,7 @@ export function App() {
   );
   const cloudflareReady = !status.isLoading && status.data !== undefined;
   const feedback = status.data?.config?.feedback ?? null;
-  const feedbackEnabled = Boolean(
-    feedback?.url && feedback.analyticsEnabled !== false
-  );
+  const feedbackEnabled = isAnalyticsEnabled(feedback);
   const cloudflareSyncEnabled = status.data?.config?.cloudflareSyncEnabled !== false;
   const showOnboarding =
     activeView === "pages" && !connected && reportItems.length === 0 && !reports.isLoading;
@@ -490,7 +488,7 @@ export function App() {
               cloudflareSyncPending={syncCloudflare.isPending}
               onCloudflareProjectSelected={syncSelectedCloudflareProject}
               onSelectReport={selectReport}
-              onOpenSettings={() => setActiveView("settings")}
+              onOpenSettings={goToSettings}
               onRequestDelete={setPendingDelete}
               onRequestRevokeAll={setPendingRevoke}
                 />

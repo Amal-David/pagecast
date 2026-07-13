@@ -54,3 +54,19 @@ test("page header actions keep the three-dot menu on the same row", () => {
   assert.match(actions, /flex-nowrap/);
   assert.doesNotMatch(actions, /\bflex-wrap\b/);
 });
+
+test("settings entry points reset consistently and analytics enablement has one rule", () => {
+  const app = source("web/src/App.tsx");
+  const feedbackCard = source("web/src/components/feedback-card.tsx");
+  const utils = source("web/src/lib/utils.ts");
+  const pageSidebar = /<PageSidebar[\s\S]*?\/>/.exec(app)?.[0] || "";
+
+  assert.match(pageSidebar, /onOpenSettings=\{goToSettings\}/);
+  assert.doesNotMatch(pageSidebar, /setActiveView\("settings"\)/);
+  assert.match(app, /const feedbackEnabled = isAnalyticsEnabled\(feedback\);/);
+  assert.match(feedbackCard, /const enabled = isAnalyticsEnabled\(feedback\);/);
+  assert.match(
+    utils,
+    /return Boolean\(feedback\?\.url && feedback\.analyticsEnabled !== false\);/
+  );
+});
