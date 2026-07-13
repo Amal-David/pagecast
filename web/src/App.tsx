@@ -1670,7 +1670,7 @@ function PreviewPane({
 
   return (
     <section className="overflow-hidden rounded-lg border bg-background shadow-sm">
-      <div className="flex flex-col gap-3 border-b px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
+      <div className="flex flex-col gap-3 border-b px-4 py-3 2xl:flex-row 2xl:items-center 2xl:justify-between">
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
             <span>Pages</span>
@@ -1710,7 +1710,7 @@ function PreviewPane({
           </p>
         </div>
 
-        <div className="flex max-w-full flex-wrap items-center gap-2">
+        <div className="flex max-w-full flex-nowrap items-center gap-2 overflow-x-auto pb-1">
           {publishBlocked ? (
             <Tooltip>
               <TooltipTrigger asChild>

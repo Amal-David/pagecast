@@ -44,3 +44,13 @@ test("Settings navigation opens real sections and makes analytics discoverable",
   }
   assert.match(settings, /<ActivityPanel[\s\S]*global/);
 });
+
+test("page header actions keep the three-dot menu on the same row", () => {
+  const app = source("web/src/App.tsx");
+  const preview = /function PreviewPane[\s\S]*?function PublishProgress/.exec(app)?.[0] || "";
+  const actions = /<div className="flex max-w-full[\s\S]*?<DropdownMenuContent align="end">/.exec(preview)?.[0] || "";
+
+  assert.match(preview, /2xl:flex-row 2xl:items-center 2xl:justify-between/);
+  assert.match(actions, /flex-nowrap/);
+  assert.doesNotMatch(actions, /\bflex-wrap\b/);
+});
