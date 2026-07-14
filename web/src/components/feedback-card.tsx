@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useFeedbackSetup } from "@/hooks/use-pagecast";
 import type { FeedbackConfig } from "@/lib/types";
+import { isAnalyticsEnabled } from "@/lib/utils";
 
 interface FeedbackCardProps {
   connected: boolean;
@@ -18,7 +19,7 @@ interface FeedbackCardProps {
 
 export function FeedbackCard({ connected, feedback }: FeedbackCardProps) {
   const setup = useFeedbackSetup();
-  const enabled = Boolean(feedback?.url && feedback.analyticsEnabled !== false);
+  const enabled = isAnalyticsEnabled(feedback);
   const reactionsEnabled = feedback?.reactionsEnabled === true;
 
   return (
