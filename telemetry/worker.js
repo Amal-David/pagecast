@@ -23,6 +23,10 @@ export const COMMAND_ALLOWLIST = [
   "pages",
   "feedback",
   "goal",
+  "background",
+  "local-url",
+  "setup-local-url",
+  "open",
   "telemetry",
   "help",
   "version",
@@ -32,6 +36,8 @@ const SUBCOMMAND_ALLOWLIST = {
   pages: ["setup", "status", "projects", "deploy", "deployments"],
   feedback: ["setup", "status"],
   goal: ["publish", "status", "stop"],
+  background: ["start", "stop", "status", "service"],
+  "local-url": ["install", "remove", "status", "setup", "uninstall"],
   telemetry: ["status", "enable", "disable"]
 };
 const OUTCOME_ALLOWLIST = ["started", "success", "error"];

@@ -186,6 +186,27 @@ test("worker rejects non-allowlisted commands and subcommands", () => {
   assert.equal(cleanAnonId("not-an-id"), "");
 });
 
+test("worker accepts every command shape emitted by the current CLI", () => {
+  for (const argv of [
+    [],
+    ["publish"],
+    ["pages", "deploy"],
+    ["feedback", "status"],
+    ["goal", "publish"],
+    ["background", "service"],
+    ["local-url", "install"],
+    ["setup-local-url"],
+    ["open"],
+    ["telemetry", "status"],
+    ["--help"],
+    ["--version"],
+    ["not-a-command"]
+  ]) {
+    const classification = classifyCommand(argv);
+    assert.ok(buildDataPoint(classification), `worker rejected ${JSON.stringify(classification)}`);
+  }
+});
+
 test("worker platform validators allowlist os/arch and shape version/node", () => {
   const OS = ["darwin", "linux", "win32"];
   assert.equal(cleanEnum("darwin", OS), "darwin");
