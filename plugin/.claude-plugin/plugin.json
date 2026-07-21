@@ -1,7 +1,7 @@
 {
   "name": "pagecast",
   "displayName": "Pagecast",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "When your agent finishes an HTML or Markdown report, plan, or doc, it asks whether to publish it as a Claude Code Artifact or as a Pagecast Cloudflare Pages URL.",
   "author": {
     "name": "Pagecast"
