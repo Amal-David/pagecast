@@ -1,7 +1,7 @@
 ---
 name: publish-report
 description: Help publish local HTML, Markdown, or built static web projects by asking whether to use Claude Code Artifacts or Pagecast/Cloudflare Pages when the user's publish request is ambiguous. Use when a report, plan, doc, dashboard, analysis, or static build output should be shared from Claude Code, especially when the user says publish, share, make a public link, or send this. If the user explicitly says Pagecast, publish with Pagecast.
-version: 0.6.0
+version: 0.6.1
 ---
 
 # Publish with Pagecast

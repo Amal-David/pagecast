@@ -5,6 +5,27 @@ All notable changes to Pagecast are documented here. This project follows
 
 ## Unreleased
 
+## 0.6.1 — 2026-07-21
+
+### Added
+
+- **Skills.sh installation support** — the packaged publishing skill now has a
+  one-command install path and agent-readable catalog guidance.
+- **Real Settings navigation and Analytics destination** — Settings sidebar
+  items open their actual sections, analytics uses the saved configuration, and
+  page actions remain available on one row.
+
+### Fixed
+
+- **Activity credential migration** — compatible legacy feedback credentials
+  move into Pagecast Home only when both Pages targets use the same Cloudflare
+  account.
+- **Wrangler D1 provisioning compatibility** — Activity setup retries without
+  `--json` when the installed Wrangler version rejects that option.
+- **Telemetry command coverage** — ingestion accepts the current CLI's
+  background, local URL, setup, and open command classifications while keeping
+  unknown command input anonymized.
+
 ## 0.6.0 — 2026-07-14
 
 ### Added

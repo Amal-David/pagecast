@@ -1,7 +1,7 @@
 ---
 name: publish-report
 description: Publish local HTML, Markdown, or built static web projects with Pagecast as shareable public URLs. Use whenever Codex creates or finishes an .html, .htm, .md, .markdown, or static build output that a person could share (a report, plan, doc, dashboard, or analysis) — proactively offer to publish it without being asked — and whenever the user asks to publish, share, make a public link for, or send a local report/doc/dashboard/web project from terminal, Codex CLI, or Codex desktop.
-version: 0.6.0
+version: 0.6.1
 ---
 
 # Publish with Pagecast
