@@ -4760,6 +4760,49 @@ test("setupFeedback creates KV, deploys the worker, and returns the url", async 
   await fs.rm(deployDir, { recursive: true, force: true });
 });
 
+test("setupFeedback falls back when Wrangler d1 create does not support --json", async () => {
+  const calls = [];
+  const { fakeSpawn } = makeWranglerFake((args) => {
+    const line = args.join(" ");
+    calls.push(line);
+    if (line.includes("kv namespace list")) return { code: 0, output: "[]" };
+    if (line.includes("d1 list")) return { code: 0, output: "[]" };
+    if (line.includes("d1 create") && line.includes("--json")) {
+      return { code: 1, output: "Unknown argument: json", stderr: true };
+    }
+    if (line.includes("d1 create")) {
+      return {
+        code: 0,
+        output: 'database_id = "11111111-2222-4333-8444-555555555555"'
+      };
+    }
+    if (line.includes("d1 execute")) return { code: 0, output: "ok" };
+    if (line.includes("deploy")) {
+      return { code: 0, output: "https://pagecast-feedback.acme.workers.dev" };
+    }
+    return { code: 0, output: "" };
+  });
+
+  const manager = createCloudflareAuthManager({ spawnImpl: fakeSpawn });
+  const deployDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-d1-fallback-"));
+  try {
+    const result = await manager.setupFeedback({
+      workerSource: "export default {}",
+      statsToken: "stats",
+      visitorSecret: "visitor",
+      reactionsEnabled: false,
+      deployDir
+    });
+    assert.equal(result.d1Id, "11111111-2222-4333-8444-555555555555");
+    assert.ok(calls.some((line) => line.includes("d1 create pagecast-feedback-analytics --json")));
+    assert.ok(calls.some(
+      (line) => line.includes("d1 create pagecast-feedback-analytics") && !line.includes("--json")
+    ));
+  } finally {
+    await fs.rm(deployDir, { recursive: true, force: true });
+  }
+});
+
 test("setupFeedback deploys with a relative --config from deployDir (space-safe under shell)", async () => {
   // Regression: with shell:true on Windows (needed to spawn the npx .cmd shim),
   // cmd.exe splits an unquoted absolute --config path on spaces. The deploy must

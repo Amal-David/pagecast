@@ -182,17 +182,6 @@ async function initializeUnderLease({ dataDir, workspaceDataDir, cwd }) {
   const registry = await readJson(registryPath, { version: 1, workspaces: [] });
   registry.version = 1;
   registry.workspaces = Array.isArray(registry.workspaces) ? registry.workspaces : [];
-  const registered = registry.workspaces.find((entry) => entry.id === workspace.id);
-  if (registered) {
-    return {
-      dataDir,
-      workspaceDataDir,
-      workspaceId: workspace.id,
-      imported: false,
-      mode: registered.mode || "home"
-    };
-  }
-
   const legacyConfigPath = path.join(workspaceDataDir, CONFIG_FILE);
   const legacyReportsPath = path.join(workspaceDataDir, REPORT_STATE_FILE);
   const legacyOwnerPath = path.join(workspaceDataDir, PUBLISHER_OWNER_FILE);
@@ -207,6 +196,34 @@ async function initializeUnderLease({ dataDir, workspaceDataDir, cwd }) {
   const mode = homeTarget && legacyTarget && !sameTarget(homeTarget, legacyTarget)
     ? "legacy-target"
     : "home";
+
+  // Feedback resources are account-scoped, not Pages-project-scoped. A legacy
+  // workspace may therefore hold the only copy of the Worker credentials even
+  // when its Pages project is quarantined from Home. Adopt only that feedback
+  // block, and only when both profiles name the same Cloudflare account.
+  if (
+    homeConfig &&
+    !homeConfig.feedback &&
+    legacyConfig?.feedback &&
+    homeTarget?.accountId &&
+    homeTarget.accountId === legacyTarget?.accountId
+  ) {
+    await atomicWriteJson(homeConfigPath, {
+      ...homeConfig,
+      feedback: structuredClone(legacyConfig.feedback)
+    });
+  }
+
+  const registered = registry.workspaces.find((entry) => entry.id === workspace.id);
+  if (registered) {
+    return {
+      dataDir,
+      workspaceDataDir,
+      workspaceId: workspace.id,
+      imported: false,
+      mode: registered.mode || "home"
+    };
+  }
 
   if (!homeHasConfig && legacyConfig) {
     await atomicWriteJson(homeConfigPath, legacyConfig);

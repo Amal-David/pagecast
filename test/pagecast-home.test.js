@@ -152,5 +152,53 @@ test("a workspace on another Cloudflare project is registered as legacy and neve
   assert.equal(secondEntry.mode, "legacy-target");
   assert.equal(secondEntry.legacyTarget.projectName, "other-project");
 
+  // A previously registered legacy workspace can later supply the only copy
+  // of account-scoped feedback credentials without changing Home's Pages target.
+  const secondConfigPath = path.join(secondCwd, ".pagecast", "config.json");
+  const secondConfig = JSON.parse(await fs.readFile(secondConfigPath, "utf8"));
+  secondConfig.feedback = {
+    url: "https://pagecast-feedback.example.workers.dev",
+    workerName: "pagecast-feedback",
+    kvId: "legacy-kv-id",
+    statsToken: "preserved-stats-token"
+  };
+  await fs.writeFile(secondConfigPath, JSON.stringify(secondConfig));
+  const registeredRerun = await initializePagecastHome({ homeDir, cwd: secondCwd });
+  assert.equal(registeredRerun.imported, false);
+
+  const mergedConfig = JSON.parse(await fs.readFile(path.join(first.dataDir, "config.json"), "utf8"));
+  assert.equal(mergedConfig.pages.projectName, "primary-home");
+  assert.deepEqual(mergedConfig.feedback, secondConfig.feedback);
+
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("legacy feedback credentials never cross Cloudflare account boundaries", async () => {
+  const root = await tempRoot();
+  const homeDir = path.join(root, "user");
+  const primaryCwd = path.join(root, "primary");
+  const foreignCwd = path.join(root, "foreign");
+
+  for (const [cwd, accountId, feedback] of [
+    [primaryCwd, "a".repeat(32), null],
+    [foreignCwd, "b".repeat(32), { statsToken: "must-not-cross-accounts" }]
+  ]) {
+    const legacy = path.join(cwd, ".pagecast");
+    await fs.mkdir(legacy, { recursive: true });
+    await fs.writeFile(path.join(legacy, "config.json"), JSON.stringify({
+      pages: { accountId, projectName: `${path.basename(cwd)}-project` },
+      feedback
+    }));
+    await fs.writeFile(
+      path.join(legacy, "reports.json"),
+      JSON.stringify({ version: 4, reports: [], redirects: [], operations: [], pendingDeletions: [] })
+    );
+  }
+
+  const primary = await initializePagecastHome({ homeDir, cwd: primaryCwd });
+  await initializePagecastHome({ homeDir, cwd: foreignCwd });
+  const config = JSON.parse(await fs.readFile(path.join(primary.dataDir, "config.json"), "utf8"));
+  assert.equal(config.feedback, null);
+
   await fs.rm(root, { recursive: true, force: true });
 });

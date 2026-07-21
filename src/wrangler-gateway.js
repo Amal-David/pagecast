@@ -853,9 +853,23 @@ export function createCloudflareAuthManager({
         // Continue to the create attempt when listing is unavailable.
       }
       if (!d1Id) {
-        d1Id = parseD1DatabaseId(
-          await runWrangler(["d1", "create", databaseName, "--json"], timeoutMs, env)
-        );
+        let createOutput;
+        try {
+          createOutput = await runWrangler(
+            ["d1", "create", databaseName, "--json"],
+            timeoutMs,
+            env
+          );
+        } catch (error) {
+          if (!/unknown argument:\s*json|unknown option.*--json/i.test(stripAnsi(error.message || ""))) {
+            throw error;
+          }
+          // Wrangler versions including Pagecast's pinned 4.86 support JSON
+          // for `d1 list` but not `d1 create`. Their text output includes the
+          // same database_id, which parseD1DatabaseId already handles.
+          createOutput = await runWrangler(["d1", "create", databaseName], timeoutMs, env);
+        }
+        d1Id = parseD1DatabaseId(createOutput);
       }
       if (!d1Id) throw appError("Could not create the Pagecast analytics D1 database.", 502);
 
