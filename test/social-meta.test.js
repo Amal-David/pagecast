@@ -76,6 +76,7 @@ test("hasCustomOgMeta recognizes quoted, unquoted, and spaced og: attributes", (
   // attributes must not suppress injection.
   assert.equal(hasCustomOgMeta('<div property="og:title">X</div>'), false);
   assert.equal(hasCustomOgMeta('<meta data-name="og:title" content="X">'), false);
+  assert.equal(hasCustomOgMeta('<meta-card property="og:title"></meta-card>'), false);
   assert.equal(hasCustomOgMeta(""), false);
   // The unquoted form must also block injection, not just detection.
   const unquoted = "<head><meta property=og:title content=Author></head>";

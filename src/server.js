@@ -1820,7 +1820,8 @@ export function extractDescription(html) {
 // Shared by injectSocialMeta and the publish pipeline so the "don't clobber
 // custom OG" decision can never drift between the two.
 export function hasCustomOgMeta(html) {
-  return /<meta\b[^>]*\s(?:property|name)\s*=\s*["']?og:/i.test(String(html || ""));
+  // (?=\s) pins the tag name: <meta-card …> is a custom element, not <meta>.
+  return /<meta(?=\s)[^>]*\s(?:property|name)\s*=\s*["']?og:/i.test(String(html || ""));
 }
 
 // Inject Open Graph + Twitter card meta so shared links unfurl richly instead of
