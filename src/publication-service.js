@@ -36,6 +36,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
     fetchWithTimeout,
     findFolderEntry,
     fs,
+    hasCustomOgMeta,
     inferLegacyRedirectProjectRef,
     injectBadge,
     injectFeedbackWidget,
@@ -371,12 +372,20 @@ export function createPublicationService(options = {}, dependencies = {}) {
     // Per-page OG card, rendered locally and deployed as a static asset of this
     // snapshot — page content never leaves the user's own Pages project. Skip
     // when the document manages its own og: meta (injectSocialMeta leaves such
-    // documents untouched) or when the source tree already ships a file by the
-    // reserved name; fall back to the static branded card if rendering fails.
+    // documents untouched); fall back to the static branded card if rendering
+    // fails. The default card and rendered cards are both 1200×630; a source
+    // tree that already ships a file under the reserved name is treated as a
+    // deliberate override — referenced as-is, dimensions unknown.
     let image = badgeOn ? DEFAULT_OG_IMAGE : "";
-    if (badgeOn && pageUrl && !/(?:property|name)=["']og:/i.test(html)) {
+    let imageWidth = OG_CARD_WIDTH;
+    let imageHeight = OG_CARD_HEIGHT;
+    if (badgeOn && pageUrl && !hasCustomOgMeta(html)) {
       const cardPath = path.join(contentRoot, OG_CARD_FILENAME);
-      if (!(await pathExists(cardPath))) {
+      if (await pathExists(cardPath)) {
+        image = joinUrl(pageUrl, OG_CARD_FILENAME);
+        imageWidth = 0;
+        imageHeight = 0;
+      } else {
         const card = await renderOgCard({
           title,
           description,
@@ -394,8 +403,8 @@ export function createPublicationService(options = {}, dependencies = {}) {
       description,
       url: pageUrl,
       image,
-      imageWidth: OG_CARD_WIDTH,
-      imageHeight: OG_CARD_HEIGHT,
+      imageWidth,
+      imageHeight,
       siteName: badgeOn ? "Pagecast" : ""
     });
     await fs.writeFile(indexPath, html, "utf8");

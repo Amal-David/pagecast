@@ -23,12 +23,15 @@ RUN node --input-type=module -e \
 
 WORKDIR /app
 
-# pagecast has zero runtime npm dependencies, so there is nothing to `npm install`
-# for the app itself — copy only the files the CLI needs at runtime. Own them as
-# the unprivileged `node` user (uid 1000, shipped with the base image).
-COPY --chown=node:node package.json llms.txt ./
+# Runtime dependencies (satori + resvg WASM for publish-time OG card rendering)
+# install from the frozen lockfile with lifecycle scripts disabled, then only
+# the files the CLI needs at runtime are copied in. Own them as the
+# unprivileged `node` user (uid 1000, shipped with the base image).
+COPY --chown=node:node package.json package-lock.json llms.txt ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --chown=node:node src/ ./src/
 COPY --chown=node:node public/ ./public/
+COPY --chown=node:node assets/ ./assets/
 COPY --chown=node:node feedback/ ./feedback/
 
 # Pre-create the state dir and hand /app to `node` so the unprivileged process

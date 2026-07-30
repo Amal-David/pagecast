@@ -11,6 +11,7 @@ import {
   createReportStore,
   extractDescription,
   extractTitle,
+  hasCustomOgMeta,
   injectSocialMeta
 } from "../src/server.js";
 import { OG_CARD_FILENAME } from "../src/og-card.js";
@@ -62,6 +63,18 @@ test("injectSocialMeta emits image dimensions only alongside an image", () => {
 test("injectSocialMeta leaves a doc that already has its own og: meta untouched", () => {
   const html = '<head><meta property="og:title" content="Author"></head>';
   assert.equal(injectSocialMeta(html, { title: "Ours", url: "https://x/" }), html);
+});
+
+test("hasCustomOgMeta recognizes quoted, unquoted, and spaced og: attributes", () => {
+  assert.ok(hasCustomOgMeta('<meta property="og:title" content="X">'));
+  assert.ok(hasCustomOgMeta("<meta property='og:title' content='X'>"));
+  assert.ok(hasCustomOgMeta("<meta property=og:title content=X>"));
+  assert.ok(hasCustomOgMeta('<meta name = "og:image" content="X">'));
+  assert.equal(hasCustomOgMeta('<meta name="description" content="og: is cool">'), false);
+  assert.equal(hasCustomOgMeta(""), false);
+  // The unquoted form must also block injection, not just detection.
+  const unquoted = "<head><meta property=og:title content=Author></head>";
+  assert.equal(injectSocialMeta(unquoted, { title: "Ours", url: "https://x/" }), unquoted);
 });
 
 test("injectSocialMeta is a no-op when there is no usable content", () => {
@@ -122,7 +135,7 @@ function fakeDeploySpawn(command, args, options) {
   return child;
 }
 
-async function publishOnce({ badge }) {
+async function publishOnce({ badge, extraFiles = {} }) {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-og-"));
   const dataDir = path.join(tempDir, "data");
   const reportDir = path.join(tempDir, "report");
@@ -132,6 +145,9 @@ async function publishOnce({ badge }) {
     '<!doctype html><html><head><title>Quarterly Update</title>' +
       '<meta name="description" content="Revenue up 18%."></head><body><h1>Q</h1></body></html>'
   );
+  for (const [name, content] of Object.entries(extraFiles)) {
+    await fs.writeFile(path.join(reportDir, name), content);
+  }
 
   const configStore = createConfigStore({ dataDir });
   await configStore.init();
@@ -188,6 +204,23 @@ test("publishing injects per-report OG meta with a locally rendered card (badge 
   assert.match(staged, /<meta property="og:site_name" content="Pagecast">/);
   const card = await fs.readFile(path.join(stagedDir, OG_CARD_FILENAME));
   assert.equal(card.subarray(1, 4).toString("latin1"), "PNG", "card must be staged as a PNG");
+});
+
+test("a source tree shipping its own reserved card file overrides rendering", async () => {
+  const supplied = "user-supplied bytes, deliberately not a PNG";
+  const { staged, stagedDir, slug, baseUrl } = await publishOnce({
+    badge: true,
+    extraFiles: { [OG_CARD_FILENAME]: supplied }
+  });
+  assert.ok(
+    staged.includes(`<meta property="og:image" content="${baseUrl}/p/${slug}/${OG_CARD_FILENAME}">`),
+    "og:image should reference the user-supplied card"
+  );
+  // Unknown dimensions for a user-supplied file — the 1200×630 claim must not
+  // be emitted for an image we did not render.
+  assert.doesNotMatch(staged, /og:image:width/);
+  const card = await fs.readFile(path.join(stagedDir, OG_CARD_FILENAME), "utf8");
+  assert.equal(card, supplied, "the user's file must not be overwritten");
 });
 
 test("white-label publish keeps OG text but omits the Pagecast image", async () => {

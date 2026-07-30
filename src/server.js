@@ -1813,6 +1813,14 @@ export function extractDescription(html) {
   return "";
 }
 
+// True when a document already declares its own Open Graph metadata (any
+// og:-prefixed property/name — quoted, unquoted, or spaced around "="). Shared
+// by injectSocialMeta and the publish pipeline so the "don't clobber custom
+// OG" decision can never drift between the two.
+export function hasCustomOgMeta(html) {
+  return /(?:property|name)\s*=\s*["']?og:/i.test(String(html || ""));
+}
+
 // Inject Open Graph + Twitter card meta so shared links unfurl richly instead of
 // as bare URLs. Idempotent and non-clobbering: if the document already declares
 // its own og: meta, it's returned unchanged. `image`/`siteName` are only emitted
@@ -1823,7 +1831,7 @@ export function injectSocialMeta(
   { title, description, url, image, imageWidth, imageHeight, siteName } = {}
 ) {
   const doc = String(html || "");
-  if (/(?:property|name)=["']og:/i.test(doc)) {
+  if (hasCustomOgMeta(doc)) {
     return doc;
   }
   if (!title && !description && !url) {
@@ -1882,6 +1890,7 @@ export function createCloudflarePagesPublisher(options = {}) {
     fetchWithTimeout,
     findFolderEntry,
     fs,
+    hasCustomOgMeta,
     inferLegacyRedirectProjectRef,
     injectBadge,
     injectFeedbackWidget,

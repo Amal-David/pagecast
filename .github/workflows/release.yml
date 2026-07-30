@@ -73,6 +73,7 @@ jobs:
           NODE
       - name: Verify source, build, and tests
         run: |
+          npm ci --ignore-scripts
           npm run build
           npm run check
           pnpm -C web exec tsc --noEmit
