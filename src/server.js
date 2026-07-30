@@ -1813,12 +1813,14 @@ export function extractDescription(html) {
   return "";
 }
 
-// True when a document already declares its own Open Graph metadata (any
-// og:-prefixed property/name — quoted, unquoted, or spaced around "="). Shared
-// by injectSocialMeta and the publish pipeline so the "don't clobber custom
-// OG" decision can never drift between the two.
+// True when a document already declares its own Open Graph metadata: a <meta>
+// tag with a whitespace-delimited og:-prefixed property/name — quoted,
+// unquoted, or spaced around "=". Scoped to <meta> so RDFa (<div
+// property="og:…">) or data-* attributes elsewhere don't suppress injection.
+// Shared by injectSocialMeta and the publish pipeline so the "don't clobber
+// custom OG" decision can never drift between the two.
 export function hasCustomOgMeta(html) {
-  return /(?:property|name)\s*=\s*["']?og:/i.test(String(html || ""));
+  return /<meta\b[^>]*\s(?:property|name)\s*=\s*["']?og:/i.test(String(html || ""));
 }
 
 // Inject Open Graph + Twitter card meta so shared links unfurl richly instead of
