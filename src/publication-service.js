@@ -3,11 +3,24 @@ import { createHmac } from "node:crypto";
 // Internal managed-publication service. The compatibility factory in server.js
 // supplies platform and policy dependencies so this module stays acyclic and
 // remains outside the package root export surface.
+
+// Bare host for the OG card footer, e.g. "myproj.pages.dev".
+function hostFromUrl(value) {
+  try {
+    return new URL(value).host;
+  } catch {
+    return "";
+  }
+}
+
 export function createPublicationService(options = {}, dependencies = {}) {
   const {
     DEFAULT_OG_IMAGE,
     DEFAULT_PAGES_BRANCH,
     DEFAULT_PAGES_PROJECT_NAME,
+    OG_CARD_FILENAME,
+    OG_CARD_HEIGHT,
+    OG_CARD_WIDTH,
     PAGECAST_PROJECT_MARKER_FILE,
     PAGECAST_SYNC_MANIFEST_PATH,
     PROJECT_ROOT,
@@ -55,6 +68,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
     publicationTokenFilesystemKey,
     randomBytes,
     renderAuthMiddleware,
+    renderOgCard,
     renderRoutesJson,
     runSpawnCommand,
     spawn,
@@ -349,13 +363,39 @@ export function createPublicationService(options = {}, dependencies = {}) {
     if (badgeOn) {
       html = injectBadge(html);
     }
+    const title = extractTitle(html, report.name);
+    const description = extractDescription(html);
+    const pageUrl = pagesConfig?.baseUrl
+      ? joinUrl(pagesConfig.baseUrl, `/p/${encodeURIComponent(slug)}/`)
+      : "";
+    // Per-page OG card, rendered locally and deployed as a static asset of this
+    // snapshot — page content never leaves the user's own Pages project. Skip
+    // when the document manages its own og: meta (injectSocialMeta leaves such
+    // documents untouched) or when the source tree already ships a file by the
+    // reserved name; fall back to the static branded card if rendering fails.
+    let image = badgeOn ? DEFAULT_OG_IMAGE : "";
+    if (badgeOn && pageUrl && !/(?:property|name)=["']og:/i.test(html)) {
+      const cardPath = path.join(contentRoot, OG_CARD_FILENAME);
+      if (!(await pathExists(cardPath))) {
+        const card = await renderOgCard({
+          title,
+          description,
+          siteHost: hostFromUrl(pagesConfig.baseUrl),
+          branded: true
+        });
+        if (card) {
+          await fs.writeFile(cardPath, card);
+          image = joinUrl(pageUrl, OG_CARD_FILENAME);
+        }
+      }
+    }
     html = injectSocialMeta(html, {
-      title: extractTitle(html, report.name),
-      description: extractDescription(html),
-      url: pagesConfig?.baseUrl
-        ? joinUrl(pagesConfig.baseUrl, `/p/${encodeURIComponent(slug)}/`)
-        : "",
-      image: badgeOn ? DEFAULT_OG_IMAGE : "",
+      title,
+      description,
+      url: pageUrl,
+      image,
+      imageWidth: OG_CARD_WIDTH,
+      imageHeight: OG_CARD_HEIGHT,
       siteName: badgeOn ? "Pagecast" : ""
     });
     await fs.writeFile(indexPath, html, "utf8");

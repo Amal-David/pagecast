@@ -6,7 +6,6 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  DEFAULT_OG_IMAGE,
   createCloudflarePagesPublisher,
   createConfigStore,
   createReportStore,
@@ -14,6 +13,7 @@ import {
   extractTitle,
   injectSocialMeta
 } from "../src/server.js";
+import { OG_CARD_FILENAME } from "../src/og-card.js";
 
 // --- unit: injectSocialMeta -------------------------------------------------
 
@@ -40,6 +40,23 @@ test("injectSocialMeta omits image/site_name when not provided (white-label)", (
   assert.match(out, /og:title/);
   assert.doesNotMatch(out, /og:image/);
   assert.doesNotMatch(out, /og:site_name/);
+});
+
+test("injectSocialMeta emits image dimensions only alongside an image", () => {
+  const withImage = injectSocialMeta("<head></head>", {
+    title: "T",
+    image: "https://img/og.png",
+    imageWidth: 1200,
+    imageHeight: 630
+  });
+  assert.match(withImage, /<meta property="og:image:width" content="1200">/);
+  assert.match(withImage, /<meta property="og:image:height" content="630">/);
+  const withoutImage = injectSocialMeta("<head></head>", {
+    title: "T",
+    imageWidth: 1200,
+    imageHeight: 630
+  });
+  assert.doesNotMatch(withoutImage, /og:image/);
 });
 
 test("injectSocialMeta leaves a doc that already has its own og: meta untouched", () => {
@@ -152,22 +169,31 @@ async function publishOnce({ badge }) {
   await store.commitPublication(report.id, draft.publication);
 
   const slug = draft.publication.slug || draft.publication.token;
-  const staged = await fs.readFile(path.join(publisher.siteRoot, "p", slug, "index.html"), "utf8");
-  return { staged, slug, baseUrl: configStore.get().pages.baseUrl };
+  const stagedDir = path.join(publisher.siteRoot, "p", slug);
+  const staged = await fs.readFile(path.join(stagedDir, "index.html"), "utf8");
+  return { staged, stagedDir, slug, baseUrl: configStore.get().pages.baseUrl };
 }
 
-test("publishing injects per-report OG meta (badge on → Pagecast card image)", async () => {
-  const { staged, slug, baseUrl } = await publishOnce({ badge: true });
+test("publishing injects per-report OG meta with a locally rendered card (badge on)", async () => {
+  const { staged, stagedDir, slug, baseUrl } = await publishOnce({ badge: true });
   assert.match(staged, /<meta property="og:title" content="Quarterly Update">/);
   assert.match(staged, /<meta property="og:description" content="Revenue up 18%\.">/);
   assert.ok(staged.includes(`<meta property="og:url" content="${baseUrl}/p/${slug}/">`));
-  assert.ok(staged.includes(`<meta property="og:image" content="${DEFAULT_OG_IMAGE}">`));
+  assert.ok(
+    staged.includes(`<meta property="og:image" content="${baseUrl}/p/${slug}/${OG_CARD_FILENAME}">`),
+    "og:image should point at the per-page card deployed with the snapshot"
+  );
+  assert.match(staged, /<meta property="og:image:width" content="1200">/);
+  assert.match(staged, /<meta property="og:image:height" content="630">/);
   assert.match(staged, /<meta property="og:site_name" content="Pagecast">/);
+  const card = await fs.readFile(path.join(stagedDir, OG_CARD_FILENAME));
+  assert.equal(card.subarray(1, 4).toString("latin1"), "PNG", "card must be staged as a PNG");
 });
 
 test("white-label publish keeps OG text but omits the Pagecast image", async () => {
-  const { staged } = await publishOnce({ badge: false });
+  const { staged, stagedDir } = await publishOnce({ badge: false });
   assert.match(staged, /og:title/);
   assert.doesNotMatch(staged, /og:image/);
   assert.doesNotMatch(staged, /og:site_name/);
+  await assert.rejects(fs.readFile(path.join(stagedDir, OG_CARD_FILENAME)), /ENOENT/);
 });

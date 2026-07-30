@@ -90,6 +90,7 @@ export {
 } from "./wrangler-gateway.js";
 import { TunnelManager } from "./tunnel.js";
 import { createPublicationService } from "./publication-service.js";
+import { OG_CARD_FILENAME, OG_CARD_HEIGHT, OG_CARD_WIDTH, renderOgCard } from "./og-card.js";
 export { TunnelManager, extractPublicUrl } from "./tunnel.js";
 import {
   WorkspaceLease,
@@ -1752,10 +1753,10 @@ export function injectBadge(html) {
   return `${html}\n${tag}\n`;
 }
 
-// Default Open Graph card image — a Pagecast-branded card already hosted on the
-// landing site. Branded so every shared link carries Pagecast into the feed
-// (the pre-click half of the badge loop). Per-report dynamic cards are a future
-// enhancement; keep this a single constant so it's a one-line change.
+// Fallback Open Graph card image — a Pagecast-branded card already hosted on
+// the landing site. Publishes normally render a per-page card locally (see
+// og-card.js) and deploy it with the snapshot; this static card covers pages
+// with no usable title and render failures.
 export const DEFAULT_OG_IMAGE = "https://pagecasthq.pages.dev/og-image.png";
 
 function escapeAttr(value) {
@@ -1817,7 +1818,10 @@ export function extractDescription(html) {
 // its own og: meta, it's returned unchanged. `image`/`siteName` are only emitted
 // when provided (the caller gates Pagecast branding on the badge/white-label
 // setting). Pure + exported for testing.
-export function injectSocialMeta(html, { title, description, url, image, siteName } = {}) {
+export function injectSocialMeta(
+  html,
+  { title, description, url, image, imageWidth, imageHeight, siteName } = {}
+) {
   const doc = String(html || "");
   if (/(?:property|name)=["']og:/i.test(doc)) {
     return doc;
@@ -1836,6 +1840,10 @@ export function injectSocialMeta(html, { title, description, url, image, siteNam
   meta("og:description", description);
   meta("og:url", url);
   meta("og:image", image);
+  if (image) {
+    meta("og:image:width", imageWidth);
+    meta("og:image:height", imageHeight);
+  }
   meta("og:site_name", siteName);
   meta("twitter:card", "summary_large_image", "name");
   meta("twitter:title", title, "name");
@@ -1856,6 +1864,9 @@ export function createCloudflarePagesPublisher(options = {}) {
     DEFAULT_OG_IMAGE,
     DEFAULT_PAGES_BRANCH,
     DEFAULT_PAGES_PROJECT_NAME,
+    OG_CARD_FILENAME,
+    OG_CARD_HEIGHT,
+    OG_CARD_WIDTH,
     PAGECAST_PROJECT_MARKER_FILE,
     PAGECAST_SYNC_MANIFEST_PATH,
     PROJECT_ROOT,
@@ -1903,6 +1914,7 @@ export function createCloudflarePagesPublisher(options = {}) {
     publicationTokenFilesystemKey,
     randomBytes,
     renderAuthMiddleware,
+    renderOgCard,
     renderRoutesJson,
     runSpawnCommand,
     spawn,
