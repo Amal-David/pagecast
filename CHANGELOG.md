@@ -5,6 +5,8 @@ All notable changes to Pagecast are documented here. This project follows
 
 ## Unreleased
 
+## 0.7.0 — 2026-08-02
+
 ### Added
 
 - **Per-page Open Graph card images** — publishing now renders a 1200×630
