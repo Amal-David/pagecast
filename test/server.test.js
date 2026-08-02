@@ -5002,7 +5002,10 @@ test("updatePages never carries a prior account target origin into a new target"
     accountId: "b".repeat(32),
     accountName: "",
     branch: "main",
-    baseUrl: "https://beta-project.pages.dev"
+    baseUrl: "https://beta-project.pages.dev",
+    // A custom domain belongs to one Cloudflare project, so switching targets
+    // must drop it rather than hand out links the new project cannot serve.
+    customDomain: null
   });
 
   await fs.rm(dir, { recursive: true, force: true });

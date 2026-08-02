@@ -121,7 +121,8 @@ test("cross-project adoption requires an explicit baseUrl and scopes only that p
     assert.deepEqual(runtime.configStore.get().pages, {
       ...CURRENT_TARGET,
       accountName: "",
-      branch: "main"
+      branch: "main",
+      customDomain: null
     });
   } finally {
     await runtime.close();

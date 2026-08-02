@@ -48,7 +48,11 @@ function normalizeTarget(config) {
     accountId,
     projectName,
     baseUrl: nonEmpty(pages?.baseUrl),
-    accountName: nonEmpty(pages?.accountName)
+    accountName: nonEmpty(pages?.accountName),
+    // Carried so a Home migration keeps the target's custom domain. Identity
+    // stays {accountId, projectName}; sameTarget below intentionally ignores
+    // this, because a hostname is metadata, not identity.
+    customDomain: pages?.customDomain || null
   };
 }
 
