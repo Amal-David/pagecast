@@ -70,7 +70,8 @@ test("MCP initialize and tools/list expose Pagecast capabilities", async () => {
       "list_pages",
       "publish_file",
       "publish_content",
-      "revoke_publication"
+      "revoke_publication",
+      "custom_domain"
     ]
   );
   const publishFile = tools.result.tools.find((tool) => tool.name === "publish_file");

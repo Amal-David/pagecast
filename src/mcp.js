@@ -5,10 +5,13 @@ import process from "node:process";
 
 import {
   MAX_UPLOAD_BYTES,
+  addCloudflarePagesDomain,
   appError,
   createReportStore,
+  getCloudflarePagesDomain,
   getCloudflarePagesStatus,
   publishReportSnapshot,
+  removeCloudflarePagesDomain,
   revokeReportPublication
 } from "./server.js";
 
@@ -122,6 +125,26 @@ function summarizeStatus(status) {
     baseUrl: cloudflare.baseUrl || "",
     managed: Boolean(cloudflare.managed),
     requiresAdoption: Boolean(cloudflare.requiresAdoption)
+  };
+}
+
+// An allowlist like summarizeStatus: the service result carries the full public
+// config, and an agent only needs the domain's own state.
+function summarizeDomain(result) {
+  const domain = result?.customDomain || null;
+  return {
+    domain: domain?.name || "",
+    status: domain?.status || "none",
+    // The origin links actually use right now, which is the pages.dev one until
+    // Cloudflare reports the domain active.
+    publicBaseUrl: result?.publicBaseUrl || "",
+    active: domain?.status === "active",
+    error: domain?.error || "",
+    dns: result?.dns?.instructions || "",
+    requiresCloudflareZone: Boolean(result?.dns?.requiresCloudflareZone),
+    rebasedLinks: result?.rebased || 0,
+    // Live pages whose baked social metadata still names the previous origin.
+    staleMetadata: result?.staleMetadata || 0
   };
 }
 
@@ -313,6 +336,36 @@ function toolDefinitions() {
         idempotentHint: true,
         openWorldHint: true
       }
+    },
+    {
+      name: "custom_domain",
+      title: "Custom Domain",
+      description:
+        "Show, attach, or detach the custom domain that Pagecast links use. " +
+        "Without an action this reconciles against Cloudflare and reports DNS and certificate progress.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          action: {
+            type: "string",
+            enum: ["status", "add", "remove"],
+            description: "Defaults to status."
+          },
+          domain: {
+            type: "string",
+            description: "Hostname to attach. Required for add; optional for remove."
+          }
+        }
+      },
+      annotations: {
+        readOnlyHint: false,
+        // Attaching a domain does not take any link offline; removing one only
+        // reverts links to the pages.dev origin, which keeps serving.
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true
+      }
     }
   ];
 }
@@ -324,6 +377,9 @@ export function createPagecastMcpServer({
   getStatus = getCloudflarePagesStatus,
   publishFile = publishReportSnapshot,
   revokePublication = revokeReportPublication,
+  addDomain = addCloudflarePagesDomain,
+  getDomain = getCloudflarePagesDomain,
+  removeDomain = removeCloudflarePagesDomain,
   createStore = createReportStore,
   writeContentFile = writeMcpContentFile
 } = {}) {
@@ -427,6 +483,23 @@ export function createPagecastMcpServer({
         report: summarizeReport(result.report),
         publication: summarizePublication(result.publication)
       });
+    }
+    if (name === "custom_domain") {
+      const action = optionalString(args, "action") || "status";
+      if (action === "add") {
+        return textResult(
+          summarizeDomain(await addDomain({ domain: requiredString(args, "domain"), dataDir }))
+        );
+      }
+      if (action === "remove") {
+        return textResult(
+          summarizeDomain(await removeDomain({ domain: optionalString(args, "domain") || "", dataDir }))
+        );
+      }
+      if (action !== "status") {
+        throw appError("`action` must be status, add, or remove.", 400);
+      }
+      return textResult(summarizeDomain(await getDomain({ dataDir })));
     }
     throw new JsonRpcError(-32601, `Unknown tool: ${name}`);
   }

@@ -10,9 +10,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  addCloudflarePagesDomain,
   createConfigStore,
   deleteCloudflarePagesDeployment,
   deployCloudflarePagesSite,
+  getCloudflarePagesDomain,
   getCloudflarePagesStatus,
   getGoalStatus,
   listCloudflarePagesDeployments,
@@ -20,6 +22,7 @@ import {
   pruneCloudflarePagesDeployments,
   publishGoalProgress,
   publishReportSnapshot,
+  removeCloudflarePagesDomain,
   setupCloudflareFeedback,
   setupCloudflarePages,
   startServers,
@@ -610,6 +613,53 @@ function printStatusResult(result, json) {
   console.log(`URL: ${result.cloudflare.baseUrl}`);
 }
 
+function printDomainResult(result, json) {
+  if (json) {
+    console.log(JSON.stringify({ ok: true, ...result }));
+    return;
+  }
+  const domain = result.customDomain;
+  if (!domain) {
+    console.log("Custom domain: not set");
+    console.log(`URL: ${result.publicBaseUrl}`);
+    if (result.removed) {
+      console.log(`Removed ${result.removed}.`);
+    }
+    if (result.removedRemotely) {
+      console.log(
+        `${result.removedRemotely} is no longer attached at Cloudflare; links fall back to the pages.dev origin.`
+      );
+    }
+  } else {
+    console.log(`Custom domain: ${domain.name} (${domain.status})`);
+    console.log(`URL: ${result.publicBaseUrl}`);
+    if (domain.error) {
+      console.log(`Cloudflare reports: ${domain.error}`);
+    }
+    if (domain.status !== "active") {
+      // Links keep pointing at pages.dev until Cloudflare serves the hostname,
+      // so say so rather than let the operator assume it is live.
+      console.log("Links keep using the pages.dev origin until the domain is active.");
+      if (result.dns?.instructions) {
+        console.log("");
+        console.log(result.dns.instructions);
+      }
+    }
+  }
+  if (result.rebased > 0) {
+    console.log(`Re-hosted ${result.rebased} existing link${result.rebased === 1 ? "" : "s"}.`);
+  }
+  if (result.staleMetadata > 0) {
+    console.log(
+      `${result.staleMetadata} live page${result.staleMetadata === 1 ? "" : "s"} still ` +
+        "carry the previous origin in their social metadata. Re-publish to refresh it."
+    );
+  }
+  for (const name of result.unadopted || []) {
+    console.log(`Also attached at Cloudflare but not tracked by Pagecast: ${name}`);
+  }
+}
+
 function printDeploymentsResult(result, json) {
   if (json) {
     console.log(JSON.stringify({ ok: true, ...result }));
@@ -1085,6 +1135,11 @@ async function pages(args) {
       return;
     }
 
+    if (subcommand === "domain") {
+      await pagesDomain(parsed.positionals, parsed);
+      return;
+    }
+
     if (subcommand === "deploy") {
       await deploySite(rest);
       return;
@@ -1098,6 +1153,49 @@ async function pages(args) {
     console.error(`Unknown pages command: ${[subcommand, ...parsed.positionals].filter(Boolean).join(" ")}\n`);
     usage();
     process.exit(1);
+  } catch (error) {
+    printError(error, json);
+  }
+}
+
+// `pagecast pages domain [add <domain> | status | remove [<domain>]]`.
+// Bare `domain` and `domain status` are the same reconcile-and-report call, so
+// checking on a pending domain is the obvious thing to type.
+async function pagesDomain(positionals, parsed) {
+  const [subcommand, ...rest] = positionals;
+  const json = wantsJson(parsed);
+
+  try {
+    if (subcommand === "add") {
+      const domain = rest[0];
+      if (!domain) {
+        printError({ message: "Usage: pagecast pages domain add <domain>", statusCode: 400 }, json);
+        return;
+      }
+      printDomainResult(await addCloudflarePagesDomain({ domain, dataDir }), json);
+      return;
+    }
+
+    if (subcommand === "remove") {
+      printDomainResult(
+        await removeCloudflarePagesDomain({ domain: rest[0] || "", dataDir }),
+        json
+      );
+      return;
+    }
+
+    if (subcommand === "status" || subcommand === "list" || !subcommand) {
+      printDomainResult(await getCloudflarePagesDomain({ dataDir }), json);
+      return;
+    }
+
+    printError(
+      {
+        message: `Unknown domain command: ${subcommand}. Use add, status, or remove.`,
+        statusCode: 400
+      },
+      json
+    );
   } catch (error) {
     printError(error, json);
   }
@@ -1352,6 +1450,9 @@ function usage() {
       "  pagecast pages setup [--project <name>] [--json]      Connect and prepare Cloudflare Pages",
       "  pagecast pages status [--json]                        Show Cloudflare Pages configuration",
       "  pagecast pages projects list [--json]                 List Cloudflare Pages projects",
+      "  pagecast pages domain add <domain> [--json]           Point your own domain at published links",
+      "  pagecast pages domain status [--json]                 Show custom domain and DNS setup",
+      "  pagecast pages domain remove [<domain>] [--json]      Detach the custom domain",
       "  pagecast pages deploy <dir> --project <name> [--json] Deploy a static folder to Pages",
       "  pagecast pages deployments list [--json]              List Cloudflare Pages deployment snapshots",
       "  pagecast pages deployments delete <id> [--force] [--json]  Remove one deployment snapshot",
