@@ -5,6 +5,18 @@ All notable changes to Pagecast are documented here. This project follows
 
 ## Unreleased
 
+### Added
+
+- **Per-page Open Graph card images** — publishing now renders a 1200×630
+  social card from each page's own title and description and deploys it with
+  the snapshot, so shared links unfurl with the page's content instead of the
+  generic Pagecast card. Rendering happens entirely on your machine (satori +
+  resvg WASM — the first runtime dependencies, pure JS/WASM, no native
+  binaries) and the card ships to your own Pages project; page content never
+  touches a third-party service. Pages that declare their own `og:` meta are
+  left untouched, publishes without a usable title fall back to the static
+  branded card, and white-label publishes remain image-free.
+
 ## 0.6.1 — 2026-07-21
 
 ### Added
