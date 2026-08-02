@@ -65,8 +65,14 @@ port mapping.
   private files outside the published tree.
 
 The Pages root publishes no report index. For recipient authentication, use
-Pagecast password protection or add your organization's access layer/custom
-domain controls. v0.5 does not introduce Cloudflare Access/SSO.
+Pagecast password protection or add your organization's access layer in front
+of the site. Pagecast does not introduce Cloudflare Access/SSO.
+
+A custom domain (`pagecast pages domain add`) changes only which hostname
+serves your links. It is not an access control: the same pages stay reachable
+on the Cloudflare-assigned `<project>.pages.dev` host, which cannot be
+detached. Password protection remains the access boundary, and it is enforced
+at the edge for every hostname the project answers on.
 
 ## Cloudflare project ownership
 
