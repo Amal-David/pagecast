@@ -145,12 +145,61 @@ export interface CloudflareConnectionJob {
   error: string;
 }
 
+// Cloudflare's lifecycle for a Pages custom domain. Only "active" means the
+// hostname actually serves traffic with a valid certificate.
+export type CustomDomainStatus =
+  | "initializing"
+  | "pending"
+  | "active"
+  | "deactivated"
+  | "blocked"
+  | "error";
+
+export interface CustomDomain {
+  name: string;
+  status: CustomDomainStatus;
+  addedAt: string | null;
+  error: string | null;
+}
+
 export interface PagesConfig {
   projectName: string;
   accountId: string;
   accountName: string;
   branch: string;
+  // The Cloudflare-assigned *.pages.dev origin. Kept distinct from the custom
+  // domain because ownership verification and deploy reconciliation use it.
   baseUrl: string;
+  customDomain: CustomDomain | null;
+}
+
+export interface CustomDomainDnsRecord {
+  type: string;
+  name: string;
+  zone: string;
+  value: string;
+}
+
+export interface CustomDomainResponse {
+  customDomain: CustomDomain | null;
+  // The origin links use right now — the pages.dev one until a domain is active.
+  publicBaseUrl: string;
+  originChanged: boolean;
+  rebased: number;
+  // Live pages whose baked social metadata still names the previous origin.
+  // Only re-publishing those pages can refresh it.
+  staleMetadata: number;
+  dns?: {
+    name: string;
+    kind: "apex" | "subdomain";
+    record: CustomDomainDnsRecord | null;
+    requiresCloudflareZone: boolean;
+    instructions: string;
+  };
+  unadopted?: string[];
+  removed?: string;
+  removedRemotely?: string;
+  config: AppConfig;
 }
 
 export interface FeedbackConfig {

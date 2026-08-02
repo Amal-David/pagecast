@@ -6,6 +6,7 @@ import type {
   CloudflareProjectsResponse,
   ConfigResponse,
   ContentResponse,
+  CustomDomainResponse,
   DeleteDeploymentResponse,
   DeploymentsResponse,
   FeedbackSetupResponse,
@@ -219,6 +220,19 @@ export const api = {
     baseUrl?: string;
     adoptExisting?: boolean;
   }) => request<ConfigResponse>("/api/config/pages", { json: payload }),
+
+  // GET reconciles against Cloudflare rather than echoing local state, so the
+  // dashboard shows real DNS and certificate progress for a pending domain.
+  getCustomDomain: () => request<CustomDomainResponse>("/api/pages/domain"),
+
+  addCustomDomain: (domain: string) =>
+    request<CustomDomainResponse>("/api/pages/domain", { json: { domain } }),
+
+  removeCustomDomain: (domain: string) =>
+    request<CustomDomainResponse>(
+      `/api/pages/domain?domain=${encodeURIComponent(domain)}`,
+      { method: "DELETE" }
+    ),
 
   adoptPublicationTarget: (token: string) =>
     request<PublishResponse>(`/api/publications/${encodeURIComponent(token)}/target`, {
