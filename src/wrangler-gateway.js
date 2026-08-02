@@ -128,6 +128,30 @@ export function pagesBaseUrl(projectName) {
   return `https://${projectName}.pages.dev`;
 }
 
+function toPagesOrigin(domain) {
+  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(domain) ? domain : `https://${domain}`;
+  try {
+    const url = new URL(candidate);
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || !url.hostname) {
+      return null;
+    }
+    return { origin: `${url.protocol}//${url.host}`.replace(/\/+$/, ""), hostname: url.hostname };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reduce the project's domain list to the one canonical origin.
+ *
+ * Cloudflare lists every hostname bound to the project, custom domains
+ * included, in no guaranteed order. The canonical origin must stay the
+ * Cloudflare-assigned `*.pages.dev` one: it is what ownership verification
+ * fetches and what the post-deploy correction in the publication service
+ * compares against. Letting a custom domain win here would make every publish
+ * fight itself. Custom domains are user-facing metadata and are resolved
+ * separately — see `publicBaseUrl` in publication-service.js.
+ */
 export function normalizePagesBaseUrl(value, projectName) {
   const fallback = pagesBaseUrl(projectName);
   const raw = String(value || "").trim();
@@ -135,19 +159,16 @@ export function normalizePagesBaseUrl(value, projectName) {
     return fallback;
   }
 
-  const firstDomain = raw.split(/[,\s]+/).find((item) => item && item !== "-") || "";
-  const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(firstDomain)
-    ? firstDomain
-    : `https://${firstDomain}`;
-  try {
-    const url = new URL(candidate);
-    if ((url.protocol !== "https:" && url.protocol !== "http:") || !url.hostname) {
-      return fallback;
-    }
-    return `${url.protocol}//${url.host}`.replace(/\/+$/, "");
-  } catch {
+  const origins = raw
+    .split(/[,\s]+/)
+    .filter((item) => item && item !== "-")
+    .map(toPagesOrigin)
+    .filter(Boolean);
+  if (origins.length === 0) {
     return fallback;
   }
+  const assigned = origins.find((entry) => entry.hostname.endsWith(".pages.dev"));
+  return (assigned || origins[0]).origin;
 }
 
 function parseJsonFromCommandOutput(output) {

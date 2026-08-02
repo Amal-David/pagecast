@@ -103,6 +103,59 @@ export function normalizeStoredProjectRef(value, { allowLegacy = false } = {}) {
   });
 }
 
+const CUSTOM_DOMAIN_STATUSES = new Set([
+  "initializing",
+  "pending",
+  "active",
+  "deactivated",
+  "blocked",
+  "error"
+]);
+
+/**
+ * A custom domain attached to a target, as Pagecast stores it.
+ *
+ * Deliberately kept out of `baseUrl`. That field is the Cloudflare-assigned
+ * production origin and is load-bearing: ownership verification fetches the
+ * marker from it, and the post-deploy correction in the publication service
+ * compares against it. A custom domain is user-facing metadata with a
+ * lifecycle of its own — it exists before it resolves, and it can be pending,
+ * broken, or removed while publishing continues normally.
+ */
+export function normalizeCustomDomain(value) {
+  const name = String(value?.name || "").trim().toLowerCase();
+  if (!name) {
+    return null;
+  }
+  const status = String(value?.status || "").trim().toLowerCase();
+  return {
+    name,
+    status: CUSTOM_DOMAIN_STATUSES.has(status) ? status : "pending",
+    addedAt: String(value?.addedAt || "").trim() || null,
+    error: String(value?.error || "").trim() || null
+  };
+}
+
+/**
+ * The origin to show people: the custom domain once Cloudflare reports it
+ * active, otherwise the assigned pages.dev origin.
+ *
+ * Gating on `active` matters — a domain is `pending` until DNS resolves and a
+ * certificate is issued, and handing out links to a hostname that does not
+ * serve traffic yet is worse than handing out the pages.dev one.
+ */
+export function publicBaseUrl(pagesConfig) {
+  const domain = normalizeCustomDomain(pagesConfig?.customDomain);
+  if (domain && domain.status === "active") {
+    try {
+      return normalizeBaseUrl(domain.name);
+    } catch {
+      // A stored domain that no longer parses must not break link generation.
+    }
+  }
+  return String(pagesConfig?.baseUrl || "").trim();
+}
+
 export function projectRefEquals(left, right) {
   try {
     const normalizedLeft = normalizeProjectRef(left);

@@ -100,10 +100,12 @@ import {
 import {
   PAGECAST_PROJECT_MARKER_FILE,
   encodeProjectOwnershipMarker,
+  normalizeCustomDomain,
   normalizeProjectRef,
   normalizeStoredProjectRef,
   projectRefEquals,
   projectRefFilesystemKey,
+  publicBaseUrl,
   validateOwnershipMarker
 } from "./project-ref.js";
 import {
@@ -1923,6 +1925,7 @@ export function createCloudflarePagesPublisher(options = {}) {
     projectRefEquals,
     projectRefFilesystemKey,
     projectRootImportSlug,
+    publicBaseUrl,
     publicationTokenFilesystemKey,
     randomBytes,
     renderAuthMiddleware,
