@@ -160,7 +160,15 @@ npx pagecast pages domain remove --json
 
 Adding a domain does not make it live. Cloudflare validates DNS and issues a
 certificate first, and your links keep using the pages.dev host until it
-reports `active` — `status` prints the record you still need to create.
+reports `active` — `status` prints the record you still need to create, plus
+which of the two checks is outstanding (`DNS validation` or `Certificate`) so a
+domain stuck at pending tells you what to fix.
+
+One domain per Pages project. Adding a second is refused rather than swapped in
+silently, because a new domain starts pending and swapping would drop every
+live link back to the pages.dev host — remove the current one first. A domain
+already attached in Cloudflare's own dashboard is adopted by name (`domain add
+docs.example.com`) instead of being created again.
 
 - **Subdomain** (`docs.example.com`) — DNS can live anywhere. Create a `CNAME`
   from the subdomain to `<project>.pages.dev`.
