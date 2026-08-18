@@ -368,8 +368,11 @@ export function createPublicationService(options = {}, dependencies = {}) {
     const title = extractTitle(html, report.name);
     const description = extractDescription(html);
     // Baked into the deployed HTML, so it must be the hostname people will
-    // actually visit. Adding or removing a custom domain therefore has to
-    // redeploy the target — see resolveCustomDomain in server.js.
+    // actually visit. Pages deployed before a domain change keep the old origin
+    // in these bytes: correcting them would mean re-preparing every snapshot
+    // from its source tree and shipping any edits made since. So the domain
+    // commands count them and say so instead — see applyDomainState in
+    // server.js, which reports the count as `staleMetadata`.
     const publicOrigin = publicBaseUrl(pagesConfig);
     const pageUrl = publicOrigin
       ? joinUrl(publicOrigin, `/p/${encodeURIComponent(slug)}/`)

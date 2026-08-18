@@ -4738,6 +4738,19 @@ export function createPublicHandler({ store }) {
   };
 }
 
+/**
+ * Routes whose GET is a reconcile, not a read.
+ *
+ * `GET /api/pages/domain` asks Cloudflare what the domain is doing and then
+ * writes the answer: it persists the config and re-hosts every stored
+ * publication URL. The HTTP method says read, so the method-based rule below
+ * would let it run beside a publish that is writing the same records — and the
+ * dashboard polls it every 15s while a domain is pending, so the overlap is
+ * routine rather than theoretical. The `/api/command` form of the same
+ * operation is already serialized; this keeps the REST form honest too.
+ */
+const ADMIN_RECONCILING_READ_ROUTES = new Set(["/api/pages/domain"]);
+
 export function createAdminHandler({
   store,
   configStore,
@@ -4753,6 +4766,7 @@ export function createAdminHandler({
   watchManager,
   connectionJobs = new Map(),
   serviceFetch = fetch,
+  cloudflareApiFetchImpl = fetch,
   commandCapability = "",
   bindHost = DEFAULT_HOST,
   allowedHosts = []
@@ -4852,13 +4866,13 @@ export function createAdminHandler({
           watchManager,
           connectionJobs,
           serviceFetch,
+          cloudflareApiFetchImpl,
           commandCapability
         });
-        if (
-          mutationQueue &&
-          ADMIN_MUTATION_METHODS.has(req.method) &&
-          url.pathname !== "/api/command"
-        ) {
+        const serialize =
+          ADMIN_MUTATION_METHODS.has(req.method) ||
+          (req.method === "GET" && ADMIN_RECONCILING_READ_ROUTES.has(url.pathname));
+        if (mutationQueue && serialize && url.pathname !== "/api/command") {
           await mutationQueue.enqueue(execute);
         } else {
           await execute();
@@ -5341,10 +5355,16 @@ async function handleApi(
     watchManager,
     connectionJobs,
     serviceFetch,
+    cloudflareApiFetchImpl = fetch,
     commandCapability
   }
 ) {
   const options = reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl });
+
+  // Every custom-domain route and command builds its client here, so the
+  // transport has exactly one definition per request.
+  const domainClient = () =>
+    createPagesDomainClient({ cloudflareAuth, fetchImpl: cloudflareApiFetchImpl });
 
   function updateConnectionJob(job, status, patch = {}) {
     Object.assign(job, patch, { status, updatedAt: nowIso() });
@@ -5614,7 +5634,7 @@ async function handleApi(
           domain: payload.domain,
           configStore,
           store,
-          domainApi: createPagesDomainClient({ cloudflareAuth })
+          domainApi: domainClient()
         })
       );
       sendJson(res, 200, result);
@@ -5625,7 +5645,7 @@ async function handleApi(
         getCloudflarePagesDomainWithContext({
           configStore,
           store,
-          domainApi: createPagesDomainClient({ cloudflareAuth })
+          domainApi: domainClient()
         })
       );
       sendJson(res, 200, result);
@@ -5637,7 +5657,7 @@ async function handleApi(
           domain: payload.domain,
           configStore,
           store,
-          domainApi: createPagesDomainClient({ cloudflareAuth })
+          domainApi: domainClient()
         })
       );
       sendJson(res, 200, result);
@@ -6274,7 +6294,7 @@ async function handleApi(
     const result = await getCloudflarePagesDomainWithContext({
       configStore,
       store,
-      domainApi: createPagesDomainClient({ cloudflareAuth })
+      domainApi: domainClient()
     });
     sendJson(res, 200, result);
     return;
@@ -6286,7 +6306,7 @@ async function handleApi(
       domain: body.domain,
       configStore,
       store,
-      domainApi: createPagesDomainClient({ cloudflareAuth })
+      domainApi: domainClient()
     });
     sendJson(res, 200, result);
     return;
@@ -6297,7 +6317,7 @@ async function handleApi(
       domain: url.searchParams.get("domain") || "",
       configStore,
       store,
-      domainApi: createPagesDomainClient({ cloudflareAuth })
+      domainApi: domainClient()
     });
     sendJson(res, 200, result);
     return;
@@ -7241,6 +7261,9 @@ export async function startServers({
   tunnelTimeoutMs = 30000,
   fetchImpl = fetch,
   cloudflareAuthSpawnImpl = spawn,
+  // Only the custom-domain client calls api.cloudflare.com. Kept separate from
+  // fetchImpl so a test double for one cannot silently answer for the other.
+  cloudflareApiFetchImpl = fetch,
   cloudflareLoginTimeoutMs = DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS,
   cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
   pagesDeploySpawnImpl = spawn,
@@ -7386,6 +7409,7 @@ export async function startServers({
         mutationQueue,
         watchManager,
         serviceFetch: fetchImpl,
+        cloudflareApiFetchImpl,
         commandCapability,
         bindHost: urlHost,
         allowedHosts: [displayHostname]
@@ -7905,8 +7929,33 @@ async function applyDomainState({ configStore, store, remote, pages }) {
     rebased,
     // Every re-hosted link is a live page whose baked social metadata still
     // names the old origin. Re-publishing that page is what refreshes it.
-    staleMetadata: rebased
+    staleMetadata: rebased,
+    progress: domainProgress(remote)
   };
+}
+
+/**
+ * The two sub-checks Cloudflare runs behind a `pending` domain, reported
+ * separately because they fail for different reasons and have different fixes.
+ *
+ * Validation is DNS: the record does not resolve to the project yet.
+ * Verification is the certificate. A domain stuck at `pending` is otherwise
+ * indistinguishable from one that is merely slow, and `status` alone cannot
+ * tell someone which of the two they still have to act on. Read straight off
+ * the Cloudflare record rather than persisted — it is a progress reading, not
+ * state Pagecast owns.
+ */
+function domainProgress(remote) {
+  if (!remote) {
+    return null;
+  }
+  const validation = String(remote.validationStatus || "").trim();
+  const verification = String(remote.verificationStatus || "").trim();
+  const certificateAuthority = String(remote.certificateAuthority || "").trim();
+  if (!validation && !verification && !certificateAuthority) {
+    return null;
+  }
+  return { validation, verification, certificateAuthority };
 }
 
 export async function addCloudflarePagesDomain(options = {}) {
@@ -7972,20 +8021,50 @@ export async function addCloudflarePagesDomainWithContext({
   const pages = requireConfiguredTarget(configStore.get().pages);
   const api = domainApi;
 
-  const record = await api.addPagesDomain({
+  // Pagecast tracks one domain per target, because publicBaseUrl has to resolve
+  // to exactly one origin. Replacing a live domain in place would quietly rewrite
+  // every stored link back to the pages.dev origin — the new domain starts
+  // `pending` — so refuse instead and let the caller decide.
+  const tracked = pages.customDomain?.name || "";
+  if (tracked && tracked !== name) {
+    throw appError(
+      `This target already uses ${tracked}. Pagecast tracks one custom domain per Pages project, ` +
+        `so remove it first (\`pagecast pages domain remove\`) before adding ${name}. ` +
+        `${tracked} keeps serving at Cloudflare either way.`,
+      409
+    );
+  }
+
+  // A domain already attached at Cloudflare — added in its dashboard, or left
+  // behind by an earlier Pagecast target — is adopted rather than re-created.
+  // Without this the `unadopted` names the status command reports would be a
+  // dead end, since the only command that takes a domain is this one.
+  const attached = await api.listPagesDomains({
     accountId: pages.accountId,
-    projectName: pages.projectName,
-    domain: name
+    projectName: pages.projectName
   });
+  const existing = attached.find((entry) => entry.name === name) || null;
+  const record =
+    existing ||
+    (await api.addPagesDomain({
+      accountId: pages.accountId,
+      projectName: pages.projectName,
+      domain: name
+    }));
+
   const applied = await applyDomainState({
     configStore,
     store,
     pages,
-    remote: { ...record, addedAt: nowIso() }
+    // Re-adding the same domain is a reconcile, not a fresh attachment, so it
+    // keeps the timestamp it was first recorded with.
+    remote: { ...record, addedAt: pages.customDomain?.addedAt || nowIso() }
   });
   return {
     ...applied,
+    adopted: Boolean(existing),
     dns: describeDnsInstructions(name, hostFromBaseUrl(pages.baseUrl)),
+    unadopted: attached.filter((entry) => entry.name !== name).map((entry) => entry.name),
     config: configStore.getPublicConfig()
   };
 }
