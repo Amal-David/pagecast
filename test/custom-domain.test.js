@@ -23,6 +23,7 @@ import {
   createConfigStore,
   createReportStore,
   getCloudflarePagesDomainWithContext,
+  publishReportSnapshot,
   removeCloudflarePagesDomainWithContext
 } from "../src/server.js";
 
@@ -864,4 +865,87 @@ test("an aborted response body fails loudly instead of reading as an empty resul
     assert.match(error.message, /Cloudflare API request failed/);
     return true;
   });
+});
+
+// --- the canonical origin, end to end --------------------------------------
+
+test("publishing through the headless path leaves the canonical origin alone", async () => {
+  // The service-level test above proves publishPublications does not fight the
+  // canonical origin. It cannot see the layer above: publish returns the public
+  // URL, callers store it as publicUrl, and persistActualPublicationOrigin then
+  // reads that back as evidence of what Cloudflare assigned. With an active
+  // custom domain that evidence is the domain, so the first publish wrote it
+  // into pages.baseUrl -- the one field the whole design keeps it out of.
+  const accountId = "abcdef0123456789abcdef0123456789";
+  const tempDir = await makeTempDir();
+  const dataDir = path.join(tempDir, "data");
+  const reportPath = path.join(tempDir, "quarterly.html");
+  await fs.writeFile(reportPath, "<h1>Quarterly</h1>", "utf8");
+
+  function wranglerFake(args) {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => child.emit("exit", null, "SIGTERM");
+    setImmediate(() => {
+      let output = "";
+      if (args.includes("whoami")) {
+        output = JSON.stringify({ accounts: [{ name: "Personal", id: accountId }] });
+      } else if (args.includes("list")) {
+        output = JSON.stringify([{ name: "pagecast", account_id: accountId }]);
+      }
+      if (output) child.stdout.emit("data", Buffer.from(output));
+      child.emit("exit", 0, null);
+    });
+    return child;
+  }
+  function deployFake() {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => child.emit("exit", null, "SIGTERM");
+    setImmediate(() => {
+      child.stdout.emit("data", Buffer.from("deploy complete"));
+      child.emit("exit", 0, null);
+    });
+    return child;
+  }
+
+  try {
+    const configStore = createConfigStore({ dataDir });
+    await configStore.init();
+    await configStore.updatePages({
+      projectName: "pagecast",
+      accountId,
+      baseUrl: "https://pagecast.pages.dev",
+      adoptExisting: true
+    });
+    await configStore.setCustomDomain({
+      name: "docs.example.com",
+      status: "active",
+      addedAt: "2026-08-02T18:00:00.000Z"
+    });
+
+    const result = await publishReportSnapshot({
+      path: reportPath,
+      dataDir,
+      cloudflareAuthSpawnImpl: (_command, args) => wranglerFake(args),
+      pagesDeploySpawnImpl: deployFake,
+      cloudflareListTimeoutMs: 1000,
+      pagesDeployTimeoutMs: 1000
+    });
+
+    // The link people get is the domain's.
+    assert.match(result.url, /^https:\/\/docs\.example\.com\/p\/.+\/$/);
+
+    const reloaded = createConfigStore({ dataDir });
+    await reloaded.init();
+    // The origin Cloudflare assigned is untouched, so ownership verification
+    // still fetches the marker from it and the DNS guidance still names it as
+    // the CNAME target rather than pointing the domain at itself.
+    assert.equal(reloaded.get().pages.baseUrl, "https://pagecast.pages.dev");
+    assert.equal(reloaded.get().pages.customDomain.name, "docs.example.com");
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 });

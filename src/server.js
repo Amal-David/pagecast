@@ -472,6 +472,21 @@ async function persistActualPublicationOrigin(publication, configStore) {
   if (!baseUrl) {
     return;
   }
+  // publicUrl is the origin people visit, which is the custom domain once
+  // Cloudflare reports it active — and that origin says nothing about which
+  // origin Cloudflare assigned, which is the only thing this function exists to
+  // record. Writing it through would put the custom domain into pages.baseUrl,
+  // the one field the whole design keeps it out of: ownership verification
+  // would then fetch the marker from it, the DNS guidance would name the domain
+  // as its own CNAME target, and every later publish would see the pages.dev
+  // result disagree and deploy again to "correct" it. The publication service
+  // already reconciled the canonical origin against the deploy before layering
+  // the domain on top, so there is nothing left to learn here.
+  const configuredPages = configStore.get().pages;
+  const trackedDomain = String(configuredPages?.customDomain?.name || "").trim().toLowerCase();
+  if (trackedDomain && hostFromBaseUrl(baseUrl) === trackedDomain) {
+    return;
+  }
   publication.pagesBaseUrl = baseUrl;
   if (publication.projectRef) {
     publication.projectRef = { ...publication.projectRef, baseUrl };
@@ -4738,19 +4753,6 @@ export function createPublicHandler({ store }) {
   };
 }
 
-/**
- * Routes whose GET is a reconcile, not a read.
- *
- * `GET /api/pages/domain` asks Cloudflare what the domain is doing and then
- * writes the answer: it persists the config and re-hosts every stored
- * publication URL. The HTTP method says read, so the method-based rule below
- * would let it run beside a publish that is writing the same records — and the
- * dashboard polls it every 15s while a domain is pending, so the overlap is
- * routine rather than theoretical. The `/api/command` form of the same
- * operation is already serialized; this keeps the REST form honest too.
- */
-const ADMIN_RECONCILING_READ_ROUTES = new Set(["/api/pages/domain"]);
-
 export function createAdminHandler({
   store,
   configStore,
@@ -4869,10 +4871,11 @@ export function createAdminHandler({
           cloudflareApiFetchImpl,
           commandCapability
         });
-        const serialize =
-          ADMIN_MUTATION_METHODS.has(req.method) ||
-          (req.method === "GET" && ADMIN_RECONCILING_READ_ROUTES.has(url.pathname));
-        if (mutationQueue && serialize && url.pathname !== "/api/command") {
+        if (
+          mutationQueue &&
+          ADMIN_MUTATION_METHODS.has(req.method) &&
+          url.pathname !== "/api/command"
+        ) {
           await mutationQueue.enqueue(execute);
         } else {
           await execute();
@@ -6288,9 +6291,13 @@ async function handleApi(
     return;
   }
 
-  // Custom domain. GET reconciles against Cloudflare rather than echoing local
-  // state, so the dashboard shows real certificate/DNS progress.
-  if (url.pathname === "/api/pages/domain" && req.method === "GET") {
+  // Custom domain. The reconcile is a POST because it behaves like one: it asks
+  // Cloudflare what the domain is doing and then writes the answer, persisting
+  // the config and re-hosting every stored publication URL. Shaped as a GET it
+  // read as safe to every method-based rule in the admin handler at once — no
+  // CSRF token, no command capability, and no place in the mutation queue —
+  // which is three exemptions for one route that earns none of them.
+  if (url.pathname === "/api/pages/domain/status" && req.method === "POST") {
     const result = await getCloudflarePagesDomainWithContext({
       configStore,
       store,

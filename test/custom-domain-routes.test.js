@@ -2,12 +2,11 @@
 // server rather than by calling the service functions directly.
 //
 // The service tests in custom-domain.test.js cover the reconcile logic. What
-// they cannot see is the route layer: whether the three REST routes are wired
-// to it at all, and whether the reconciling GET is serialized against every
-// other write the way its /api/command twin is. That GET reads like a read and
-// writes like a publish — it persists config and re-hosts every stored link —
-// and the dashboard polls it every 15s while a domain is pending, so overlap
-// with an in-flight mutation is routine rather than theoretical.
+// they cannot see is the route layer: whether the three routes are wired to it
+// at all, and whether the reconcile is treated as the write it is. It persists
+// config and re-hosts every stored link, and the dashboard polls it every 15s
+// while a domain is pending, so overlapping an in-flight mutation is routine
+// rather than theoretical.
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
@@ -151,9 +150,12 @@ test("the custom-domain routes add, reconcile, and detach through the admin API"
     assert.equal(addedBody.dns.record.type, "CNAME");
     assert.equal(addedBody.dns.record.value, `${PROJECT_NAME}.pages.dev`);
 
-    // GET reconciles rather than echoing what POST just stored.
+    // The reconcile asks Cloudflare rather than echoing what the add just stored.
     server.cloudflare.state.domains = [{ name: "docs.example.com", status: "active" }];
-    const status = await server.call("/api/pages/domain");
+    const status = await server.call("/api/pages/domain/status", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
     assert.equal(status.status, 200);
     const statusBody = await status.json();
     assert.equal(statusBody.customDomain.status, "active");
@@ -195,13 +197,15 @@ test("a domain reconcile holds the mutation queue like any other write", async (
     const order = [];
 
     // Blocks inside Cloudflare's list call, holding the reconcile open.
-    const reconcile = server.call("/api/pages/domain").then((response) => {
-      order.push("reconcile");
-      return response;
-    });
+    const reconcile = server
+      .call("/api/pages/domain/status", { method: "POST", body: JSON.stringify({}) })
+      .then((response) => {
+        order.push("reconcile");
+        return response;
+      });
 
-    // A plain mutation fired while the reconcile is stuck. If the GET were
-    // treated as a read it would run outside the queue, this would answer
+    // A plain mutation fired while the reconcile is stuck. If the reconcile
+    // were shaped as a read it would run outside the queue, this would answer
     // immediately, and the two would interleave over the same config file.
     const mutation = new Promise((resolve) => setTimeout(resolve, 50)).then(() =>
       server
@@ -229,6 +233,28 @@ test("a domain reconcile holds the mutation queue like any other write", async (
     assert.deepEqual(order, ["reconcile", "mutation"]);
   } finally {
     release();
+    await server.close();
+    restoreToken();
+  }
+});
+
+test("the reconcile route refuses a caller without the workspace capability", async () => {
+  const restoreToken = withApiToken();
+  const server = await startDomainServer();
+  try {
+    // Shaped as a GET this answered anyone who could reach the port: the
+    // credential check keys off the HTTP method, so a route that persists
+    // config and rewrites every stored link was exempt from it.
+    const response = await fetch(`${server.runtime.adminUrl}/api/pages/domain/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({})
+    });
+    assert.equal(response.status, 403);
+    assert.match(await response.text(), /command capability/);
+    // Nothing reconciled, so nothing was written.
+    assert.deepEqual(server.cloudflare.calls, []);
+  } finally {
     await server.close();
     restoreToken();
   }

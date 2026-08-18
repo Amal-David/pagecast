@@ -168,30 +168,41 @@ export function CustomDomainCard({ cloudflareReady }: CustomDomainCardProps) {
             ) : null}
           </>
         ) : (
-          <form
-            className="flex items-center gap-2"
-            onSubmit={(event) => {
-              event.preventDefault();
-              const value = draft.trim();
-              if (!value) return;
-              addDomain.mutate(value, { onSuccess: () => setDraft("") });
-            }}
-          >
-            <Input
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              placeholder="docs.example.com"
-              aria-label="Custom domain"
-              disabled={pending}
-            />
-            <Button type="submit" size="sm" disabled={pending || !draft.trim()}>
-              {addDomain.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                "Add"
-              )}
-            </Button>
-          </form>
+          <>
+            {/* Cloudflare dropped the domain behind our back and links have
+                already fallen back. The CLI and MCP both report this; the card
+                would otherwise just silently show an empty form again. */}
+            {result?.removedRemotely ? (
+              <p className="text-sm text-destructive">
+                Cloudflare removed {result.removedRemotely}. Links now use{" "}
+                <span className="font-mono">{result.publicBaseUrl}</span>.
+              </p>
+            ) : null}
+            <form
+              className="flex items-center gap-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const value = draft.trim();
+                if (!value) return;
+                addDomain.mutate(value, { onSuccess: () => setDraft("") });
+              }}
+            >
+              <Input
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder="docs.example.com"
+                aria-label="Custom domain"
+                disabled={pending}
+              />
+              <Button type="submit" size="sm" disabled={pending || !draft.trim()}>
+                {addDomain.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  "Add"
+                )}
+              </Button>
+            </form>
+          </>
         )}
 
         {/* Attached at Cloudflare but not tracked here. Adding one by name
