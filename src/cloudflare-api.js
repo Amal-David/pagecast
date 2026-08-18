@@ -66,25 +66,35 @@ const HOSTNAME_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 /**
  * Accept what a person would type — a bare hostname, a pasted URL, a trailing
- * dot — and return the lowercase hostname Cloudflare expects. Throws rather
- * than silently normalizing something that was never a hostname.
+ * dot, a non-ASCII name — and return the hostname Cloudflare expects. Throws
+ * rather than silently normalizing something that was never a hostname.
+ *
+ * Everything goes through `new URL` so one parser decides what a hostname is.
+ * That is also what converts a non-ASCII name to the punycode form Cloudflare
+ * stores: typing `münchen.de` and pasting `https://münchen.de` have to reach
+ * the same record, and hand-rolled stripping cannot do that.
  */
 export function normalizeCustomDomainName(value) {
-  let raw = String(value || "").trim().toLowerCase();
-  if (!raw) {
+  const trimmed = String(value || "").trim().toLowerCase();
+  if (!trimmed) {
     throw appError("A custom domain is required.", 400);
   }
-  if (/^[a-z][a-z0-9+.-]*:\/\//.test(raw)) {
-    try {
-      raw = new URL(raw).hostname;
-    } catch {
-      throw appError(`${value} is not a valid domain.`, 400);
-    }
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//.test(trimmed) ? trimmed : `https://${trimmed}`;
+  let parsed;
+  try {
+    parsed = new URL(withScheme);
+  } catch {
+    throw appError(`${value} is not a valid domain.`, 400);
   }
-  raw = raw.replace(/\/.*$/, "").replace(/\.$/, "");
-  if (raw.includes(":")) {
+  // URL drops these silently, and a domain that quietly loses part of what was
+  // typed is worse than one that is refused.
+  if (parsed.port) {
     throw appError("A custom domain must not include a port.", 400);
   }
+  if (parsed.username || parsed.password) {
+    throw appError(`${value} is not a valid domain.`, 400);
+  }
+  const raw = parsed.hostname.replace(/\.$/, "");
   if (raw.endsWith(".pages.dev")) {
     throw appError(
       "pages.dev hostnames are assigned by Cloudflare and cannot be added as custom domains.",
@@ -334,7 +344,11 @@ export function createCloudflareApi({
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // The timeout has to cover the body too. Headers can arrive promptly and
+    // then the stream stall, so releasing the timer once `fetch` resolves would
+    // leave the read unbounded and hang the caller.
     let response;
+    let payload = null;
     try {
       response = await fetchImpl(`${apiBase}${pathname}`, {
         method,
@@ -347,16 +361,22 @@ export function createCloudflareApi({
         signal: controller.signal
       });
     } catch (error) {
-      throw appError(`Cloudflare API request failed: ${error?.message || error}`, 502);
-    } finally {
       clearTimeout(timer);
+      throw appError(`Cloudflare API request failed: ${error?.message || error}`, 502);
     }
 
-    let payload = null;
     try {
       payload = await response.json();
-    } catch {
+    } catch (error) {
+      // An aborted body is a transport failure, not an empty response — the
+      // status line alone would misreport a half-read 200 as a success.
+      if (controller.signal.aborted) {
+        clearTimeout(timer);
+        throw appError(`Cloudflare API request failed: ${error?.message || error}`, 502);
+      }
       payload = null;
+    } finally {
+      clearTimeout(timer);
     }
 
     if (response.status === 401 || response.status === 403) {
