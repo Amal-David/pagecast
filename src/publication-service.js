@@ -66,6 +66,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
     projectRefEquals,
     projectRefFilesystemKey,
     projectRootImportSlug,
+    publicBaseUrl,
     publicationTokenFilesystemKey,
     randomBytes,
     renderAuthMiddleware,
@@ -366,8 +367,15 @@ export function createPublicationService(options = {}, dependencies = {}) {
     }
     const title = extractTitle(html, report.name);
     const description = extractDescription(html);
-    const pageUrl = pagesConfig?.baseUrl
-      ? joinUrl(pagesConfig.baseUrl, `/p/${encodeURIComponent(slug)}/`)
+    // Baked into the deployed HTML, so it must be the hostname people will
+    // actually visit. Pages deployed before a domain change keep the old origin
+    // in these bytes: correcting them would mean re-preparing every snapshot
+    // from its source tree and shipping any edits made since. So the domain
+    // commands count them and say so instead — see applyDomainState in
+    // server.js, which reports the count as `staleMetadata`.
+    const publicOrigin = publicBaseUrl(pagesConfig);
+    const pageUrl = publicOrigin
+      ? joinUrl(publicOrigin, `/p/${encodeURIComponent(slug)}/`)
       : "";
     // Per-page OG card, rendered locally and deployed as a static asset of this
     // snapshot — page content never leaves the user's own Pages project. Skip
@@ -389,7 +397,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
         const card = await renderOgCard({
           title,
           description,
-          siteHost: hostFromUrl(pagesConfig.baseUrl),
+          siteHost: hostFromUrl(publicOrigin),
           branded: true
         });
         if (card) {
@@ -511,9 +519,11 @@ export function createPublicationService(options = {}, dependencies = {}) {
     const implicitTarget =
       pagesConfig === undefined && lastPagesConfig ? explicitProjectRef(lastPagesConfig) : null;
     const targetConfig = explicitTarget ? effectivePagesConfig : implicitTarget ? lastPagesConfig : null;
+    // The manifest is a link source for sync clients, so it carries the public
+    // origin rather than the Cloudflare-assigned one.
     const baseUrl =
-      effectivePagesConfig?.baseUrl ||
-      targetConfig?.baseUrl ||
+      publicBaseUrl(effectivePagesConfig) ||
+      publicBaseUrl(targetConfig) ||
       pagesBaseUrl(
         effectivePagesConfig?.projectName ||
           targetConfig?.projectName ||
@@ -1035,6 +1045,15 @@ export function createPublicationService(options = {}, dependencies = {}) {
     }
   }
 
+  // publishPublications returns the Cloudflare-assigned origin, which may have
+  // been corrected mid-publish. Layer the target's custom domain over that, so
+  // the returned link is the one people should use while the canonical origin
+  // stays whatever Cloudflare just confirmed.
+  function publicUrlForSlug(pagesConfig, deployedBaseUrl, slug) {
+    const origin = publicBaseUrl({ ...pagesConfig, baseUrl: deployedBaseUrl }) || deployedBaseUrl;
+    return joinUrl(origin, `/p/${encodeURIComponent(slug)}/`);
+  }
+
   async function publish({ report, publication, pagesConfig }) {
     const baseUrl = await publishPublications({
       report,
@@ -1042,7 +1061,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
       pagesConfig
     });
     const slug = normalizeCustomSlug(publication.slug || publication.token);
-    return joinUrl(baseUrl, `/p/${encodeURIComponent(slug)}/`);
+    return publicUrlForSlug(pagesConfig, baseUrl, slug);
   }
 
   // Re-stage and redeploy the selected publication set so every URL updates in
@@ -1059,7 +1078,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
       pagesConfig
     });
     const slug = normalizeCustomSlug(publication.slug || publication.token);
-    return joinUrl(baseUrl, `/p/${encodeURIComponent(slug)}/`);
+    return publicUrlForSlug(pagesConfig, baseUrl, slug);
   }
 
   // Move a publication's staged content from oldSlug to newSlug and redeploy,

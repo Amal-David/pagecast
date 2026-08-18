@@ -12,6 +12,7 @@ import {
   Copy,
   ExternalLink,
   FileText,
+  Globe,
   Link2,
   Loader2,
   Monitor,
@@ -53,6 +54,7 @@ import { CloudflareConnect } from "@/components/cloudflare-connect";
 import { DeployHistory } from "@/components/deploy-history";
 import { FeedbackCard } from "@/components/feedback-card";
 import { DefaultExpiryCard } from "@/components/default-expiry-card";
+import { CustomDomainCard } from "@/components/custom-domain-card";
 import { ActivityPanel, GlobalActivity } from "@/components/activity-panel";
 import { AddReport } from "@/components/add-report";
 import { PagecastHomeOnboarding } from "@/components/pagecast-home-onboarding";
@@ -93,7 +95,12 @@ import { copyToClipboard, relativeTime } from "@/lib/format";
 import type { CloudflareProject, CloudflareStatus, FeedbackConfig, Report } from "@/lib/types";
 
 type ActiveView = "pages" | "activity" | "settings";
-type SettingsSection = "publishing" | "deploy-history" | "link-defaults" | "analytics";
+type SettingsSection =
+  | "publishing"
+  | "deploy-history"
+  | "custom-domain"
+  | "link-defaults"
+  | "analytics";
 
 interface ActivityItem extends ActivityEventDetail {
   id: string;
@@ -126,6 +133,7 @@ const settingsSections: Array<{
 }> = [
   { id: "publishing", label: "Publishing", icon: Cloud },
   { id: "deploy-history", label: "Deploy history", icon: RefreshCw },
+  { id: "custom-domain", label: "Custom domain", icon: Globe },
   { id: "link-defaults", label: "Link defaults", icon: Link2 },
   { id: "analytics", label: "Analytics", icon: BarChart3 }
 ];
@@ -1332,6 +1340,17 @@ function PageWorkspace({
     .reverse()
     .find((publication) => publication.kind === "snapshot" && publication.publicUrl);
   const isPublishingThisReport = publishPending && publishingReportId === report.id;
+  // The host this link is actually served from — the custom domain once it is
+  // live, otherwise the Cloudflare-assigned one. Read off the link rather than
+  // the setting so a link published before a domain change reports honestly.
+  const publicationHost = (() => {
+    if (!latestSnapshot?.publicUrl) return "—";
+    try {
+      return new URL(latestSnapshot.publicUrl).host;
+    } catch {
+      return "—";
+    }
+  })();
   const needsBuild = report.kind === "folder" && report.buildCommand && report.buildStatus !== "ready";
   const hasActiveLinks = activePublications.length > 0;
   // Only block publishing once we actually know Cloudflare is not connected;
@@ -1515,7 +1534,10 @@ function PageWorkspace({
                 </div>
               ) : null}
               <SettingsRow label="Expires" value={latestSnapshot?.expiresAt ? "Custom" : "Never"} />
-              <SettingsRow label="Custom domain" value="Not set" />
+              {/* The domain is a property of the Pages target, not of one
+                  report, so it is managed in Settings. Show the host this
+                  link actually uses rather than restating the setting. */}
+              <SettingsRow label="Link host" value={publicationHost} />
             </div>
           </section>
 
@@ -2060,6 +2082,13 @@ function SettingsView({
           className="scroll-mt-5"
         >
           <DeployHistory connected={connected} />
+        </section>
+        <section
+          id={settingsSectionId("custom-domain")}
+          aria-label="Custom domain"
+          className="scroll-mt-5"
+        >
+          <CustomDomainCard cloudflareReady={connected} />
         </section>
         <section
           id={settingsSectionId("link-defaults")}

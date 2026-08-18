@@ -9,6 +9,7 @@ import { api, ApiError } from "@/lib/api";
 import { activityMessage, emitActivity } from "@/lib/activity";
 import type {
   CloudflareSyncResponse,
+  CustomDomainResponse,
   DeploymentsResponse,
   OperationJournalEntry,
   PublishResponse,
@@ -21,6 +22,7 @@ const STATUS_KEY = ["status"] as const;
 const REPORTS_KEY = ["reports"] as const;
 const OPERATIONS_KEY = ["operations"] as const;
 const DEPLOYMENTS_KEY = ["deployments"] as const;
+const DOMAIN_KEY = ["custom-domain"] as const;
 
 export function useStatus() {
   return useQuery<StatusResponse>({
@@ -491,6 +493,71 @@ export function useSetDefaultExpiry() {
       const message = errorMessage(error, "Could not update default expiry.");
       toast.error(message);
       emitActivity({ status: "error", title: "Default expiry failed", message });
+    }
+  });
+}
+
+// The custom domain that published links use. Enabled only once a Pages target
+// exists, because every call reconciles against Cloudflare.
+export function useCustomDomain(enabled: boolean) {
+  return useQuery<CustomDomainResponse>({
+    queryKey: DOMAIN_KEY,
+    queryFn: api.getCustomDomain,
+    enabled,
+    // Cloudflare validates DNS and issues a certificate asynchronously, so a
+    // freshly added domain sits at "pending" for minutes. Poll while it does,
+    // and stop once it settles.
+    refetchInterval: (query) =>
+      query.state.data?.customDomain && query.state.data.customDomain.status !== "active"
+        ? 15_000
+        : false
+  });
+}
+
+// Attaching a domain rewrites every stored link, so reports have to refresh too.
+function invalidateAfterDomainChange(queryClient: QueryClient, result: CustomDomainResponse) {
+  queryClient.setQueryData(DOMAIN_KEY, result);
+  void queryClient.invalidateQueries({ queryKey: STATUS_KEY });
+  invalidateReports(queryClient);
+}
+
+export function useAddCustomDomain() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (domain: string) => api.addCustomDomain(domain),
+    onSuccess: (result) => {
+      const active = result.customDomain?.status === "active";
+      // Do not imply the domain is live. Until Cloudflare validates DNS and
+      // issues a certificate, links still use the pages.dev origin.
+      toast.success(
+        active
+          ? `${result.customDomain?.name} is live.`
+          : `${result.customDomain?.name} added. Create the DNS record to finish setup.`
+      );
+      emitActivity({ status: "success", title: "Custom domain added" });
+      invalidateAfterDomainChange(queryClient, result);
+    },
+    onError: (error) => {
+      const message = errorMessage(error, "Could not add the custom domain.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Custom domain failed", message });
+    }
+  });
+}
+
+export function useRemoveCustomDomain() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (domain: string) => api.removeCustomDomain(domain),
+    onSuccess: (result) => {
+      toast.success("Custom domain removed. Links use the pages.dev origin again.");
+      emitActivity({ status: "success", title: "Custom domain removed" });
+      invalidateAfterDomainChange(queryClient, result);
+    },
+    onError: (error) => {
+      const message = errorMessage(error, "Could not remove the custom domain.");
+      toast.error(message);
+      emitActivity({ status: "error", title: "Custom domain removal failed", message });
     }
   });
 }

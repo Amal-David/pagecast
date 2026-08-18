@@ -98,12 +98,20 @@ import {
   tryInvokeLiveCommand
 } from "./state-coordinator.js";
 import {
+  createCloudflareApi,
+  describeDnsInstructions,
+  normalizeCustomDomainName,
+  resolveCloudflareApiToken
+} from "./cloudflare-api.js";
+import {
   PAGECAST_PROJECT_MARKER_FILE,
   encodeProjectOwnershipMarker,
+  normalizeCustomDomain,
   normalizeProjectRef,
   normalizeStoredProjectRef,
   projectRefEquals,
   projectRefFilesystemKey,
+  publicBaseUrl,
   validateOwnershipMarker
 } from "./project-ref.js";
 import {
@@ -464,6 +472,21 @@ async function persistActualPublicationOrigin(publication, configStore) {
   if (!baseUrl) {
     return;
   }
+  // publicUrl is the origin people visit, which is the custom domain once
+  // Cloudflare reports it active — and that origin says nothing about which
+  // origin Cloudflare assigned, which is the only thing this function exists to
+  // record. Writing it through would put the custom domain into pages.baseUrl,
+  // the one field the whole design keeps it out of: ownership verification
+  // would then fetch the marker from it, the DNS guidance would name the domain
+  // as its own CNAME target, and every later publish would see the pages.dev
+  // result disagree and deploy again to "correct" it. The publication service
+  // already reconciled the canonical origin against the deploy before layering
+  // the domain on top, so there is nothing left to learn here.
+  const configuredPages = configStore.get().pages;
+  const trackedDomain = String(configuredPages?.customDomain?.name || "").trim().toLowerCase();
+  if (trackedDomain && hostFromBaseUrl(baseUrl) === trackedDomain) {
+    return;
+  }
   publication.pagesBaseUrl = baseUrl;
   if (publication.projectRef) {
     publication.projectRef = { ...publication.projectRef, baseUrl };
@@ -771,7 +794,12 @@ function normalizeConfig(config = {}) {
       accountId,
       accountName,
       branch: DEFAULT_PAGES_BRANCH,
-      baseUrl: normalizePagesBaseUrl(config.pages?.baseUrl, projectName)
+      baseUrl: normalizePagesBaseUrl(config.pages?.baseUrl, projectName),
+      // A custom domain bound to this exact project. Kept beside baseUrl rather
+      // than in it: baseUrl is the Cloudflare-assigned origin that ownership
+      // verification and the post-deploy correction depend on, while this is
+      // user-facing metadata with its own pending/active lifecycle.
+      customDomain: normalizeCustomDomain(config.pages?.customDomain)
     },
     feedback: normalizeFeedback(config.feedback),
     // A subtle "Published with Pagecast" badge on shared pages (the word-of-mouth
@@ -955,6 +983,11 @@ function safePublicUrl(value) {
   } catch {
     return null;
   }
+}
+
+// The bare host of an origin, for the CNAME target in DNS guidance.
+function hostFromBaseUrl(value) {
+  return safePublicUrl(String(value || ""))?.host || "";
 }
 
 function relativePublicRootPath(publicUrl) {
@@ -1557,7 +1590,11 @@ export function createConfigStore({
           projectName: nextProjectName,
           accountId: nextAccountId,
           accountName: nextAccountName,
-          baseUrl: nextBaseUrl
+          baseUrl: nextBaseUrl,
+          // A custom domain is bound to one Cloudflare project. Switching
+          // targets must not carry it across — the new project does not serve
+          // that hostname, and keeping it would hand out dead links.
+          customDomain: sameTarget ? current.pages.customDomain : null
         }
       });
       return adoptExisting && nextConfig.pages.accountId
@@ -1655,6 +1692,25 @@ export function createConfigStore({
     return getPublicConfig();
   }
 
+  // Record the custom domain bound to the current target. Passing null clears
+  // it. Partial updates merge, so a status poll can advance pending -> active
+  // without restating the name.
+  async function setCustomDomain(customDomain) {
+    await enqueueConfigMutation((current) =>
+      normalizeConfig({
+        ...current,
+        pages: {
+          ...current.pages,
+          customDomain:
+            customDomain === null
+              ? null
+              : { ...(current.pages.customDomain || {}), ...customDomain }
+        }
+      })
+    );
+    return getPublicConfig();
+  }
+
   return {
     init,
     setBadge,
@@ -1663,6 +1719,7 @@ export function createConfigStore({
     setCloudflareSyncEnabled,
     setLocalRuntime,
     setTelemetry,
+    setCustomDomain,
     ensureTelemetryId,
     markTelemetryNotified,
     get,
@@ -1923,6 +1980,7 @@ export function createCloudflarePagesPublisher(options = {}) {
     projectRefEquals,
     projectRefFilesystemKey,
     projectRootImportSlug,
+    publicBaseUrl,
     publicationTokenFilesystemKey,
     randomBytes,
     renderAuthMiddleware,
@@ -3729,6 +3787,37 @@ export function createReportStore({
     return match;
   }
 
+  // Re-host every stored link on a target after its public origin changes.
+  //
+  // Publication URLs are persisted at publish time, so without this a newly
+  // active custom domain would be invisible: the dashboard, CLI, and MCP would
+  // all keep handing out the pages.dev links they recorded earlier. Only the
+  // origin is replaced — the `/p/<slug>/` path, and therefore the link's
+  // identity, is untouched.
+  async function rebasePublicationUrls(pagesConfig, origin) {
+    const nextOrigin = String(origin || "").trim();
+    if (!nextOrigin) {
+      return 0;
+    }
+    let changed = 0;
+    for (const publication of listPublications(pagesConfig)) {
+      if (publication.kind !== "snapshot" || !publication.publicUrl) {
+        continue;
+      }
+      const slug = publication.slug || publication.token;
+      const nextUrl = joinUrl(nextOrigin, `/p/${encodeURIComponent(slug)}/`);
+      if (publication.publicUrl === nextUrl) {
+        continue;
+      }
+      publication.publicUrl = nextUrl;
+      changed += 1;
+    }
+    if (changed > 0) {
+      await save();
+    }
+    return changed;
+  }
+
   async function resolveAsset(id, rawAssetPath = "") {
     const report = reports.get(id);
     if (!report) {
@@ -4107,6 +4196,7 @@ export function createReportStore({
     syncSnapshot: serializeStoreMutation(syncSnapshot),
     adoptPublicationTarget: serializeStoreMutation(adoptPublicationTarget),
     renameSlug: serializeStoreMutation(renameSlug),
+    rebasePublicationUrls: serializeStoreMutation(rebasePublicationUrls),
     restorePublicationSlug: serializeStoreMutation(restorePublicationSlug),
     detachToWorkingCopy: serializeStoreMutation(detachToWorkingCopy),
     readContent,
@@ -4678,6 +4768,7 @@ export function createAdminHandler({
   watchManager,
   connectionJobs = new Map(),
   serviceFetch = fetch,
+  cloudflareApiFetchImpl = fetch,
   commandCapability = "",
   bindHost = DEFAULT_HOST,
   allowedHosts = []
@@ -4777,6 +4868,7 @@ export function createAdminHandler({
           watchManager,
           connectionJobs,
           serviceFetch,
+          cloudflareApiFetchImpl,
           commandCapability
         });
         if (
@@ -5266,10 +5358,16 @@ async function handleApi(
     watchManager,
     connectionJobs,
     serviceFetch,
+    cloudflareApiFetchImpl = fetch,
     commandCapability
   }
 ) {
   const options = reportOptions({ getAdminBaseUrl, getLocalPublicBaseUrl });
+
+  // Every custom-domain route and command builds its client here, so the
+  // transport has exactly one definition per request.
+  const domainClient = () =>
+    createPagesDomainClient({ cloudflareAuth, fetchImpl: cloudflareApiFetchImpl });
 
   function updateConnectionJob(job, status, patch = {}) {
     Object.assign(job, patch, { status, updatedAt: nowIso() });
@@ -5526,6 +5624,43 @@ async function handleApi(
           accountId: payload.accountId,
           configStore,
           cloudflareAuth
+        })
+      );
+      sendJson(res, 200, result);
+      return;
+    }
+    // Custom-domain commands reconcile local state against Cloudflare, so even
+    // the status read is an owned mutation.
+    if (body.command === "pages_domain_add") {
+      const result = await runOwnedMutation(() =>
+        addCloudflarePagesDomainWithContext({
+          domain: payload.domain,
+          configStore,
+          store,
+          domainApi: domainClient()
+        })
+      );
+      sendJson(res, 200, result);
+      return;
+    }
+    if (body.command === "pages_domain_status") {
+      const result = await runOwnedMutation(() =>
+        getCloudflarePagesDomainWithContext({
+          configStore,
+          store,
+          domainApi: domainClient()
+        })
+      );
+      sendJson(res, 200, result);
+      return;
+    }
+    if (body.command === "pages_domain_remove") {
+      const result = await runOwnedMutation(() =>
+        removeCloudflarePagesDomainWithContext({
+          domain: payload.domain,
+          configStore,
+          store,
+          domainApi: domainClient()
         })
       );
       sendJson(res, 200, result);
@@ -6153,6 +6288,45 @@ async function handleApi(
     // getPublicConfig (not the setter's full return) so authCookieSecret never
     // reaches the client.
     sendJson(res, 200, { config: configStore.getPublicConfig() });
+    return;
+  }
+
+  // Custom domain. The reconcile is a POST because it behaves like one: it asks
+  // Cloudflare what the domain is doing and then writes the answer, persisting
+  // the config and re-hosting every stored publication URL. Shaped as a GET it
+  // read as safe to every method-based rule in the admin handler at once — no
+  // CSRF token, no command capability, and no place in the mutation queue —
+  // which is three exemptions for one route that earns none of them.
+  if (url.pathname === "/api/pages/domain/status" && req.method === "POST") {
+    const result = await getCloudflarePagesDomainWithContext({
+      configStore,
+      store,
+      domainApi: domainClient()
+    });
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (url.pathname === "/api/pages/domain" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    const result = await addCloudflarePagesDomainWithContext({
+      domain: body.domain,
+      configStore,
+      store,
+      domainApi: domainClient()
+    });
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (url.pathname === "/api/pages/domain" && req.method === "DELETE") {
+    const result = await removeCloudflarePagesDomainWithContext({
+      domain: url.searchParams.get("domain") || "",
+      configStore,
+      store,
+      domainApi: domainClient()
+    });
+    sendJson(res, 200, result);
     return;
   }
 
@@ -7094,6 +7268,9 @@ export async function startServers({
   tunnelTimeoutMs = 30000,
   fetchImpl = fetch,
   cloudflareAuthSpawnImpl = spawn,
+  // Only the custom-domain client calls api.cloudflare.com. Kept separate from
+  // fetchImpl so a test double for one cannot silently answer for the other.
+  cloudflareApiFetchImpl = fetch,
   cloudflareLoginTimeoutMs = DEFAULT_CLOUDFLARE_LOGIN_TIMEOUT_MS,
   cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
   pagesDeploySpawnImpl = spawn,
@@ -7239,6 +7416,7 @@ export async function startServers({
         mutationQueue,
         watchManager,
         serviceFetch: fetchImpl,
+        cloudflareApiFetchImpl,
         commandCapability,
         bindHost: urlHost,
         allowedHosts: [displayHostname]
@@ -7704,6 +7882,349 @@ async function getCloudflarePagesStatusOneShot({
       ...targetManagementState(configStore, pages)
     }
   };
+}
+
+// --- Custom domains --------------------------------------------------------
+//
+// Wrangler has no command for Pages custom domains, so these are the only
+// operations in Pagecast that reach api.cloudflare.com directly. Credentials
+// come from cloudflare-api.js; refreshSession is handed in because invoking
+// Wrangler is what renews an expired OAuth token.
+function createPagesDomainClient({ cloudflareAuth, fetchImpl = fetch } = {}) {
+  return createCloudflareApi({
+    fetchImpl,
+    resolveToken: () =>
+      resolveCloudflareApiToken({
+        refreshSession: cloudflareAuth ? () => cloudflareAuth.refreshSession() : null
+      })
+  });
+}
+
+function requireConfiguredTarget(pages) {
+  if (!pages?.accountId || !pages?.projectName) {
+    throw appError(
+      "Connect Cloudflare and choose a Pages project first (`pagecast pages setup`).",
+      409
+    );
+  }
+  return pages;
+}
+
+/**
+ * Reconcile the stored domain against what Cloudflare reports, and if the
+ * public origin changed as a result, re-host every stored link on the target.
+ *
+ * Live pages keep whatever og:url was baked into them at publish time. That
+ * cannot be corrected without re-preparing each snapshot from its source
+ * tree, which would silently deploy any source edits made since — so it is
+ * reported as `staleMetadata` rather than fixed behind the user's back.
+ */
+async function applyDomainState({ configStore, store, remote, pages }) {
+  const before = publicBaseUrl(pages);
+  await configStore.setCustomDomain(remote);
+  const nextPages = configStore.get().pages;
+  const after = publicBaseUrl(nextPages);
+
+  let rebased = 0;
+  if (after && after !== before && store) {
+    rebased = await store.rebasePublicationUrls(nextPages, after);
+  }
+  return {
+    customDomain: nextPages.customDomain,
+    publicBaseUrl: after,
+    originChanged: after !== before,
+    rebased,
+    // Every re-hosted link is a live page whose baked social metadata still
+    // names the old origin. Re-publishing that page is what refreshes it.
+    staleMetadata: rebased,
+    progress: domainProgress(remote)
+  };
+}
+
+/**
+ * The two sub-checks Cloudflare runs behind a `pending` domain, reported
+ * separately because they fail for different reasons and have different fixes.
+ *
+ * Validation is DNS: the record does not resolve to the project yet.
+ * Verification is the certificate. A domain stuck at `pending` is otherwise
+ * indistinguishable from one that is merely slow, and `status` alone cannot
+ * tell someone which of the two they still have to act on. Read straight off
+ * the Cloudflare record rather than persisted — it is a progress reading, not
+ * state Pagecast owns.
+ */
+function domainProgress(remote) {
+  if (!remote) {
+    return null;
+  }
+  const validation = String(remote.validationStatus || "").trim();
+  const verification = String(remote.verificationStatus || "").trim();
+  const certificateAuthority = String(remote.certificateAuthority || "").trim();
+  if (!validation && !verification && !certificateAuthority) {
+    return null;
+  }
+  return { validation, verification, certificateAuthority };
+}
+
+export async function addCloudflarePagesDomain(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  return runCoordinatedHeadlessOperation(
+    {
+      dataDir,
+      routeToDaemon: options.routeToDaemon,
+      command: "pages_domain_add",
+      payload: { domain: options.domain },
+      commandFetchImpl: options.commandFetchImpl || fetch
+    },
+    () => addCloudflarePagesDomainOneShot({ ...options, dataDir })
+  );
+}
+
+// The headless variants share one context builder so a one-shot CLI call and
+// the running daemon take exactly the same code path, as adapter parity
+// requires.
+async function createDomainContext({
+  dataDir,
+  cloudflareAuthSpawnImpl = spawn,
+  fetchImpl = fetch,
+  domainApi = null
+}) {
+  const store = createReportStore({ dataDir });
+  await store.init();
+  const { configStore, cloudflareAuth } = await createHeadlessCloudflareContext({
+    dataDir,
+    store,
+    cloudflareAuthSpawnImpl
+  });
+  return {
+    store,
+    configStore,
+    domainApi: domainApi || createPagesDomainClient({ cloudflareAuth, fetchImpl })
+  };
+}
+
+async function addCloudflarePagesDomainOneShot({
+  domain,
+  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
+  cloudflareAuthSpawnImpl = spawn,
+  fetchImpl = fetch,
+  domainApi = null
+} = {}) {
+  const context = await createDomainContext({
+    dataDir,
+    cloudflareAuthSpawnImpl,
+    fetchImpl,
+    domainApi
+  });
+  return addCloudflarePagesDomainWithContext({ domain, ...context });
+}
+
+export async function addCloudflarePagesDomainWithContext({
+  domain,
+  configStore,
+  store,
+  domainApi
+} = {}) {
+  const name = normalizeCustomDomainName(domain);
+  const pages = requireConfiguredTarget(configStore.get().pages);
+  const api = domainApi;
+
+  // Pagecast tracks one domain per target, because publicBaseUrl has to resolve
+  // to exactly one origin. Replacing a live domain in place would quietly rewrite
+  // every stored link back to the pages.dev origin — the new domain starts
+  // `pending` — so refuse instead and let the caller decide.
+  const tracked = pages.customDomain?.name || "";
+  if (tracked && tracked !== name) {
+    throw appError(
+      `This target already uses ${tracked}. Pagecast tracks one custom domain per Pages project, ` +
+        `so remove it first (\`pagecast pages domain remove\`) before adding ${name}. ` +
+        `${tracked} keeps serving at Cloudflare either way.`,
+      409
+    );
+  }
+
+  // A domain already attached at Cloudflare — added in its dashboard, or left
+  // behind by an earlier Pagecast target — is adopted rather than re-created.
+  // Without this the `unadopted` names the status command reports would be a
+  // dead end, since the only command that takes a domain is this one.
+  const attached = await api.listPagesDomains({
+    accountId: pages.accountId,
+    projectName: pages.projectName
+  });
+  const existing = attached.find((entry) => entry.name === name) || null;
+  const record =
+    existing ||
+    (await api.addPagesDomain({
+      accountId: pages.accountId,
+      projectName: pages.projectName,
+      domain: name
+    }));
+
+  const applied = await applyDomainState({
+    configStore,
+    store,
+    pages,
+    // Re-adding the same domain is a reconcile, not a fresh attachment, so it
+    // keeps the timestamp it was first recorded with.
+    remote: { ...record, addedAt: pages.customDomain?.addedAt || nowIso() }
+  });
+  return {
+    ...applied,
+    adopted: Boolean(existing),
+    dns: describeDnsInstructions(name, hostFromBaseUrl(pages.baseUrl)),
+    unadopted: attached.filter((entry) => entry.name !== name).map((entry) => entry.name),
+    config: configStore.getPublicConfig()
+  };
+}
+
+export async function getCloudflarePagesDomain(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  return runCoordinatedHeadlessOperation(
+    {
+      dataDir,
+      routeToDaemon: options.routeToDaemon,
+      command: "pages_domain_status",
+      commandFetchImpl: options.commandFetchImpl || fetch
+    },
+    () => getCloudflarePagesDomainOneShot({ ...options, dataDir })
+  );
+}
+
+async function getCloudflarePagesDomainOneShot({
+  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
+  cloudflareAuthSpawnImpl = spawn,
+  fetchImpl = fetch,
+  domainApi = null
+} = {}) {
+  const context = await createDomainContext({
+    dataDir,
+    cloudflareAuthSpawnImpl,
+    fetchImpl,
+    domainApi
+  });
+  return getCloudflarePagesDomainWithContext(context);
+}
+
+export async function getCloudflarePagesDomainWithContext({
+  configStore,
+  store,
+  domainApi
+} = {}) {
+  const pages = requireConfiguredTarget(configStore.get().pages);
+  const stored = pages.customDomain;
+  const api = domainApi;
+  const remoteDomains = await api.listPagesDomains({
+    accountId: pages.accountId,
+    projectName: pages.projectName
+  });
+
+  if (!stored) {
+    // Nothing tracked locally. Report what Cloudflare has so an operator who
+    // added a domain in the dashboard can see it and adopt it.
+    return {
+      customDomain: null,
+      publicBaseUrl: publicBaseUrl(pages),
+      originChanged: false,
+      rebased: 0,
+      staleMetadata: 0,
+      unadopted: remoteDomains.map((entry) => entry.name),
+      config: configStore.getPublicConfig()
+    };
+  }
+
+  const match = remoteDomains.find((entry) => entry.name === stored.name);
+  if (!match) {
+    // Removed at Cloudflare behind our back. Fall back to pages.dev rather
+    // than keep handing out links to a hostname that no longer resolves.
+    const applied = await applyDomainState({ configStore, store, pages, remote: null });
+    return {
+      ...applied,
+      removedRemotely: stored.name,
+      unadopted: remoteDomains.map((entry) => entry.name),
+      config: configStore.getPublicConfig()
+    };
+  }
+
+  const applied = await applyDomainState({
+    configStore,
+    store,
+    pages,
+    remote: { ...match, addedAt: stored.addedAt }
+  });
+  return {
+    ...applied,
+    dns: describeDnsInstructions(stored.name, hostFromBaseUrl(pages.baseUrl)),
+    unadopted: remoteDomains
+      .filter((entry) => entry.name !== stored.name)
+      .map((entry) => entry.name),
+    config: configStore.getPublicConfig()
+  };
+}
+
+export async function removeCloudflarePagesDomain(options = {}) {
+  const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
+  return runCoordinatedHeadlessOperation(
+    {
+      dataDir,
+      routeToDaemon: options.routeToDaemon,
+      command: "pages_domain_remove",
+      payload: { domain: options.domain },
+      commandFetchImpl: options.commandFetchImpl || fetch
+    },
+    () => removeCloudflarePagesDomainOneShot({ ...options, dataDir })
+  );
+}
+
+async function removeCloudflarePagesDomainOneShot({
+  domain,
+  dataDir = path.join(PROJECT_ROOT, ".pagecast"),
+  cloudflareAuthSpawnImpl = spawn,
+  fetchImpl = fetch,
+  domainApi = null
+} = {}) {
+  const context = await createDomainContext({
+    dataDir,
+    cloudflareAuthSpawnImpl,
+    fetchImpl,
+    domainApi
+  });
+  return removeCloudflarePagesDomainWithContext({ domain, ...context });
+}
+
+export async function removeCloudflarePagesDomainWithContext({
+  domain,
+  configStore,
+  store,
+  domainApi
+} = {}) {
+  const pages = requireConfiguredTarget(configStore.get().pages);
+  const name = normalizeCustomDomainName(domain || pages.customDomain?.name || "");
+  const api = domainApi;
+
+  // Detach locally even if Cloudflare already has no such domain — a 404 here
+  // means the desired end state is already true remotely.
+  try {
+    await api.deletePagesDomain({
+      accountId: pages.accountId,
+      projectName: pages.projectName,
+      domain: name
+    });
+  } catch (error) {
+    if (error?.statusCode !== 404) {
+      throw error;
+    }
+  }
+
+  const applied =
+    pages.customDomain?.name === name
+      ? await applyDomainState({ configStore, store, pages, remote: null })
+      : {
+          customDomain: pages.customDomain,
+          publicBaseUrl: publicBaseUrl(pages),
+          originChanged: false,
+          rebased: 0,
+          staleMetadata: 0
+        };
+  return { ...applied, removed: name, config: configStore.getPublicConfig() };
 }
 
 export async function listCloudflarePagesProjects(options = {}) {

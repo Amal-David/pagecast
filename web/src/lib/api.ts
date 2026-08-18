@@ -6,6 +6,7 @@ import type {
   CloudflareProjectsResponse,
   ConfigResponse,
   ContentResponse,
+  CustomDomainResponse,
   DeleteDeploymentResponse,
   DeploymentsResponse,
   FeedbackSetupResponse,
@@ -219,6 +220,21 @@ export const api = {
     baseUrl?: string;
     adoptExisting?: boolean;
   }) => request<ConfigResponse>("/api/config/pages", { json: payload }),
+
+  // A POST because reconciling writes: it asks Cloudflare what the domain is
+  // doing, persists the answer, and re-hosts stored links if the public origin
+  // moved. Shaped as a GET it would skip the CSRF token and the mutation queue.
+  getCustomDomain: () =>
+    request<CustomDomainResponse>("/api/pages/domain/status", { json: {} }),
+
+  addCustomDomain: (domain: string) =>
+    request<CustomDomainResponse>("/api/pages/domain", { json: { domain } }),
+
+  removeCustomDomain: (domain: string) =>
+    request<CustomDomainResponse>(
+      `/api/pages/domain?domain=${encodeURIComponent(domain)}`,
+      { method: "DELETE" }
+    ),
 
   adoptPublicationTarget: (token: string) =>
     request<PublishResponse>(`/api/publications/${encodeURIComponent(token)}/target`, {

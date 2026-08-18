@@ -146,6 +146,47 @@ Removing a snapshot never affects your live site or pages. But expiry, password
 changes, and revoke apply only to the replacement deployment — prune history
 when old snapshot URLs must stop working.
 
+## Custom Domain
+
+Published links use the Cloudflare-assigned `<project>.pages.dev` host by
+default. Point your own hostname at them from the admin UI
+(**Settings → Custom domain**) or the terminal:
+
+```sh
+npx pagecast pages domain add docs.example.com --json
+npx pagecast pages domain status --json               # DNS + certificate progress
+npx pagecast pages domain remove --json
+```
+
+Adding a domain does not make it live. Cloudflare validates DNS and issues a
+certificate first, and your links keep using the pages.dev host until it
+reports `active` — `status` prints the record you still need to create, plus
+which of the two checks is outstanding (`DNS validation` or `Certificate`) so a
+domain stuck at pending tells you what to fix.
+
+One domain per Pages project. Adding a second is refused rather than swapped in
+silently, because a new domain starts pending and swapping would drop every
+live link back to the pages.dev host — remove the current one first. A domain
+already attached in Cloudflare's own dashboard is adopted by name (`domain add
+docs.example.com`) instead of being created again.
+
+- **Subdomain** (`docs.example.com`) — DNS can live anywhere. Create a `CNAME`
+  from the subdomain to `<project>.pages.dev`.
+- **Apex domain** (`example.com`) — Cloudflare only serves a Pages apex domain
+  when the domain is a zone on the *same* Cloudflare account, with its
+  nameservers pointed at Cloudflare. There is no way around this.
+
+The pages.dev host keeps working, and existing links are re-hosted in place —
+the `/p/<slug>/` path never changes. Pages published *before* the switch still
+carry the old host in their `og:` metadata, because those bytes were generated
+at publish time; re-publish a page to refresh it. The command tells you how
+many pages this affects.
+
+Custom domains need `Pages:Edit`, which is already part of the Cloudflare
+sign-in Pagecast requests — a `CLOUDFLARE_API_TOKEN` works too. Wrangler has no
+command for Pages custom domains, so this is the one place Pagecast calls the
+Cloudflare API directly.
+
 ## Use From Coding Agents
 
 Pagecast ships a Codex-native skill and a portable Agent-Skills file. An

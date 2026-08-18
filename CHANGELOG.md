@@ -5,6 +5,17 @@ All notable changes to Pagecast are documented here. This project follows
 
 ## Unreleased
 
+### Added
+
+- **Custom domains** — point your own hostname at published links from
+  **Settings → Custom domain**, `pagecast pages domain add|status|remove`, or
+  the `custom_domain` MCP tool. Links move to the domain only once Cloudflare
+  reports it active, and existing links are re-hosted in place so the
+  `/p/<slug>/` path never changes. `status` reports which of Cloudflare's two
+  checks a pending domain is waiting on — DNS validation or certificate
+  verification — and a domain already attached in Cloudflare's dashboard is
+  adopted by name rather than re-created.
+
 ## 0.7.0 — 2026-08-02
 
 ### Added

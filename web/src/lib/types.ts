@@ -145,12 +145,73 @@ export interface CloudflareConnectionJob {
   error: string;
 }
 
+// Cloudflare's lifecycle for a Pages custom domain. Only "active" means the
+// hostname actually serves traffic with a valid certificate.
+export type CustomDomainStatus =
+  | "initializing"
+  | "pending"
+  | "active"
+  | "deactivated"
+  | "blocked"
+  | "error";
+
+export interface CustomDomain {
+  name: string;
+  status: CustomDomainStatus;
+  addedAt: string | null;
+  error: string | null;
+}
+
 export interface PagesConfig {
   projectName: string;
   accountId: string;
   accountName: string;
   branch: string;
+  // The Cloudflare-assigned *.pages.dev origin. Kept distinct from the custom
+  // domain because ownership verification and deploy reconciliation use it.
   baseUrl: string;
+  customDomain: CustomDomain | null;
+}
+
+export interface CustomDomainDnsRecord {
+  type: string;
+  name: string;
+  zone: string;
+  value: string;
+}
+
+export interface CustomDomainResponse {
+  customDomain: CustomDomain | null;
+  // The origin links use right now — the pages.dev one until a domain is active.
+  publicBaseUrl: string;
+  originChanged: boolean;
+  rebased: number;
+  // Live pages whose baked social metadata still names the previous origin.
+  // Only re-publishing those pages can refresh it.
+  staleMetadata: number;
+  dns?: {
+    name: string;
+    kind: "apex" | "subdomain";
+    record: CustomDomainDnsRecord | null;
+    requiresCloudflareZone: boolean;
+    instructions: string;
+  };
+  // Which of Cloudflare's two checks a pending domain still waits on:
+  // `validation` is DNS, `verification` is the certificate. Null once neither
+  // is reported. Read from Cloudflare per call rather than stored.
+  progress?: {
+    validation: string;
+    verification: string;
+    certificateAuthority: string;
+  } | null;
+  // Domains on the same Pages project that Pagecast does not track. Adding one
+  // by name adopts it rather than re-creating it.
+  unadopted?: string[];
+  // True when the add call adopted an already-attached domain.
+  adopted?: boolean;
+  removed?: string;
+  removedRemotely?: string;
+  config: AppConfig;
 }
 
 export interface FeedbackConfig {
