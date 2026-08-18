@@ -661,3 +661,207 @@ test("domain records are normalized to the fields Pagecast stores", async () => 
   assert.equal(domains[0].certificateAuthority, "lets_encrypt");
   assert.equal(domains[1].status, "pending");
 });
+
+// --- one domain per target -------------------------------------------------
+
+test("a second domain is refused rather than silently replacing the live one", async () => {
+  const { tempDir, configStore, store } = await makeServiceContext();
+  try {
+    const sourceDir = path.join(tempDir, "source");
+    await fs.mkdir(sourceDir, { recursive: true });
+    const reportPath = path.join(sourceDir, "quarterly.html");
+    await fs.writeFile(reportPath, "<h1>Quarterly</h1>", "utf8");
+    const report = await store.addPath(reportPath);
+    const draft = store.draftPublication(report.id, { label: "quarterly" });
+    const slug = draft.publication.slug || draft.publication.token;
+    await store.commitPublication(report.id, {
+      ...draft.publication,
+      publicUrl: `${ASSIGNED_ORIGIN}/p/${slug}/`,
+      projectRef: { ...TARGET, baseUrl: ASSIGNED_ORIGIN }
+    });
+
+    const api = fakeDomainApi();
+    await addCloudflarePagesDomainWithContext({
+      domain: "docs.example.com",
+      configStore,
+      store,
+      domainApi: api
+    });
+    api.state.domains = [{ name: "docs.example.com", status: "active" }];
+    await getCloudflarePagesDomainWithContext({ configStore, store, domainApi: api });
+    assert.equal(publicBaseUrl(configStore.get().pages), "https://docs.example.com");
+
+    // Storing the second domain would overwrite the first and, because a new
+    // domain starts `pending`, knock every live link back to pages.dev. Apex
+    // plus www is the common shape of this mistake, so it has to be loud.
+    await assert.rejects(
+      addCloudflarePagesDomainWithContext({
+        domain: "www.example.com",
+        configStore,
+        store,
+        domainApi: api
+      }),
+      (error) => {
+        assert.equal(error.statusCode, 409);
+        assert.match(error.message, /already uses docs\.example\.com/);
+        return true;
+      }
+    );
+
+    // Nothing moved: not the tracked domain, not the links, not Cloudflare.
+    assert.equal(configStore.get().pages.customDomain.name, "docs.example.com");
+    assert.equal(configStore.get().pages.customDomain.status, "active");
+    assert.equal(
+      store.listPublications(configStore.get().pages)[0].publicUrl,
+      `https://docs.example.com/p/${slug}/`
+    );
+    assert.deepEqual(api.state.domains.map((entry) => entry.name), ["docs.example.com"]);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("re-adding the tracked domain reconciles it instead of attaching it twice", async () => {
+  const { tempDir, configStore, store } = await makeServiceContext();
+  try {
+    const api = fakeDomainApi();
+    const first = await addCloudflarePagesDomainWithContext({
+      domain: "docs.example.com",
+      configStore,
+      store,
+      domainApi: api
+    });
+    assert.equal(first.adopted, false);
+
+    api.state.domains = [{ name: "docs.example.com", status: "active" }];
+    const again = await addCloudflarePagesDomainWithContext({
+      // The same domain, typed the way a person might type it the second time.
+      domain: "https://Docs.Example.com/",
+      configStore,
+      store,
+      domainApi: api
+    });
+
+    assert.equal(again.customDomain.status, "active");
+    // Adopted, not re-created: Cloudflare is never asked to attach it twice.
+    assert.equal(again.adopted, true);
+    assert.equal(api.state.domains.length, 1);
+    // A reconcile is not a fresh attachment, so the original timestamp stands.
+    assert.equal(again.customDomain.addedAt, first.customDomain.addedAt);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a domain attached at Cloudflare is adopted by name, so `unadopted` is actionable", async () => {
+  const { tempDir, configStore, store } = await makeServiceContext();
+  try {
+    // Attached in Cloudflare's own dashboard, before Pagecast knew about it.
+    const api = fakeDomainApi({ domains: [{ name: "docs.example.com", status: "active" }] });
+
+    const status = await getCloudflarePagesDomainWithContext({
+      configStore,
+      store,
+      domainApi: api
+    });
+    assert.equal(status.customDomain, null);
+    assert.deepEqual(status.unadopted, ["docs.example.com"]);
+
+    // Adding the name Cloudflare already knows adopts the record rather than
+    // asking Cloudflare to create a domain it already has.
+    const adopted = await addCloudflarePagesDomainWithContext({
+      domain: "docs.example.com",
+      configStore,
+      store,
+      domainApi: api
+    });
+    assert.equal(adopted.adopted, true);
+    assert.equal(adopted.customDomain.status, "active");
+    assert.equal(adopted.publicBaseUrl, "https://docs.example.com");
+    assert.deepEqual(adopted.unadopted, []);
+    assert.equal(api.state.domains.length, 1);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a pending domain reports which Cloudflare check it is still waiting on", async () => {
+  const { tempDir, configStore, store } = await makeServiceContext();
+  try {
+    const api = fakeDomainApi();
+    await addCloudflarePagesDomainWithContext({
+      domain: "docs.example.com",
+      configStore,
+      store,
+      domainApi: api
+    });
+
+    api.state.domains = [
+      {
+        name: "docs.example.com",
+        status: "pending",
+        validationStatus: "pending",
+        verificationStatus: "inactive",
+        certificateAuthority: "google"
+      }
+    ];
+    const result = await getCloudflarePagesDomainWithContext({
+      configStore,
+      store,
+      domainApi: api
+    });
+
+    // "pending" alone cannot tell someone whether to go fix DNS or wait for the
+    // certificate, which is the whole question when a domain sits for an hour.
+    assert.equal(result.progress.validation, "pending");
+    assert.equal(result.progress.verification, "inactive");
+    assert.equal(result.progress.certificateAuthority, "google");
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+// --- normalization ---------------------------------------------------------
+
+test("a non-ASCII domain reaches Cloudflare as punycode however it was typed", () => {
+  // Both spellings have to resolve to the one record Cloudflare stores;
+  // otherwise `add` and `status` disagree about the same domain.
+  assert.equal(normalizeCustomDomainName("münchen.de"), "xn--mnchen-3ya.de");
+  assert.equal(normalizeCustomDomainName("https://MÜNCHEN.de/"), "xn--mnchen-3ya.de");
+  assert.equal(normalizeCustomDomainName("xn--mnchen-3ya.de"), "xn--mnchen-3ya.de");
+});
+
+test("a domain that quietly loses part of what was typed is refused", () => {
+  // URL would drop both without a word, and a silently truncated hostname is
+  // worse than a rejected one.
+  assert.throws(() => normalizeCustomDomainName("docs.example.com:8080"), /must not include a port/);
+  assert.throws(() => normalizeCustomDomainName("user:pass@docs.example.com"), /not a valid domain/);
+});
+
+test("an aborted response body fails loudly instead of reading as an empty result", async () => {
+  const api = createCloudflareApi({
+    timeoutMs: 20,
+    resolveToken: async () => ({ token: "t", source: "api-token" }),
+    fetchImpl: async (_url, init) =>
+      new Response(
+        new ReadableStream({
+          // Headers land immediately and the body never does — the shape a
+          // stalled connection actually takes. The stream fails on abort the
+          // way undici's does, so the test measures whether the timeout still
+          // covers the read rather than whether the fake cooperates.
+          start(controller) {
+            init.signal.addEventListener("abort", () => {
+              controller.error(new Error("This operation was aborted"));
+            });
+          }
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+  });
+
+  await assert.rejects(api.listPagesDomains(TARGET), (error) => {
+    assert.equal(error.statusCode, 502);
+    assert.match(error.message, /Cloudflare API request failed/);
+    return true;
+  });
+});
