@@ -122,6 +122,24 @@ export function CustomDomainCard({ cloudflareReady }: CustomDomainCardProps) {
                 <p className="text-xs text-muted-foreground">
                   Links keep using the Cloudflare origin until this domain is live.
                 </p>
+                {/* Which half is outstanding. "Pending" alone cannot tell
+                    someone whether to fix DNS or wait on the certificate. */}
+                {result?.progress?.validation || result?.progress?.verification ? (
+                  <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                    {result.progress.validation ? (
+                      <>
+                        <dt>DNS validation</dt>
+                        <dd className="font-mono">{result.progress.validation}</dd>
+                      </>
+                    ) : null}
+                    {result.progress.verification ? (
+                      <>
+                        <dt>Certificate</dt>
+                        <dd className="font-mono">{result.progress.verification}</dd>
+                      </>
+                    ) : null}
+                  </dl>
+                ) : null}
                 {result?.dns?.record ? (
                   <div className="space-y-1">
                     <p className="text-xs text-muted-foreground">
@@ -176,11 +194,31 @@ export function CustomDomainCard({ cloudflareReady }: CustomDomainCardProps) {
           </form>
         )}
 
+        {/* Attached at Cloudflare but not tracked here. Adding one by name
+            adopts it, so offer that rather than just naming it. */}
         {result?.unadopted?.length ? (
-          <p className="text-xs text-muted-foreground">
-            Also attached at Cloudflare but not tracked by Pagecast:{" "}
-            {result.unadopted.join(", ")}
-          </p>
+          <div className="space-y-1.5">
+            <p className="text-xs text-muted-foreground">
+              Also attached at Cloudflare but not tracked by Pagecast:
+            </p>
+            <ul className="space-y-1">
+              {result.unadopted.map((name) => (
+                <li key={name} className="flex items-center justify-between gap-2">
+                  <span className="truncate font-mono text-xs">{name}</span>
+                  {domain ? null : (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={pending}
+                      onClick={() => addDomain.mutate(name)}
+                    >
+                      Use this
+                    </Button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
         ) : null}
       </CardContent>
     </Card>

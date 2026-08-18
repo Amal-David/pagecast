@@ -196,7 +196,19 @@ export interface CustomDomainResponse {
     requiresCloudflareZone: boolean;
     instructions: string;
   };
+  // Which of Cloudflare's two checks a pending domain still waits on:
+  // `validation` is DNS, `verification` is the certificate. Null once neither
+  // is reported. Read from Cloudflare per call rather than stored.
+  progress?: {
+    validation: string;
+    verification: string;
+    certificateAuthority: string;
+  } | null;
+  // Domains on the same Pages project that Pagecast does not track. Adding one
+  // by name adopts it rather than re-creating it.
   unadopted?: string[];
+  // True when the add call adopted an already-attached domain.
+  adopted?: boolean;
   removed?: string;
   removedRemotely?: string;
   config: AppConfig;

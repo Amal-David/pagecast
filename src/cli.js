@@ -633,6 +633,9 @@ function printDomainResult(result, json) {
   } else {
     console.log(`Custom domain: ${domain.name} (${domain.status})`);
     console.log(`URL: ${result.publicBaseUrl}`);
+    if (result.adopted) {
+      console.log("Adopted the domain already attached to this project at Cloudflare.");
+    }
     if (domain.error) {
       console.log(`Cloudflare reports: ${domain.error}`);
     }
@@ -640,6 +643,14 @@ function printDomainResult(result, json) {
       // Links keep pointing at pages.dev until Cloudflare serves the hostname,
       // so say so rather than let the operator assume it is live.
       console.log("Links keep using the pages.dev origin until the domain is active.");
+      // Which half is outstanding, so a domain sitting at pending for an hour
+      // is not just "pending" with no way to tell what to fix.
+      if (result.progress?.validation) {
+        console.log(`DNS validation: ${result.progress.validation}`);
+      }
+      if (result.progress?.verification) {
+        console.log(`Certificate: ${result.progress.verification}`);
+      }
       if (result.dns?.instructions) {
         console.log("");
         console.log(result.dns.instructions);
@@ -656,7 +667,12 @@ function printDomainResult(result, json) {
     );
   }
   for (const name of result.unadopted || []) {
-    console.log(`Also attached at Cloudflare but not tracked by Pagecast: ${name}`);
+    // Actionable: `domain add <name>` adopts an already-attached domain rather
+    // than trying to create it again.
+    console.log(
+      `Also attached at Cloudflare but not tracked by Pagecast: ${name} ` +
+        `(\`pagecast pages domain add ${name}\` adopts it)`
+    );
   }
 }
 

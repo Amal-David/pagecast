@@ -144,7 +144,18 @@ function summarizeDomain(result) {
     requiresCloudflareZone: Boolean(result?.dns?.requiresCloudflareZone),
     rebasedLinks: result?.rebased || 0,
     // Live pages whose baked social metadata still names the previous origin.
-    staleMetadata: result?.staleMetadata || 0
+    staleMetadata: result?.staleMetadata || 0,
+    // Which of Cloudflare's two checks a pending domain is still waiting on:
+    // `validation` is DNS, `verification` is the certificate. Without these an
+    // agent can only report "still pending" and cannot say what to fix.
+    validation: result?.progress?.validation || "",
+    verification: result?.progress?.verification || "",
+    // Domains attached to the same Pages project that Pagecast does not track.
+    // Adding one by name adopts it, so this is an actionable list.
+    unadopted: result?.unadopted || [],
+    // The tracked domain vanished from Cloudflare between calls; links have
+    // already fallen back to the pages.dev origin.
+    removedRemotely: result?.removedRemotely || ""
   };
 }
 
