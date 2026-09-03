@@ -1709,8 +1709,29 @@ export function createDeployQueue() {
 // exactly one origin. Documents without a meta CSP are returned untouched.
 // Pure + exported for testing.
 export function allowCspOrigin(html, origin, directives = ["script-src", "connect-src"]) {
-  const source = String(origin || "").trim().replace(/\/+$/, "");
-  if (!source || typeof html !== "string") {
+  if (typeof html !== "string") {
+    return html;
+  }
+  // A CSP source expression is space-delimited and the policy lives inside a
+  // quoted attribute, so an origin carrying a space, `;`, quote, newline or `>`
+  // could add directives or escape the attribute entirely. Accept only a
+  // well-formed http(s) origin and rebuild it from `URL.origin`, which is
+  // structurally incapable of containing any of those. Anything else widens
+  // nothing — failing closed (widget stays blocked) rather than open.
+  let source;
+  try {
+    const parsed = new URL(String(origin || "").trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return html;
+    }
+    source = parsed.origin;
+  } catch {
+    return html;
+  }
+  // `URL` permits code points that are legal in a host but meaningless in a CSP
+  // source expression (an apostrophe, for one — it is not a forbidden host code
+  // point). Require the shape a real origin actually has.
+  if (!/^https?:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(source)) {
     return html;
   }
   const widen = (policy) => {

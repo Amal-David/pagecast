@@ -72,3 +72,38 @@ test("a blank origin changes nothing", () => {
   assert.equal(allowCspOrigin(html, ""), html);
   assert.equal(allowCspOrigin(html, "   "), html);
 });
+
+// A CSP source expression is space-delimited inside a quoted attribute, so an
+// origin carrying a separator could add directives or escape the attribute.
+// Every one of these must widen nothing at all — failing closed, not open.
+test("a hostile origin can neither inject a directive nor escape the attribute", () => {
+  const doc = markdownToHtml("# t", { title: "t" });
+  const hostile = [
+    'https://ok.dev; script-src *',      // directive injection
+    'https://ok.dev" onload="alert(1)',  // attribute escape
+    "https://ok.dev' ",                  // stray quote in an otherwise legal host
+    'https://ok.dev>',                   // tag escape
+    "https://ok.dev 'unsafe-inline'",    // source-expression smuggling
+    'https://ok.dev\n; default-src *',   // newline separator
+    '*',                                 // wildcard
+    'javascript:alert(1)',               // non-http scheme
+    'data:text/html,x',
+    'not a url',
+    '//protocol-relative.dev'
+  ];
+  for (const origin of hostile) {
+    assert.equal(allowCspOrigin(doc, origin), doc, `must not widen for: ${JSON.stringify(origin)}`);
+  }
+});
+
+test("legitimate origins are still accepted, normalised to scheme://host[:port]", () => {
+  const doc = markdownToHtml("# t", { title: "t" });
+  const cspOf = (h) =>
+    h.match(/<meta\b[^>]*http-equiv\s*=\s*"Content-Security-Policy"[^>]*>/i)[0];
+
+  assert.match(cspOf(allowCspOrigin(doc, "https://a.workers.dev")), /script-src https:\/\/a\.workers\.dev/);
+  assert.match(cspOf(allowCspOrigin(doc, "http://localhost:4599")), /script-src http:\/\/localhost:4599/);
+  // A trailing slash or a path collapses to the origin, which covers the whole host.
+  assert.match(cspOf(allowCspOrigin(doc, "https://a.workers.dev/")), /script-src https:\/\/a\.workers\.dev;/);
+  assert.match(cspOf(allowCspOrigin(doc, "https://a.workers.dev/base")), /script-src https:\/\/a\.workers\.dev;/);
+});
