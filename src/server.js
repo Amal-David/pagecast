@@ -1700,6 +1700,66 @@ export function createDeployQueue() {
   return { enqueue, drain };
 }
 
+// Markdown-rendered documents ship a deliberately strict meta CSP
+// (`default-src 'none'; script-src 'none'`). That predates widget injection and
+// silently blocked it: the widget script never executed, and even if it had, its
+// beacon `fetch` would have been refused because `connect-src` falls back to
+// `default-src 'none'`. Rather than dropping the CSP — it is doing real work on
+// author-supplied markdown — widen exactly the directives the widget needs, for
+// exactly one origin. Documents without a meta CSP are returned untouched.
+// Pure + exported for testing.
+export function allowCspOrigin(html, origin, directives = ["script-src", "connect-src"]) {
+  const source = String(origin || "").trim().replace(/\/+$/, "");
+  if (!source || typeof html !== "string") {
+    return html;
+  }
+  const widen = (policy) => {
+    const byName = new Map(
+      policy
+        .split(";")
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .map((part) => [part.split(/\s+/)[0].toLowerCase(), part])
+    );
+    let changed = false;
+    for (const directive of directives) {
+      const existing = byName.get(directive);
+      if (existing) {
+        if (existing.split(/\s+/).slice(1).includes(source)) {
+          continue;
+        }
+        // `'none'` is not additive — it must be replaced, never appended to.
+        byName.set(
+          directive,
+          /\s'none'/i.test(existing) ? `${directive} ${source}` : `${existing} ${source}`
+        );
+      } else if (byName.has("default-src")) {
+        // An absent directive inherits default-src, so it needs spelling out.
+        byName.set(directive, `${directive} ${source}`);
+      } else {
+        continue;
+      }
+      changed = true;
+    }
+    return changed ? [...byName.values()].join("; ") : policy;
+  };
+
+  // Matched in two steps: a policy legitimately contains single quotes
+  // (`'none'`, `'self'`), so the content attribute cannot be scanned with a
+  // character class that excludes them.
+  return html.replace(/<meta\b[^>]*>/gi, (tag) => {
+    if (!/http-equiv\s*=\s*(["'])\s*Content-Security-Policy\s*\1/i.test(tag)) {
+      return tag;
+    }
+    const attr = tag.match(/content\s*=\s*(["'])((?:(?!\1)[\s\S])*)\1/i);
+    if (!attr) {
+      return tag;
+    }
+    const rebuilt = widen(attr[2]);
+    return rebuilt === attr[2] ? tag : tag.replace(attr[0], `content=${attr[1]}${rebuilt}${attr[1]}`);
+  });
+}
+
 // Insert the feedback widget into a published HTML document. The widget (served
 // by the user's feedback Worker) beacons a view and renders the reactions bar.
 // Injected just before </body> so it loads after page content. `url` is the
@@ -1727,10 +1787,13 @@ export function injectFeedbackWidget(
   if (html.includes(`data-slug="${esc(pageSlug)}"`) && html.includes("/widget.js")) {
     return html;
   }
-  if (/<\/body>/i.test(html)) {
-    return html.replace(/<\/body>/i, `${tag}\n</body>`);
+  // Markdown documents carry a strict meta CSP that would block both the script
+  // and its beacon; permit this Worker origin before the tag goes in.
+  const permitted = allowCspOrigin(html, baseUrl);
+  if (/<\/body>/i.test(permitted)) {
+    return permitted.replace(/<\/body>/i, `${tag}\n</body>`);
   }
-  return `${html}\n${tag}\n`;
+  return `${permitted}\n${tag}\n`;
 }
 
 // Inject a subtle "Published with Pagecast" badge into a shared page. This is the
