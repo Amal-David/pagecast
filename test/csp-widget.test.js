@@ -116,7 +116,15 @@ test("a hostile origin widens nothing at all", () => {
     'ftp://ok.dev',                      // non-http scheme
     'not a url',
     '//protocol-relative.dev',
-    ''
+    '',
+    // CSP3: `host-char = ALPHA / DIGIT / "-"`, so a bracketed IPv6 literal is not
+    // a valid host-source, and of the IPv4 literals that match the grammar the
+    // spec notes only 127.0.0.1 actually matches a URL. Writing either would
+    // emit a directive that silently never matches.
+    'https://[::1]:8443',
+    'http://192.168.1.10:8787',
+    'https://10.0.0.5',
+    'http://0.0.0.0:8080'
   ];
   for (const origin of hostile) {
     assert.equal(allowGeneratedCspOrigin(html, origin), html, `widened for: ${JSON.stringify(origin)}`);
@@ -127,7 +135,8 @@ test("legitimate origins are accepted and normalised to scheme://host[:port]", (
   const p = (origin) => policyOf(allowGeneratedCspOrigin(doc(), origin));
   assert.ok(p("https://a.workers.dev").includes("script-src https://a.workers.dev;"));
   assert.ok(p("http://localhost:4599").includes("script-src http://localhost:4599;"));
-  assert.ok(p("https://[::1]:8443").includes("script-src https://[::1]:8443;"), "IPv6 is a valid origin");
+  assert.ok(p("http://127.0.0.1:4599").includes("script-src http://127.0.0.1:4599;"),
+    "127.0.0.1 is the one IP literal CSP3 says actually matches");
   // A trailing slash or path collapses to the origin, which covers the whole host.
   assert.ok(p("https://a.workers.dev/").includes("script-src https://a.workers.dev;"));
   assert.ok(p("https://a.workers.dev/base").includes("script-src https://a.workers.dev;"));

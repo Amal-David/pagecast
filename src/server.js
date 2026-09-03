@@ -1732,19 +1732,32 @@ export function allowGeneratedCspOrigin(html, origin) {
   // them, then require the shape a real origin has — `URL` alone is not enough,
   // since an apostrophe is not a forbidden host code point.
   let source;
+  let host;
   try {
     const parsed = new URL(String(origin || "").trim());
     // Deliberately redundant with the shape check below, which also rejects a
-    // non-http(s) origin today. Kept as a backstop: that regex has already been
-    // relaxed once (for IPv6) and will be again.
+    // non-http(s) origin today. Kept as an explicit statement of intent, so the
+    // scheme restriction does not depend on a regex someone later loosens.
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return html;
     }
     source = parsed.origin;
+    host = parsed.hostname;
   } catch {
     return html;
   }
-  if (!/^https?:\/\/(?:[a-z0-9.-]+|\[[0-9a-f:]+\])(?::\d+)?$/i.test(source)) {
+  // CSP3 defines `host-char = ALPHA / DIGIT / "-"`, so a bracketed IPv6 literal
+  // cannot be a valid host-source at all; and of the IPv4 literals that do match
+  // the grammar, the spec notes only `127.0.0.1` actually matches a URL. Emitting
+  // either would produce a policy that silently never matches, leaving the widget
+  // blocked with no signal — so reject them rather than write a dead directive.
+  if (host.startsWith("[")) {
+    return html;
+  }
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) && host !== "127.0.0.1") {
+    return html;
+  }
+  if (!/^https?:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(source)) {
     return html;
   }
   // `'none'` is not additive, so it is replaced. `connect-src` is absent from the
