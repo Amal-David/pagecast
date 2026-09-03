@@ -28,7 +28,11 @@ export {
   isLoopbackHostHeader,
   isWildcardBindHost
 } from "./admin-security.js";
-import { markdownToHtml } from "./markdown.js";
+import {
+  MARKDOWN_DOCUMENT_CSP,
+  MARKDOWN_DOCUMENT_CSP_TAG,
+  markdownToHtml
+} from "./markdown.js";
 import { generateName } from "./nameGenerator.js";
 import {
   LINK_KINDS,
@@ -1701,26 +1705,38 @@ export function createDeployQueue() {
 }
 
 // Markdown-rendered documents ship a deliberately strict meta CSP
-// (`default-src 'none'; script-src 'none'`). That predates widget injection and
-// silently blocked it: the widget script never executed, and even if it had, its
-// beacon `fetch` would have been refused because `connect-src` falls back to
-// `default-src 'none'`. Rather than dropping the CSP — it is doing real work on
-// author-supplied markdown — widen exactly the directives the widget needs, for
-// exactly one origin. Documents without a meta CSP are returned untouched.
+// (`default-src 'none'; script-src 'none'`). It predates widget injection and
+// silently blocked it: the widget script never executed, and even had it loaded,
+// its beacon `fetch` would have been refused because `connect-src` falls back to
+// `default-src 'none'`.
+//
+// This deliberately does NOT parse CSP. An earlier attempt did, and rewriting a
+// policy generically is a trap: duplicate directives must keep the FIRST
+// occurrence (a Map keeps the last, which turned `script-src 'none'; script-src *`
+// into a wildcard), `'none'` must be dropped as one token rather than collapsing
+// the list, host sources are ignored under `'strict-dynamic'`, `script-src-elem`
+// silently outranks `script-src`, and any of it applied to an author's own CSP
+// would relax a policy they chose on purpose.
+//
+// The regression only ever exists in a document Pagecast generated itself, so
+// this matches that exact tag and rewrites nothing else. An author-authored CSP —
+// and any document without one — is returned byte-identical.
 // Pure + exported for testing.
-export function allowCspOrigin(html, origin, directives = ["script-src", "connect-src"]) {
-  if (typeof html !== "string") {
+export function allowGeneratedCspOrigin(html, origin) {
+  if (typeof html !== "string" || !html.includes(MARKDOWN_DOCUMENT_CSP_TAG)) {
     return html;
   }
-  // A CSP source expression is space-delimited and the policy lives inside a
-  // quoted attribute, so an origin carrying a space, `;`, quote, newline or `>`
-  // could add directives or escape the attribute entirely. Accept only a
-  // well-formed http(s) origin and rebuild it from `URL.origin`, which is
-  // structurally incapable of containing any of those. Anything else widens
-  // nothing — failing closed (widget stays blocked) rather than open.
+  // A CSP source expression is space-delimited inside a quoted attribute, so an
+  // origin carrying a space, `;`, quote, newline or `>` could add directives or
+  // escape the attribute. Rebuild from `URL.origin`, which cannot contain any of
+  // them, then require the shape a real origin has — `URL` alone is not enough,
+  // since an apostrophe is not a forbidden host code point.
   let source;
   try {
     const parsed = new URL(String(origin || "").trim());
+    // Deliberately redundant with the shape check below, which also rejects a
+    // non-http(s) origin today. Kept as a backstop: that regex has already been
+    // relaxed once (for IPv6) and will be again.
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return html;
     }
@@ -1728,57 +1744,19 @@ export function allowCspOrigin(html, origin, directives = ["script-src", "connec
   } catch {
     return html;
   }
-  // `URL` permits code points that are legal in a host but meaningless in a CSP
-  // source expression (an apostrophe, for one — it is not a forbidden host code
-  // point). Require the shape a real origin actually has.
-  if (!/^https?:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(source)) {
+  if (!/^https?:\/\/(?:[a-z0-9.-]+|\[[0-9a-f:]+\])(?::\d+)?$/i.test(source)) {
     return html;
   }
-  const widen = (policy) => {
-    const byName = new Map(
-      policy
-        .split(";")
-        .map((part) => part.trim())
-        .filter(Boolean)
-        .map((part) => [part.split(/\s+/)[0].toLowerCase(), part])
-    );
-    let changed = false;
-    for (const directive of directives) {
-      const existing = byName.get(directive);
-      if (existing) {
-        if (existing.split(/\s+/).slice(1).includes(source)) {
-          continue;
-        }
-        // `'none'` is not additive — it must be replaced, never appended to.
-        byName.set(
-          directive,
-          /\s'none'/i.test(existing) ? `${directive} ${source}` : `${existing} ${source}`
-        );
-      } else if (byName.has("default-src")) {
-        // An absent directive inherits default-src, so it needs spelling out.
-        byName.set(directive, `${directive} ${source}`);
-      } else {
-        continue;
-      }
-      changed = true;
-    }
-    return changed ? [...byName.values()].join("; ") : policy;
-  };
-
-  // Matched in two steps: a policy legitimately contains single quotes
-  // (`'none'`, `'self'`), so the content attribute cannot be scanned with a
-  // character class that excludes them.
-  return html.replace(/<meta\b[^>]*>/gi, (tag) => {
-    if (!/http-equiv\s*=\s*(["'])\s*Content-Security-Policy\s*\1/i.test(tag)) {
-      return tag;
-    }
-    const attr = tag.match(/content\s*=\s*(["'])((?:(?!\1)[\s\S])*)\1/i);
-    if (!attr) {
-      return tag;
-    }
-    const rebuilt = widen(attr[2]);
-    return rebuilt === attr[2] ? tag : tag.replace(attr[0], `content=${attr[1]}${rebuilt}${attr[1]}`);
-  });
+  // `'none'` is not additive, so it is replaced. `connect-src` is absent from the
+  // generated policy and would inherit `default-src 'none'`, so it is spelled out.
+  const widened = `${MARKDOWN_DOCUMENT_CSP.replace(
+    "script-src 'none'",
+    `script-src ${source}`
+  )}; connect-src ${source}`;
+  return html.replaceAll(
+    MARKDOWN_DOCUMENT_CSP_TAG,
+    `<meta http-equiv="Content-Security-Policy" content="${widened}">`
+  );
 }
 
 // Insert the feedback widget into a published HTML document. The widget (served
@@ -1808,9 +1786,10 @@ export function injectFeedbackWidget(
   if (html.includes(`data-slug="${esc(pageSlug)}"`) && html.includes("/widget.js")) {
     return html;
   }
-  // Markdown documents carry a strict meta CSP that would block both the script
-  // and its beacon; permit this Worker origin before the tag goes in.
-  const permitted = allowCspOrigin(html, baseUrl);
+  // A Pagecast-generated markdown document carries a strict meta CSP that would
+  // block both the script and its beacon; permit this Worker origin. Author-owned
+  // CSPs are left exactly as written.
+  const permitted = allowGeneratedCspOrigin(html, baseUrl);
   if (/<\/body>/i.test(permitted)) {
     return permitted.replace(/<\/body>/i, `${tag}\n</body>`);
   }

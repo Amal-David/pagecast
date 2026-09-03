@@ -413,6 +413,17 @@ th { background: #f4f4f5; font-weight: 650; }
  * Render markdown source into a complete, self-contained HTML document string.
  * The optional `title` sets the <title> (it is escaped). Never throws.
  */
+/**
+ * The policy every generated markdown document ships with. Exported so the
+ * publish pipeline can recognise its OWN tag by exact match and widen it for an
+ * injected widget, without ever parsing — or touching — a CSP an author wrote.
+ */
+export const MARKDOWN_DOCUMENT_CSP =
+  "default-src 'none'; script-src 'none'; img-src * data:; style-src 'unsafe-inline'; font-src * data:; base-uri 'none'; form-action 'none'";
+
+export const MARKDOWN_DOCUMENT_CSP_TAG =
+  `<meta http-equiv="Content-Security-Policy" content="${MARKDOWN_DOCUMENT_CSP}">`;
+
 export function markdownToHtml(markdown, { title } = {}) {
   const safeTitle = escapeHtml(title == null || String(title).trim() === "" ? "Document" : String(title));
   const body = renderMarkdownBody(markdown);
@@ -421,7 +432,7 @@ export function markdownToHtml(markdown, { title } = {}) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; img-src * data:; style-src 'unsafe-inline'; font-src * data:; base-uri 'none'; form-action 'none'">
+${MARKDOWN_DOCUMENT_CSP_TAG}
 <title>${safeTitle}</title>
 <style>
 ${DOCUMENT_STYLE}
