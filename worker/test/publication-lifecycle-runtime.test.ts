@@ -9,11 +9,11 @@ const ownerId = "owner-publication-lifecycle";
 const auth = { Authorization: "Bearer bootstrap-secret-that-must-never-appear-in-a-response" };
 const workerEnv = { ...env, ADMIN_TOKEN: "bootstrap-secret-that-must-never-appear-in-a-response", TOKEN_HASH_KEY: "token-hash-key" } as Env;
 
-function request(path: string, init: RequestInit = {}) {
+function request(path: string, init: RequestInit = {}, runtime: Env = workerEnv) {
   return worker.fetch!(new Request(`https://pagecast.test${path}`, {
     ...init,
     headers: { ...auth, ...(init.headers ?? {}) },
-  }) as unknown as never, workerEnv, {} as ExecutionContext);
+  }) as unknown as never, runtime, {} as ExecutionContext);
 }
 
 async function createSession(overrides: Record<string, unknown> = {}) {
@@ -43,10 +43,13 @@ beforeEach(async () => {
     DROP TABLE IF EXISTS redirects;
     DROP TABLE IF EXISTS access_grants;
     DROP TABLE IF EXISTS access_policies;
+    DROP TABLE IF EXISTS collaboration_review_decisions;
+    DROP TABLE IF EXISTS publication_review_policies;
     DROP TABLE IF EXISTS api_tokens;
     DROP TABLE IF EXISTS publication_versions;
     DROP TABLE IF EXISTS publications;
     DROP TABLE IF EXISTS audit_events;
+    DROP TABLE IF EXISTS outbox_events;
     DROP TABLE IF EXISTS idempotency_keys;
     DROP TABLE IF EXISTS owner_quotas;
     DROP TABLE IF EXISTS owners;
@@ -57,6 +60,7 @@ beforeEach(async () => {
     CREATE TABLE owner_quotas (owner_id TEXT PRIMARY KEY, max_tokens INTEGER NOT NULL DEFAULT 10);
     CREATE TABLE idempotency_keys (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, operation_type TEXT, response_status INTEGER, response_body TEXT, expires_at TEXT NOT NULL, UNIQUE(owner_id, idempotency_key));
     CREATE TABLE audit_events (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, actor_id TEXT, action TEXT NOT NULL, resource_type TEXT NOT NULL, resource_id TEXT NOT NULL, metadata_json TEXT NOT NULL, occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE outbox_events (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, dedupe_key TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', available_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, processing_started_at TEXT, enqueue_lease_token TEXT, enqueue_lease_expires_at TEXT, last_enqueued_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, sent_at TEXT, retention_until TEXT, UNIQUE(owner_id, dedupe_key));
     CREATE TABLE publications (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'draft', active_version_id TEXT, revoked_version_id TEXT, expires_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, link_kind TEXT NOT NULL DEFAULT 'unlisted', context_key TEXT, generation INTEGER NOT NULL DEFAULT 0, retention_until TEXT, deleted_at TEXT, UNIQUE(owner_id, slug), UNIQUE(owner_id, context_key));
     CREATE TABLE publication_versions (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, version_number INTEGER NOT NULL, manifest_key TEXT NOT NULL, content_sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'staged', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, published_at TEXT, is_complete INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0, retention_until TEXT, deleted_at TEXT, storage_purged_at TEXT, UNIQUE(publication_id, version_number));
     CREATE TABLE upload_sessions (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, version_id TEXT NOT NULL, mode TEXT NOT NULL, manifest_sha256 TEXT NOT NULL, status TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, completed_at TEXT, operation_id TEXT NOT NULL, UNIQUE(owner_id, operation_id));
@@ -64,8 +68,10 @@ beforeEach(async () => {
     CREATE TABLE version_files (version_id TEXT NOT NULL, normalized_path TEXT NOT NULL, r2_key TEXT NOT NULL, byte_size INTEGER NOT NULL, sha256 TEXT NOT NULL, content_type TEXT NOT NULL, PRIMARY KEY(version_id, normalized_path));
     CREATE TABLE redirects (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, source_path TEXT NOT NULL, destination_path TEXT NOT NULL, status_code INTEGER NOT NULL, UNIQUE(publication_id, source_path));
     CREATE TABLE access_policies (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL UNIQUE, mode TEXT NOT NULL DEFAULT 'unlisted', password_hash TEXT, password_salt TEXT, password_iterations INTEGER NOT NULL DEFAULT 100000, auth_version INTEGER NOT NULL DEFAULT 1, approval_state TEXT NOT NULL DEFAULT 'approved', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE publication_review_policies (owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, requires_approval INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(owner_id, publication_id));
+    CREATE TABLE collaboration_review_decisions (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, version_id TEXT NOT NULL, actor_id TEXT NOT NULL, decision TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, superseded_at TEXT, UNIQUE(owner_id, version_id, actor_id));
     CREATE TABLE access_grants (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, principal_type TEXT NOT NULL, principal_value TEXT NOT NULL, permission TEXT NOT NULL DEFAULT 'view', expires_at TEXT, revoked_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(owner_id, publication_id, principal_type, principal_value));
-    CREATE TABLE api_tokens (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, token_hash TEXT NOT NULL, label TEXT NOT NULL, scopes_json TEXT NOT NULL, expires_at TEXT, revoked_at TEXT, last_used_at TEXT);
+    CREATE TABLE api_tokens (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, token_hash TEXT NOT NULL, label TEXT NOT NULL, scopes_json TEXT NOT NULL, expires_at TEXT, revoked_at TEXT, last_used_at TEXT, actor_id TEXT);
   `);
 });
 
@@ -94,6 +100,18 @@ describe("manifest-driven publication lifecycle", () => {
     expect(stored?.slug).toBe(created.slug);
     expect(another.slug).not.toBe(created.slug);
     expect(contextCreated.slug).toMatch(/^context-report-[0-9a-f]{32}$/);
+  });
+
+  it("enqueues the committed publication outbox event without waiting for Cron", async () => {
+    const created = await createSession();
+    const bytes = new TextEncoder().encode(created.html);
+    await env.PUBLICATIONS.put(r2Key(ownerId, created.publicationId, created.versionId, "index.html"), bytes, { httpMetadata: { contentType: "text/html" }, customMetadata: { sha256: await sha256(created.html) } });
+    await request(`/v1/owners/${ownerId}/upload-sessions/${created.sessionId}/files/index.html`, { method: "PUT", headers: { "content-type": "text/html", "X-Content-SHA256": await sha256(created.html), "Idempotency-Key": crypto.randomUUID() }, body: created.html });
+    await request(`/v1/owners/${ownerId}/upload-sessions/${created.sessionId}/complete`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } });
+    const activated = await request(`/v1/owners/${ownerId}/publications/${created.publicationId}/versions/${created.versionId}/activate`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } });
+    expect(activated.status).toBe(200);
+    const outbox = await env.DB.prepare("SELECT id, last_enqueued_at FROM outbox_events WHERE owner_id = ? AND dedupe_key = ?").bind(ownerId, `publication.published:${created.publicationId}:${created.versionId}`).first<{ id: string; last_enqueued_at: string | null }>();
+    expect(outbox?.last_enqueued_at).toBeTruthy();
   });
 
   it("context-upserts without a publication id and new-link reassigns that context", async () => {
@@ -209,6 +227,9 @@ describe("manifest-driven publication lifecycle", () => {
     expect(manifestObject?.customMetadata?.sha256).toBe(manifest!.content_sha256);
     const [left, right] = await Promise.all(["a", "b"].map((key) => request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${first.versionId}/activate`, { method: "POST", headers: { "Idempotency-Key": key } })));
     expect([left.status, right.status].filter((status) => status === 200)).toHaveLength(1);
+    expect(await env.DB.prepare("SELECT event_type, status FROM outbox_events WHERE owner_id = ? AND dedupe_key = ?")
+      .bind(ownerId, `publication.published:${first.publicationId}:${first.versionId}`)
+      .first<{ event_type: string; status: string }>()).toEqual({ event_type: "publication.published", status: "pending" });
     expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${first.versionId}`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(409);
     expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/revoke`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
     expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/restore`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
@@ -283,5 +304,27 @@ describe("manifest-driven publication lifecycle", () => {
     expect(version?.deleted_at).toEqual(expect.any(String));
     expect(audit?.action).toBe("publication.version_deleted");
     expect(receipt?.response_status).toBe(200);
+  });
+
+  it("keeps the active approved version live while requiring approval for each candidate", async () => {
+    const first = await createSession({ linkKind: "public" });
+    await request(`/v1/owners/${ownerId}/upload-sessions/${first.sessionId}/files/index.html`, { method: "PUT", headers: { "content-type": "text/html", "X-Content-SHA256": await sha256(first.html) }, body: first.html });
+    expect((await request(`/v1/owners/${ownerId}/upload-sessions/${first.sessionId}/complete`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
+    expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${first.versionId}/activate`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
+
+    const candidate = await createSession({ mode: "explicit-update", publicationId: first.publicationId, linkKind: "public" });
+    await request(`/v1/owners/${ownerId}/upload-sessions/${candidate.sessionId}/files/index.html`, { method: "PUT", headers: { "content-type": "text/html", "X-Content-SHA256": await sha256(candidate.html) }, body: candidate.html });
+    expect((await request(`/v1/owners/${ownerId}/upload-sessions/${candidate.sessionId}/complete`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
+    await env.DB.prepare("INSERT INTO publication_review_policies (owner_id, publication_id, requires_approval) VALUES (?, ?, 1)").bind(ownerId, first.publicationId).run();
+    await env.DB.prepare("INSERT INTO collaboration_review_decisions (id, owner_id, publication_id, version_id, actor_id, decision) VALUES (?, ?, ?, ?, ?, 'approved')")
+      .bind("review-first", ownerId, first.publicationId, first.versionId, "approver-a").run();
+
+    expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${candidate.versionId}/activate`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(409);
+    expect(await env.DB.prepare("SELECT active_version_id FROM publications WHERE id = ?").bind(first.publicationId).first()).toMatchObject({ active_version_id: first.versionId });
+
+    await env.DB.prepare("INSERT INTO collaboration_review_decisions (id, owner_id, publication_id, version_id, actor_id, decision) VALUES (?, ?, ?, ?, ?, 'approved')")
+      .bind("review-candidate", ownerId, first.publicationId, candidate.versionId, "approver-a").run();
+    expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${candidate.versionId}/activate`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
+    expect(await env.DB.prepare("SELECT active_version_id FROM publications WHERE id = ?").bind(first.publicationId).first()).toMatchObject({ active_version_id: candidate.versionId });
   });
 });

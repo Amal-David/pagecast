@@ -1,5 +1,11 @@
 import { auditStatement } from "./audit";
 import { encodeHex } from "./auth";
+import { isPagecastId } from "./identifiers";
+import { findIdempotencyReceipt, idempotencyReceiptStatement, resolveIdempotencyReceipt } from "./idempotency";
+import { enqueueOutbox, outboxStatement } from "./jobs";
+import type { Env } from "./types";
+
+export { isPagecastId as validOwnerId } from "./identifiers";
 
 export type PublicationMode = "create" | "context-upsert" | "new-link" | "explicit-update";
 
@@ -34,12 +40,6 @@ type PublicationPacket<Operation extends PublicationMutation["operation"]> = Omi
   mutation: Extract<PublicationMutation, { operation: Operation }>;
 };
 
-interface Receipt {
-  request_hash: string;
-  response_status: number | null;
-  response_body: string | null;
-}
-
 interface PublicationRow {
   id: string;
   slug: string;
@@ -61,7 +61,6 @@ const MAX_MANIFEST_FILES = 25;
 const MAX_MANIFEST_BYTES = 256 * 1024 * 1024;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_PATH_BYTES = 256;
-const MAX_OWNER_ID_LENGTH = 128;
 const UNLISTED_CAPABILITY_BYTES = 16;
 const UNLISTED_CAPABILITY_HEX_LENGTH = UNLISTED_CAPABILITY_BYTES * 2;
 const MAX_SLUG_LENGTH = 63;
@@ -102,10 +101,6 @@ export function normalizePath(value: string): string | null {
   return textEncoder.encode(normalized).byteLength <= MAX_PATH_BYTES ? normalized : null;
 }
 
-export function validOwnerId(value: string): boolean {
-  return /^[A-Za-z0-9_-]{1,128}$/.test(value) && value.length <= MAX_OWNER_ID_LENGTH;
-}
-
 export function createUnlistedSlug(value: string): string | null {
   const prefix = value
     .trim()
@@ -122,28 +117,30 @@ export function createUnlistedSlug(value: string): string | null {
 
 export function r2Key(ownerId: string, publicationId: string, versionId: string, path: string): string {
   const key = `owners/${ownerId}/publications/${publicationId}/versions/${versionId}/${path.split("/").map(encodeURIComponent).join("/")}`;
-  if (!validOwnerId(ownerId) || textEncoder.encode(key).byteLength > 1_024) throw new RangeError("invalid_r2_key");
+  if (!isPagecastId(ownerId) || textEncoder.encode(key).byteLength > 1_024) throw new RangeError("invalid_r2_key");
   return key;
 }
 
 export async function executePublicationMutation(
-  env: { DB: D1Database; PUBLICATIONS: R2Bucket },
+  env: Pick<Env, "DB" | "PUBLICATIONS" | "JOBS">,
   ownerId: string,
   packet: PublicationMutationPacket,
 ): Promise<Response> {
-  const existing = await env.DB.prepare("SELECT request_hash, response_status, response_body FROM idempotency_keys WHERE owner_id = ? AND idempotency_key = ?")
-    .bind(ownerId, packet.idempotencyKey).first<Receipt>();
-  if (existing) return receiptResponse(existing, packet.fingerprint);
+  const existing = await findIdempotencyReceipt(env.DB, ownerId, packet.idempotencyKey);
+  if (existing) {
+    const result = resolveIdempotencyReceipt(existing, packet.fingerprint);
+    return success(result.status, result.body);
+  }
   const envelope = { actorId: packet.actorId, fingerprint: packet.fingerprint, idempotencyKey: packet.idempotencyKey };
   switch (packet.mutation.operation) {
     case "create-session": return createSession(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
     case "record-file": return recordFile(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
     case "complete-session": return completeSession(env, ownerId, { ...envelope, mutation: packet.mutation });
-    case "activate": return activate(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
+    case "activate": return activate(env, ownerId, { ...envelope, mutation: packet.mutation });
     case "delete-version": return deleteVersion(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
     case "rename": return renamePublication(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
     case "revoke": return revokePublication(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
-    case "restore": return restorePublication(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
+    case "restore": return restorePublication(env, ownerId, { ...envelope, mutation: packet.mutation });
     case "set-access-policy": return setAccessPolicy(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
     case "create-grant": return createAccessGrant(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
     case "revoke-grant": return revokeAccessGrant(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
@@ -365,13 +362,12 @@ async function completeSession(env: { DB: D1Database; PUBLICATIONS: R2Bucket }, 
       auditStatement(env.DB, { ownerId, actorId: packet.actorId, action: "publication.upload_completed", resourceType: "publication_version", resourceId: session.version_id, metadata: { fileCount: files.results.length } }),
       receiptStatement(env.DB, ownerId, packet, 200, response),
     ]);
-  } catch {
-    return failure();
-  }
+  } catch { return failure(); }
   return success(200, response);
 }
 
-async function activate(db: D1Database, ownerId: string, packet: PublicationPacket<"activate">): Promise<Response> {
+async function activate(env: Pick<Env, "DB" | "PUBLICATIONS" | "JOBS">, ownerId: string, packet: PublicationPacket<"activate">): Promise<Response> {
+  const db = env.DB;
   const { publicationId, versionId } = packet.mutation.data;
   if (typeof publicationId !== "string" || typeof versionId !== "string") return terminal(db, ownerId, packet, 400, { error: "invalid_version" });
   const [publication, version] = await Promise.all([
@@ -381,7 +377,15 @@ async function activate(db: D1Database, ownerId: string, packet: PublicationPack
   if (!publication || !version || version.publication_id !== publicationId || version.deleted_at) return terminal(db, ownerId, packet, 404, { error: "version_not_found" });
   if (!version.is_complete) return terminal(db, ownerId, packet, 409, { error: "version_incomplete" });
   if (publication.active_version_id === versionId) return terminal(db, ownerId, packet, 409, { error: "version_already_active" });
+  const reviewPolicy = await db.prepare("SELECT requires_approval FROM publication_review_policies WHERE owner_id = ? AND publication_id = ?")
+    .bind(ownerId, publicationId).first<{ requires_approval: number }>();
+  if (reviewPolicy?.requires_approval) {
+    const review = await db.prepare("SELECT COUNT(*) AS decision_count, SUM(CASE WHEN decision = 'approved' THEN 1 ELSE 0 END) AS approved_count FROM collaboration_review_decisions WHERE owner_id = ? AND publication_id = ? AND version_id = ? AND superseded_at IS NULL")
+      .bind(ownerId, publicationId, versionId).first<{ decision_count: number; approved_count: number | null }>();
+    if (!review || review.decision_count === 0 || review.approved_count !== review.decision_count) return terminal(db, ownerId, packet, 409, { error: "approval_required" });
+  }
   const response = { publicationId, versionId, previousVersionId: publication.active_version_id, state: "published" };
+  const outbox = outboxStatement(db, ownerId, "publication.published", { publicationId, versionId, previousVersionId: publication.active_version_id }, `publication.published:${publicationId}:${versionId}`);
   try {
     await db.batch([
       db.prepare("UPDATE publication_versions SET status = 'superseded', generation = generation + 1 WHERE id = ? AND owner_id = ? AND status = 'published'").bind(publication.active_version_id, ownerId),
@@ -389,11 +393,11 @@ async function activate(db: D1Database, ownerId: string, packet: PublicationPack
       db.prepare("UPDATE publications SET active_version_id = ?, revoked_version_id = NULL, state = 'published', generation = generation + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_id = ? AND generation = ?")
         .bind(versionId, publicationId, ownerId, publication.generation),
       auditStatement(db, { ownerId, actorId: packet.actorId, action: "publication.version_activated", resourceType: "publication_version", resourceId: versionId }),
+      ...(outbox ? [outbox.statement] : []),
       receiptStatement(db, ownerId, packet, 200, response),
     ]);
-  } catch {
-    return failure();
-  }
+  } catch { return failure(); }
+  if (outbox) await enqueueOutbox(env, ownerId, outbox.id);
   const current = await db.prepare("SELECT active_version_id FROM publications WHERE id = ? AND owner_id = ?").bind(publicationId, ownerId).first<{ active_version_id: string | null }>();
   return current?.active_version_id === versionId ? success(200, response) : terminal(db, ownerId, packet, 409, { error: "activation_conflict" });
 }
@@ -460,7 +464,8 @@ async function revokePublication(db: D1Database, ownerId: string, packet: Public
   return success(200, { publicationId, revoked: true });
 }
 
-async function restorePublication(db: D1Database, ownerId: string, packet: PublicationPacket<"restore">): Promise<Response> {
+async function restorePublication(env: Pick<Env, "DB" | "PUBLICATIONS" | "JOBS">, ownerId: string, packet: PublicationPacket<"restore">): Promise<Response> {
+  const db = env.DB;
   const publicationId = packet.mutation.data.publicationId;
   if (typeof publicationId !== "string") return terminal(db, ownerId, packet, 400, { error: "invalid_publication" });
   const publication = await db.prepare("SELECT id, revoked_version_id FROM publications WHERE id = ? AND owner_id = ? AND state = 'revoked' AND deleted_at IS NULL").bind(publicationId, ownerId).first<{ id: string; revoked_version_id: string | null }>();
@@ -469,7 +474,7 @@ async function restorePublication(db: D1Database, ownerId: string, packet: Publi
   const version = await db.prepare("SELECT id FROM publication_versions WHERE id = ? AND publication_id = ? AND owner_id = ? AND is_complete = 1 AND deleted_at IS NULL")
     .bind(publication.revoked_version_id, publicationId, ownerId).first<{ id: string }>();
   if (!version) return terminal(db, ownerId, packet, 409, { error: "no_retained_version" });
-  return activate(db, ownerId, { ...packet, mutation: { kind: "publication", operation: "activate", data: { publicationId, versionId: version.id } } });
+  return activate(env, ownerId, { ...packet, mutation: { kind: "publication", operation: "activate", data: { publicationId, versionId: version.id } } });
 }
 
 export async function cleanupPublicationStorage(env: { DB: D1Database; PUBLICATIONS: R2Bucket }): Promise<void> {
@@ -491,15 +496,8 @@ export async function cleanupPublicationStorage(env: { DB: D1Database; PUBLICATI
   }
 }
 
-function receiptResponse(receipt: Receipt, fingerprint: string): Response {
-  if (receipt.request_hash !== fingerprint) return success(409, { error: "idempotency_key_conflict" });
-  if (receipt.response_status === null || receipt.response_body === null) return success(409, { error: "idempotency_operation_in_progress" });
-  return success(receipt.response_status, JSON.parse(receipt.response_body) as Record<string, unknown>);
-}
-
 function receiptStatement(db: D1Database, ownerId: string, packet: PublicationMutationPacket, status: number, body: Record<string, unknown>): D1PreparedStatement {
-  return db.prepare("INSERT INTO idempotency_keys (id, owner_id, idempotency_key, request_hash, operation_type, response_status, response_body, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+24 hours'))")
-    .bind(crypto.randomUUID(), ownerId, packet.idempotencyKey, packet.fingerprint, packet.mutation.operation, status, JSON.stringify(body));
+  return idempotencyReceiptStatement(db, ownerId, packet, status, body, packet.mutation.operation);
 }
 
 async function terminal(db: D1Database, ownerId: string, packet: PublicationMutationPacket, status: number, body: Record<string, unknown>): Promise<Response> {

@@ -1,6 +1,6 @@
 export type AuthActor =
   | { kind: "bootstrap"; ownerId: null; scopes: ["*"] }
-  | { kind: "token"; ownerId: string; tokenId: string; scopes: string[] };
+  | { kind: "token"; ownerId: string; tokenId: string; actorId: string | null; scopes: string[] };
 
 const textEncoder = new TextEncoder();
 

@@ -8,25 +8,39 @@ import {
   type AuthActor,
 } from "./auth";
 import { auditStatement } from "./audit";
+import { verifyAccessIdentity } from "./access";
 import { readBoundedTextBody } from "./body";
+import { activeMembership, executeCollaborationMutation, isCollaborationMutation, roleAllows, type CollaborationAction, type CollaborationMutation } from "./collaboration";
 import { cleanupPublicationStorage, createUnlistedSlug, executePublicationMutation, normalizePath, validOwnerId, type PublicationMutation, type PublicationMutationPacket } from "./publications";
 import { handlePublicDelivery, hashPassword } from "./public";
+import { cleanupAnalytics, handleAnalyticsControl } from "./analytics";
+import { processJobMessage, recoverJobMessage, scheduledJobs, webhookSecret } from "./jobs";
+import { handleMcpRequest } from "./mcp";
+import { executeOperationsMutation, type OperationsMutation } from "./operations";
 import type { Env, JobMessage } from "./types";
+import { handleCollaborationRoute } from "./control-collaboration";
+import type { ControlRouteContext } from "./control-context";
+import { handleOperationsRoute } from "./control-operations";
+import { handlePublicationRoute } from "./control-publications";
 
 type OwnerMutation =
-  | { kind: "create-token"; id: string; label: string; scopes: string[]; expiresAt: string | null; tokenHash: string }
+  | { kind: "create-token"; id: string; label: string; scopes: string[]; expiresAt: string | null; actorId: string | null; tokenHash: string }
   | { kind: "revoke-token"; tokenId: string }
   | { kind: "coordinate" }
-  | PublicationMutation;
+  | OperationsMutation
+  | PublicationMutation
+  | CollaborationMutation;
 
 interface OwnerMutationPacket {
   actorId: string | null;
+  isBootstrap?: boolean;
   fingerprint: string;
   idempotencyKey: string;
   mutation: OwnerMutation;
 }
 
 export class PublicationOwner {
+  private readonly presence = new Map<string, Map<string, PresencePeer>>();
   constructor(
     private readonly state: DurableObjectState,
     private readonly env: Env,
@@ -41,6 +55,7 @@ export class PublicationOwner {
         environment: this.env.ENVIRONMENT,
       });
     }
+    if (url.pathname === "/presence") return this.handlePresence(request);
     if (request.method !== "POST" || !["/mutate", "/control"].includes(url.pathname)) {
       return new Response("Not found", { status: 404 });
     }
@@ -60,6 +75,78 @@ export class PublicationOwner {
       return Response.json({ ownerId, sequence });
     });
   }
+
+  private handlePresence(request: Request): Response {
+    const ownerId = request.headers.get("X-Pagecast-Owner");
+    const publicationId = request.headers.get("X-Pagecast-Publication");
+    const actorId = request.headers.get("X-Pagecast-Actor");
+    if (!ownerId || !publicationId || !actorId || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return Response.json({ error: "presence_upgrade_required" }, { status: 400 });
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    const key = `${ownerId}:${publicationId}`;
+    const peers = this.presence.get(key) ?? new Map<string, PresencePeer>();
+    const existing = peers.get(actorId);
+    if (!existing && peers.size >= MAX_PRESENCE_PEERS) {
+      return Response.json({ error: "presence_room_full" }, { status: 429 });
+    }
+    existing?.socket.close(1000, "presence_replaced");
+    const peer: PresencePeer = { socket: server, messages: 0, windowStartedAt: Date.now(), idleTimer: undefined };
+    peers.set(actorId, peer);
+    this.presence.set(key, peers);
+    server.accept();
+    const remove = () => {
+      if (peer.idleTimer !== undefined) clearTimeout(peer.idleTimer);
+      if (peers.get(actorId) === peer) peers.delete(actorId);
+      if (peers.size === 0) this.presence.delete(key);
+    };
+    const resetIdleTimer = () => {
+      if (peer.idleTimer !== undefined) clearTimeout(peer.idleTimer);
+      peer.idleTimer = setTimeout(() => {
+        server.close(1000, "presence_idle_timeout");
+        remove();
+      }, PRESENCE_IDLE_TIMEOUT_MS);
+    };
+    resetIdleTimer();
+    server.addEventListener("close", remove);
+    server.addEventListener("error", remove);
+    server.addEventListener("message", (event) => {
+      const bytes = presenceMessageBytes(event.data);
+      const now = Date.now();
+      if (now - peer.windowStartedAt >= PRESENCE_MESSAGE_WINDOW_MS) {
+        peer.windowStartedAt = now;
+        peer.messages = 0;
+      }
+      if (bytes > MAX_PRESENCE_MESSAGE_BYTES || ++peer.messages > MAX_PRESENCE_MESSAGES_PER_WINDOW) {
+        server.close(1008, "presence_message_limit");
+        remove();
+        return;
+      }
+      resetIdleTimer();
+      const body = JSON.stringify({ type: "presence", actorId, count: peers.size });
+      for (const recipient of peers.values()) recipient.socket.send(body);
+    });
+    return new Response(null, { status: 101, webSocket: client });
+  }
+}
+
+const MAX_PRESENCE_PEERS = 32;
+const MAX_PRESENCE_MESSAGE_BYTES = 1024;
+const MAX_PRESENCE_MESSAGES_PER_WINDOW = 10;
+const PRESENCE_MESSAGE_WINDOW_MS = 10_000;
+const PRESENCE_IDLE_TIMEOUT_MS = 60_000;
+
+interface PresencePeer {
+  socket: WebSocket;
+  messages: number;
+  windowStartedAt: number;
+  idleTimer: ReturnType<typeof setTimeout> | undefined;
+}
+
+function presenceMessageBytes(data: unknown): number {
+  if (typeof data === "string") return new TextEncoder().encode(data).byteLength;
+  if (data instanceof ArrayBuffer) return data.byteLength;
+  if (ArrayBuffer.isView(data)) return data.byteLength;
+  return MAX_PRESENCE_MESSAGE_BYTES + 1;
 }
 
 async function expireTransientRows(db: D1Database): Promise<void> {
@@ -76,6 +163,7 @@ interface TokenRow {
   token_hash: string;
   scopes_json: string;
   expires_at: string | null;
+  actor_id: string | null;
   revoked_at: string | null;
 }
 
@@ -97,6 +185,18 @@ async function executeOwnerMutation(
 ): Promise<Response> {
   if (isPublicationMutationPacket(packet)) {
     return executePublicationMutation(env, ownerId, packet);
+  }
+  if (isCollaborationMutation(packet.mutation)) {
+    return executeCollaborationMutation(env.DB, ownerId, {
+      actorId: packet.actorId,
+      isBootstrap: packet.isBootstrap === true,
+      fingerprint: packet.fingerprint,
+      idempotencyKey: packet.idempotencyKey,
+      mutation: packet.mutation,
+    });
+  }
+  if (isOperationsMutation(packet)) {
+    return executeOperationsMutation(env, ownerId, packet);
   }
   const existing = await env.DB
     .prepare("SELECT request_hash, response_status, response_body FROM idempotency_keys WHERE owner_id = ? AND idempotency_key = ?")
@@ -123,6 +223,11 @@ async function executeOwnerMutation(
   }
 
   if (packet.mutation.kind === "create-token") {
+    if (packet.mutation.actorId) {
+      const actor = await env.DB.prepare("SELECT id FROM collaboration_actors WHERE id = ? AND owner_id = ? AND deleted_at IS NULL")
+        .bind(packet.mutation.actorId, ownerId).first();
+      if (!actor) return writeTerminalReceipt(env.DB, ownerId, packet, 400, { error: "token_actor_not_found" });
+    }
     const quota = await env.DB.prepare("SELECT max_tokens FROM owner_quotas WHERE owner_id = ?").bind(ownerId).first<TokenQuota>();
     const active = await env.DB
       .prepare("SELECT COUNT(*) AS count FROM api_tokens WHERE owner_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)")
@@ -137,6 +242,7 @@ async function executeOwnerMutation(
       label: packet.mutation.label,
       scopes: packet.mutation.scopes,
       expiresAt: packet.mutation.expiresAt,
+      actorId: packet.mutation.actorId,
     };
     try {
       await env.DB.batch([
@@ -145,9 +251,11 @@ async function executeOwnerMutation(
       env.DB
         .prepare("INSERT INTO idempotency_keys (id, owner_id, idempotency_key, request_hash, expires_at) VALUES (?, ?, ?, ?, datetime('now', '+24 hours'))")
         .bind(crypto.randomUUID(), ownerId, packet.idempotencyKey, packet.fingerprint),
-      env.DB
-        .prepare("INSERT INTO api_tokens (id, owner_id, token_hash, label, scopes_json, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
-        .bind(packet.mutation.id, ownerId, packet.mutation.tokenHash, packet.mutation.label, JSON.stringify(packet.mutation.scopes), packet.mutation.expiresAt),
+      packet.mutation.actorId
+        ? env.DB.prepare("INSERT INTO api_tokens (id, owner_id, token_hash, label, scopes_json, expires_at, actor_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
+          .bind(packet.mutation.id, ownerId, packet.mutation.tokenHash, packet.mutation.label, JSON.stringify(packet.mutation.scopes), packet.mutation.expiresAt, packet.mutation.actorId)
+        : env.DB.prepare("INSERT INTO api_tokens (id, owner_id, token_hash, label, scopes_json, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
+          .bind(packet.mutation.id, ownerId, packet.mutation.tokenHash, packet.mutation.label, JSON.stringify(packet.mutation.scopes), packet.mutation.expiresAt),
       auditStatement(env.DB, {
         ownerId,
         actorId: packet.actorId,
@@ -203,6 +311,10 @@ async function executeOwnerMutation(
 
 function isPublicationMutationPacket(packet: OwnerMutationPacket): packet is PublicationMutationPacket {
   return packet.mutation.kind === "publication";
+}
+
+function isOperationsMutation(packet: OwnerMutationPacket): packet is OwnerMutationPacket & { mutation: OperationsMutation } {
+  return packet.mutation.kind === "operations";
 }
 
 async function writeTerminalReceipt(
@@ -265,7 +377,7 @@ async function authenticate(request: Request, env: Env): Promise<AuthActor | nul
   const [, tokenId, tokenSecret] = tokenMatch;
   const token = await env.DB
     .prepare(
-      "SELECT id, owner_id, token_hash, scopes_json, expires_at, revoked_at FROM api_tokens WHERE id = ?",
+      "SELECT id, owner_id, token_hash, scopes_json, expires_at, revoked_at, actor_id FROM api_tokens WHERE id = ?",
     )
     .bind(tokenId)
     .first<TokenRow>();
@@ -285,7 +397,7 @@ async function authenticate(request: Request, env: Env): Promise<AuthActor | nul
     .prepare("UPDATE api_tokens SET last_used_at = CURRENT_TIMESTAMP WHERE id = ? AND (last_used_at IS NULL OR last_used_at < datetime('now', '-5 minutes'))")
     .bind(tokenId)
     .run();
-  return { kind: "token", ownerId: token.owner_id, tokenId, scopes };
+  return { kind: "token", ownerId: token.owner_id, tokenId, actorId: token.actor_id ?? null, scopes };
 }
 
 function hasScope(actor: AuthActor, scope: string): boolean {
@@ -340,6 +452,7 @@ async function invokeOwnerMutation(
     headers: { "X-Pagecast-Owner": ownerId, "content-type": "application/json" },
     body: JSON.stringify({
       actorId: actor.kind === "token" ? actor.tokenId : null,
+      isBootstrap: actor.kind === "bootstrap",
       fingerprint,
       idempotencyKey,
       mutation,
@@ -349,6 +462,68 @@ async function invokeOwnerMutation(
     return { status: 502, body: { error: "coordinator_unavailable" } };
   }
   return response.json<{ status: number; body: Record<string, unknown> }>();
+}
+
+function actorId(actor: AuthActor): string | null {
+  return actor.kind === "token" ? actor.actorId : null;
+}
+
+async function collaborationAllowed(env: Env, actor: AuthActor, ownerId: string, action: CollaborationAction, identity: { subject: string } | null): Promise<boolean> {
+  if (actor.kind === "bootstrap") return true;
+  if (!actor.actorId) return false;
+  const membership = await activeMembership(env.DB, ownerId, actor.actorId);
+  if (!membership || !roleAllows(membership.role, action)) return false;
+  if (!identity) return true;
+  const linked = await env.DB.prepare("SELECT id FROM collaboration_actors WHERE id = ? AND owner_id = ? AND external_subject = ? AND deleted_at IS NULL")
+    .bind(actor.actorId, ownerId, identity.subject).first();
+  return Boolean(linked);
+}
+
+async function collaborationAdmin(env: Env, actor: AuthActor, ownerId: string, identity: { subject: string } | null): Promise<boolean> {
+  if (actor.kind === "bootstrap") return true;
+  if (!actor.actorId || !hasScope(actor, "collaboration:admin")) return false;
+  const membership = await activeMembership(env.DB, ownerId, actor.actorId);
+  if (!membership || membership.role !== "owner") return false;
+  if (!identity) return true;
+  return Boolean(await env.DB.prepare("SELECT id FROM collaboration_actors WHERE id = ? AND owner_id = ? AND external_subject = ? AND deleted_at IS NULL")
+    .bind(actor.actorId, ownerId, identity.subject).first());
+}
+
+async function invokeCollaborationMutation(request: Request, env: Env, actor: AuthActor, ownerId: string, rawBody: string, mutation: CollaborationMutation): Promise<Response> {
+  const idempotencyKey = request.headers.get("Idempotency-Key");
+  if (!idempotencyKey || !/^[\x21-\x7e]{1,255}$/.test(idempotencyKey)) return error("idempotency_key_required", 400);
+  const fingerprint = await requestFingerprint(request.method, new URL(request.url).pathname, ownerId, rawBody);
+  const coordinator = env.PUBLICATION_OWNER.get(env.PUBLICATION_OWNER.idFromName(ownerId));
+  const response = await coordinator.fetch(new Request("https://pagecast.internal/control", {
+    method: "POST",
+    headers: { "X-Pagecast-Owner": ownerId, "content-type": "application/json" },
+    body: JSON.stringify({ actorId: actorId(actor), isBootstrap: actor.kind === "bootstrap", fingerprint, idempotencyKey, mutation } satisfies OwnerMutationPacket),
+  }));
+  if (!response.ok) return error("coordinator_unavailable", 502);
+  const result = await response.json<{ status: number; body: Record<string, unknown> }>();
+  return Response.json(result.body, { status: result.status });
+}
+
+async function collaborationGrantAllows(env: Env, request: Request, ownerId: string, publicationId: string, versionId: string | null, action: CollaborationAction, required = false): Promise<boolean> {
+  const credential = request.headers.get("X-Pagecast-Grant");
+  if (!credential) return !required;
+  const match = /^pcg2_([A-Za-z0-9_-]{1,128})\.([A-Za-z0-9_-]{32,})$/.exec(credential);
+  if (!match) return false;
+  const [, grantId, secret] = match;
+  const digest = await digestToken(env.TOKEN_HASH_KEY, grantId, secret);
+  const grant = await env.DB.prepare("SELECT actions_json, version_id FROM collaboration_grants WHERE id = ? AND owner_id = ? AND publication_id = ? AND credential_digest = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)")
+    .bind(grantId, ownerId, publicationId, digest).first<{ actions_json: string; version_id: string | null }>();
+  if (!grant || (grant.version_id !== null && grant.version_id !== versionId)) return false;
+  const grantActions = parseScopes(grant.actions_json);
+  return grantActions?.includes(action) ?? false;
+}
+
+async function handlePresence(request: Request, env: Env, actor: AuthActor, ownerId: string, publicationId: string, identity: { subject: string } | null): Promise<Response> {
+  if (actor.kind !== "token" || !actor.actorId || !hasScope(actor, "presence:connect") || !(await collaborationAllowed(env, actor, ownerId, "publication:view", identity))) return error("forbidden", 403);
+  const publication = await env.DB.prepare("SELECT id FROM publications WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").bind(publicationId, ownerId).first();
+  if (!publication) return error("publication_not_found", 404);
+  const stub = env.PUBLICATION_OWNER.get(env.PUBLICATION_OWNER.idFromName(ownerId));
+  return stub.fetch(new Request("https://pagecast.internal/presence", { headers: { Upgrade: request.headers.get("Upgrade") ?? "", "X-Pagecast-Owner": ownerId, "X-Pagecast-Publication": publicationId, "X-Pagecast-Actor": actor.actorId } }));
 }
 
 async function createToken(
@@ -368,13 +543,16 @@ async function createToken(
   if (!payload || typeof payload.label !== "string" || payload.label.length < 1 || payload.label.length > 100 || !validScopes(payload.scopes)) {
     return error("invalid_token_request", 400);
   }
-  if (Object.keys(payload).some((key) => !["label", "scopes", "expiresAt"].includes(key))) {
+  if (Object.keys(payload).some((key) => !["label", "scopes", "expiresAt", "actorId"].includes(key))) {
     return error("invalid_token_request", 400);
   }
   const expiresAt = payload.expiresAt;
   if (expiresAt !== undefined && (typeof expiresAt !== "string" || !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now())) {
     return error("invalid_token_expiry", 400);
   }
+  const assignedActorId = payload.actorId === undefined ? null : payload.actorId;
+  if (assignedActorId !== null && (typeof assignedActorId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(assignedActorId))) return error("invalid_token_actor", 400);
+  if (actor.kind === "token" && assignedActorId !== null && assignedActorId !== actor.actorId) return error("forbidden", 403);
   const id = crypto.randomUUID();
   const idempotencyKey = request.headers.get("Idempotency-Key") ?? "";
   const secret = await deriveTokenSecret(env.TOKEN_HASH_KEY, id, idempotencyKey);
@@ -384,6 +562,7 @@ async function createToken(
     label: payload.label,
     scopes: payload.scopes,
     expiresAt: expiresAt ?? null,
+    actorId: assignedActorId,
     tokenHash: await digestToken(env.TOKEN_HASH_KEY, id, secret),
   }, actor);
   if (result.status !== 201 || typeof result.body.id !== "string") {
@@ -509,6 +688,15 @@ async function publicationMutation(request: Request, env: Env, actor: AuthActor,
   return Response.json(result.body, { status: result.status });
 }
 
+async function operationsMutation(request: Request, env: Env, actor: AuthActor, ownerId: string, mutation: OperationsMutation): Promise<Response> {
+  const result = await invokeOwnerMutation(request, env, ownerId, JSON.stringify(mutation.data), mutation, actor);
+  const body = result.body;
+  if ((mutation.operation === "create-webhook" || mutation.operation === "rotate-webhook") && typeof body.id === "string" && typeof body.credentialVersion === "number" && result.status >= 200 && result.status < 300) {
+    return Response.json({ ...body, secret: `pcwh_${body.id}.${await webhookSecret(env, body.id, body.credentialVersion)}` }, { status: result.status });
+  }
+  return Response.json(body, { status: result.status });
+}
+
 async function listVersions(env: Env, ownerId: string, publicationId: string, url: URL): Promise<Response> {
   const publication = await env.DB.prepare("SELECT id FROM publications WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").bind(publicationId, ownerId).first<{ id: string }>();
   if (!publication) return error("publication_not_found", 404);
@@ -589,6 +777,10 @@ async function handleControl(request: Request, env: Env, url: URL): Promise<Resp
   if (!actor) {
     return error("unauthorized", 401);
   }
+  const accessIdentity = request.headers.has("Cf-Access-Jwt-Assertion") ? await verifyAccessIdentity(request, env) : null;
+  if (request.headers.has("Cf-Access-Jwt-Assertion") && !accessIdentity) return error("invalid_access_identity", 401);
+  const analyticsResponse = await handleAnalyticsControl(request, env, url, actor);
+  if (analyticsResponse) return analyticsResponse;
   if (url.pathname === "/v1/status" && request.method === "GET") {
     if (!hasScope(actor, "status:read")) {
       return error("forbidden", 403);
@@ -596,77 +788,72 @@ async function handleControl(request: Request, env: Env, url: URL): Promise<Resp
     return Response.json({ service: "pagecast", status: "ok", actor: actor.kind, ownerId: actor.ownerId });
   }
 
-  const tokensPath = /^\/v1\/owners\/([^/]+)\/tokens(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
-  if (tokensPath) {
-    const [, ownerId, tokenId] = tokensPath;
-    if (!owns(actor, ownerId)) {
-      return error("forbidden", 403);
-    }
-    if (request.method === "GET" && !tokenId) {
-      return hasScope(actor, "tokens:read") ? listTokens(env, ownerId) : error("forbidden", 403);
-    }
-    if (request.method === "POST" && !tokenId) {
-      return hasScope(actor, "tokens:write") ? createToken(request, env, actor, ownerId) : error("forbidden", 403);
-    }
-    if (request.method === "DELETE" && tokenId) {
-      return hasScope(actor, "tokens:write") ? revokeToken(request, env, actor, ownerId, tokenId) : error("forbidden", 403);
-    }
-  }
-
-  const coordinatorPath = /^\/v1\/owners\/([^/]+)\/coordinator$/.exec(url.pathname);
-  if (coordinatorPath && request.method === "POST") {
-    const ownerId = coordinatorPath[1];
-    if (!owns(actor, ownerId) || !hasScope(actor, "mutations:write")) {
-      return error("forbidden", 403);
-    }
-    return coordinateMutation(request, env, ownerId);
-  }
-
-  const uploadPath = /^\/v1\/owners\/([^/]+)\/upload-sessions(?:\/([^/]+)(?:\/files\/(.+)|\/(complete))?)?$/.exec(url.pathname);
-  if (uploadPath) {
-    const [, ownerId, sessionId, encodedPath, complete] = uploadPath;
-    if (!owns(actor, ownerId) || !hasScope(actor, "publications:write")) return error("forbidden", 403);
-    if (request.method === "POST" && !sessionId) return createUploadSession(request, env, actor, ownerId);
-    if (request.method === "PUT" && sessionId && encodedPath) return uploadSessionFile(request, env, actor, ownerId, sessionId, encodedPath);
-    if (request.method === "POST" && sessionId && complete) return completeUploadSession(request, env, actor, ownerId, sessionId);
-  }
-
-  const accessPolicyPath = /^\/v1\/owners\/([^/]+)\/publications\/([^/]+)\/access-policy$/.exec(url.pathname);
-  if (accessPolicyPath && request.method === "PUT") {
-    const [, ownerId, publicationId] = accessPolicyPath;
-    if (!owns(actor, ownerId) || !hasScope(actor, "publications:write")) return error("forbidden", 403);
-    return updateAccessPolicy(request, env, actor, ownerId, publicationId);
-  }
-
-  const grantsPath = /^\/v1\/owners\/([^/]+)\/publications\/([^/]+)\/grants(?:\/([A-Za-z0-9_-]{32,64}))?$/.exec(url.pathname);
-  if (grantsPath) {
-    const [, ownerId, publicationId, grantId] = grantsPath;
-    if (!owns(actor, ownerId) || !hasScope(actor, "publications:write")) return error("forbidden", 403);
-    if (request.method === "POST" && !grantId) return createAccessGrant(request, env, actor, ownerId, publicationId);
-    if (request.method === "DELETE" && grantId) return revokeAccessGrant(request, env, actor, ownerId, publicationId, grantId);
-  }
-
-  const publicationPath = /^\/v1\/owners\/([^/]+)\/publications\/([^/]+)(?:\/versions(?:\/([^/]+)(?:\/(activate|rollback))?)?|\/(rename|revoke|restore))?$/.exec(url.pathname);
-  if (publicationPath) {
-    const [, ownerId, publicationId, versionId, versionAction, action] = publicationPath;
-    if (!owns(actor, ownerId)) return error("forbidden", 403);
-    if (request.method === "GET" && !versionId && !action) return hasScope(actor, "publications:read") ? listVersions(env, ownerId, publicationId, url) : error("forbidden", 403);
-    if (!hasScope(actor, "publications:write")) return error("forbidden", 403);
-    if (request.method === "POST" && versionId && (versionAction === "activate" || versionAction === "rollback")) return publicationMutation(request, env, actor, ownerId, { kind: "publication", operation: "activate", data: { publicationId, versionId } });
-    if (request.method === "DELETE" && versionId) return publicationMutation(request, env, actor, ownerId, { kind: "publication", operation: "delete-version", data: { publicationId, versionId } });
-    if (request.method === "POST" && action === "rename") {
-      const parsed = await parseJson(request);
-      if (!parsed || "tooLarge" in parsed || typeof parsed.payload.slug !== "string") return error("invalid_slug", 400);
-      return publicationMutation(request, env, actor, ownerId, { kind: "publication", operation: "rename", data: { publicationId, slug: parsed.payload.slug } });
-    }
-    if (request.method === "POST" && action === "revoke") return publicationMutation(request, env, actor, ownerId, { kind: "publication", operation: "revoke", data: { publicationId } });
-    if (request.method === "POST" && action === "restore") return publicationMutation(request, env, actor, ownerId, { kind: "publication", operation: "restore", data: { publicationId } });
+  const routeContext: ControlRouteContext = {
+    request,
+    env,
+    url,
+    actor,
+    accessIdentity,
+    error,
+    owns: (ownerId) => owns(actor, ownerId),
+    hasScope: (scope) => hasScope(actor, scope),
+    parseJson: () => parseJson(request),
+    collaborationAdmin: (ownerId) => collaborationAdmin(env, actor, ownerId, accessIdentity),
+    collaborationAllowed: (ownerId, action) => collaborationAllowed(env, actor, ownerId, action, accessIdentity),
+    collaborationGrantAllows: (ownerId, publicationId, versionId, action, required) => collaborationGrantAllows(env, request, ownerId, publicationId, versionId, action, required),
+    invokeCollaborationMutation: (ownerId, rawBody, mutation) => invokeCollaborationMutation(request, env, actor, ownerId, rawBody, mutation),
+    handlePresence: (ownerId, publicationId) => handlePresence(request, env, actor, ownerId, publicationId, accessIdentity),
+    listTokens: (ownerId) => listTokens(env, ownerId),
+    createToken: (ownerId) => createToken(request, env, actor, ownerId),
+    revokeToken: (ownerId, tokenId) => revokeToken(request, env, actor, ownerId, tokenId),
+    coordinateMutation: (ownerId) => coordinateMutation(request, env, ownerId),
+    operationsMutation: (ownerId, mutation) => operationsMutation(request, env, actor, ownerId, mutation),
+    createUploadSession: (ownerId) => createUploadSession(request, env, actor, ownerId),
+    uploadSessionFile: (ownerId, sessionId, encodedPath) => uploadSessionFile(request, env, actor, ownerId, sessionId, encodedPath),
+    completeUploadSession: (ownerId, sessionId) => completeUploadSession(request, env, actor, ownerId, sessionId),
+    updateAccessPolicy: (ownerId, publicationId) => updateAccessPolicy(request, env, actor, ownerId, publicationId),
+    createAccessGrant: (ownerId, publicationId) => createAccessGrant(request, env, actor, ownerId, publicationId),
+    revokeAccessGrant: (ownerId, publicationId, grantId) => revokeAccessGrant(request, env, actor, ownerId, publicationId, grantId),
+    publicationMutation: (ownerId, mutation) => publicationMutation(request, env, actor, ownerId, mutation),
+    listVersions: (ownerId, publicationId) => listVersions(env, ownerId, publicationId, url),
+  };
+  for (const handler of [handleCollaborationRoute, handleOperationsRoute, handlePublicationRoute]) {
+    const response = await handler(routeContext);
+    if (response) return response;
   }
   return error("not_found", 404);
 }
 
+interface QueueMessageLike {
+  body: JobMessage;
+  retry(): void;
+}
+
+export async function processQueueBatch<T extends QueueMessageLike>(
+  messages: readonly T[],
+  process: (message: JobMessage) => Promise<void>,
+  recover: (message: JobMessage) => Promise<void>,
+  onFailure: (message: JobMessage, cause: unknown) => void,
+  concurrency = 4,
+): Promise<void> {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), messages.length) }, async () => {
+    while (next < messages.length) {
+      const message = messages[next++];
+      try {
+        await process(message.body);
+      } catch (cause) {
+        try { await recover(message.body); } catch { /* A later retry or Cron lease recovery owns this failure. */ }
+        message.retry();
+        onFailure(message.body, cause);
+      }
+    }
+  });
+  await Promise.all(workers);
+}
+
 const worker: ExportedHandler<Env, JobMessage> = {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
@@ -677,7 +864,11 @@ const worker: ExportedHandler<Env, JobMessage> = {
       return handleControl(request, env, url);
     }
 
-    const publicResponse = await handlePublicDelivery(request, env, url);
+    if (url.pathname === "/mcp") {
+      return handleMcpRequest(request, env, ctx, { authenticate, dispatchControl: handleControl });
+    }
+
+    const publicResponse = await handlePublicDelivery(request, env, url, ctx);
     if (publicResponse) return publicResponse;
 
     if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) {
@@ -687,15 +878,20 @@ const worker: ExportedHandler<Env, JobMessage> = {
     return new Response("Not found", { status: 404 });
   },
 
-  async queue(batch): Promise<void> {
-    for (const message of batch.messages) {
-      console.log("Processing Pagecast job", message.body.id, message.body.kind);
-    }
+  async queue(batch, env): Promise<void> {
+    await processQueueBatch(
+      batch.messages,
+      (message) => processJobMessage(env, message),
+      (message) => recoverJobMessage(env, message),
+      (message, cause) => console.error("Pagecast job processing failed", message.id, String(cause)),
+    );
   },
 
   async scheduled(_controller, env, ctx): Promise<void> {
     ctx.waitUntil(expireTransientRows(env.DB));
     ctx.waitUntil(cleanupPublicationStorage(env));
+    ctx.waitUntil(cleanupAnalytics(env.DB));
+    ctx.waitUntil(scheduledJobs(env));
   },
 };
 

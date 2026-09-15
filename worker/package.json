@@ -42,5 +42,10 @@
         "description": "Generate a unique 32-byte random value used only to derive webhook signing secrets."
       }
     }
+  },
+  "dependencies": {
+    "agents": "0.23.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "4.2.1"
   }
 }

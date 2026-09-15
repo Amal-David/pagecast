@@ -1,6 +1,7 @@
 import { base64Url, digestToken, encodeHex, hmac, parseBearerAuthorization, timingSafeEqual } from "./auth";
 import { readBoundedTextBody } from "./body";
 import { normalizePath } from "./publications";
+import { handlePublicAnalyticsEvent, recordAccessDenied, recordView, scheduleAnalytics, type PublicationAnalyticsIdentity } from "./analytics";
 import type { Env } from "./types";
 
 const encoder = new TextEncoder();
@@ -8,6 +9,7 @@ const PASSWORD_ITERATIONS = 100_000;
 const SESSION_SECONDS = 8 * 60 * 60;
 
 interface PublicationAccessRow {
+  owner_id: string;
   publication_id: string;
   title: string;
   slug: string;
@@ -20,7 +22,6 @@ interface PublicationAccessRow {
   password_salt: string | null;
   password_iterations: number | null;
   auth_version: number | null;
-  approval_state: "approved" | "pending" | "rejected" | null;
 }
 
 interface FileRow {
@@ -33,10 +34,10 @@ interface FileRow {
 
 interface RedirectRow { destination_path: string; status_code: number; }
 
-export async function handlePublicDelivery(request: Request, env: Env, url: URL): Promise<Response | null> {
+export async function handlePublicDelivery(request: Request, env: Env, url: URL, ctx?: Pick<ExecutionContext, "waitUntil">): Promise<Response | null> {
   const route = /^\/p\/([^/]+)(?:\/(.*))?$/.exec(url.pathname);
   if (!route) return null;
-  if (!['GET', 'HEAD', 'POST'].includes(request.method)) return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD, POST' } });
+  if (!['GET', 'HEAD', 'POST', 'OPTIONS'].includes(request.method)) return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD, POST, OPTIONS' } });
   let slug: string;
   try { slug = decodeURIComponent(route[1]); } catch { return hidden(); }
   if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(slug)) return hidden();
@@ -45,10 +46,16 @@ export async function handlePublicDelivery(request: Request, env: Env, url: URL)
   if (!access) return await resolveRedirect(env.DB, slug, tail);
 
   if (!isLive(access)) return hidden();
+  const analytics = analyticsIdentity(access);
+  if (tail === '_analytics/events' && request.method === 'OPTIONS') return handlePublicAnalyticsEvent(request, env, analytics, ctx);
   if (tail === '_auth/password' && request.method === 'POST') return passwordLogin(request, env, access);
   if (tail === '_auth/logout' && request.method === 'POST') return logout(slug);
   const allowed = await authorized(request, env, access);
-  if (!allowed) return unauthorized(access);
+  if (!allowed) {
+    scheduleAnalytics(ctx, recordAccessDenied(request, env, analytics));
+    return unauthorized(access);
+  }
+  if (tail === '_analytics/events') return handlePublicAnalyticsEvent(request, env, analytics, ctx);
 
   if (tail === '_social' || tail === '_social/') return socialDocument(access, url);
   if (tail === '_social/card.svg') return socialCard(access);
@@ -62,18 +69,24 @@ export async function handlePublicDelivery(request: Request, env: Env, url: URL)
     .bind(access.active_version_id, path).first<FileRow>();
   if (!file) return hidden();
   if (negotiation.social && isSocialCrawler(request.headers.get('User-Agent'))) return socialDocument(access, url);
-  return deliverFile(request, env, access, file, negotiation.metadata);
+  const response = await deliverFile(request, env, access, file, negotiation.metadata);
+  if (request.method === 'GET' && tail === '' && response.status === 200) scheduleAnalytics(ctx, recordView(request, env, analytics));
+  return response;
 }
 
 async function lookupAccess(db: D1Database, slug: string): Promise<PublicationAccessRow | null> {
-  return db.prepare(`SELECT p.id AS publication_id, p.title, p.slug, p.link_kind, p.active_version_id, p.state, p.expires_at,
-    ap.mode, ap.password_hash, ap.password_salt, ap.password_iterations, ap.auth_version, ap.approval_state
+  return db.prepare(`SELECT p.owner_id, p.id AS publication_id, p.title, p.slug, p.link_kind, p.active_version_id, p.state, p.expires_at,
+    ap.mode, ap.password_hash, ap.password_salt, ap.password_iterations, ap.auth_version
     FROM publications p LEFT JOIN access_policies ap ON ap.publication_id = p.id WHERE p.slug = ? AND p.deleted_at IS NULL`)
     .bind(slug).first<PublicationAccessRow>();
 }
 
+function analyticsIdentity(access: PublicationAccessRow): PublicationAnalyticsIdentity {
+  return { ownerId: access.owner_id, publicationId: access.publication_id, versionId: access.active_version_id };
+}
+
 function isLive(access: PublicationAccessRow): boolean {
-  return access.state === 'published' && !!access.active_version_id && (!access.expires_at || Date.parse(access.expires_at) > Date.now()) && (access.approval_state ?? 'approved') === 'approved';
+  return access.state === 'published' && !!access.active_version_id && (!access.expires_at || Date.parse(access.expires_at) > Date.now());
 }
 
 async function resolveRedirect(db: D1Database, source: string, tail: string): Promise<Response> {

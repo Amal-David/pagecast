@@ -14,7 +14,7 @@ async function installSchema(auditConstraint = "") {
     PRAGMA foreign_keys = ON;
     CREATE TABLE owners (id TEXT PRIMARY KEY);
     CREATE TABLE owner_quotas (owner_id TEXT PRIMARY KEY, max_tokens INTEGER NOT NULL DEFAULT 10, FOREIGN KEY (owner_id) REFERENCES owners(id) ON DELETE CASCADE);
-    CREATE TABLE api_tokens (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, token_hash TEXT NOT NULL, label TEXT NOT NULL, scopes_json TEXT NOT NULL, expires_at TEXT, revoked_at TEXT, FOREIGN KEY (owner_id) REFERENCES owners(id) ON DELETE CASCADE);
+    CREATE TABLE api_tokens (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, token_hash TEXT NOT NULL, label TEXT NOT NULL, scopes_json TEXT NOT NULL, expires_at TEXT, revoked_at TEXT, actor_id TEXT, FOREIGN KEY (owner_id) REFERENCES owners(id) ON DELETE CASCADE);
     CREATE TABLE idempotency_keys (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, response_status INTEGER, response_body TEXT, expires_at TEXT NOT NULL, UNIQUE(owner_id, idempotency_key), FOREIGN KEY (owner_id) REFERENCES owners(id) ON DELETE CASCADE);
     CREATE TABLE audit_events (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, actor_id TEXT, action TEXT NOT NULL ${auditConstraint}, resource_type TEXT NOT NULL, resource_id TEXT NOT NULL, metadata_json TEXT NOT NULL, FOREIGN KEY (owner_id) REFERENCES owners(id) ON DELETE CASCADE);
   `);
@@ -59,6 +59,7 @@ describe("owner mutation transaction", () => {
       kind: "create-token", id: "token-atomic", tokenHash: "digest", label: "publisher", scopes: ["status:read"], expiresAt: null,
     });
 
+    expect(await response.clone().json()).toMatchObject({ status: 201 });
     expect(response.status).toBe(200);
     expect(await count("api_tokens")).toBe(1);
     expect(await count("audit_events")).toBe(1);

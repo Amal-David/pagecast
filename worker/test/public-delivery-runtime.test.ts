@@ -76,10 +76,13 @@ beforeEach(async () => {
     DROP TABLE IF EXISTS redirects;
     DROP TABLE IF EXISTS access_grants;
     DROP TABLE IF EXISTS access_policies;
+    DROP TABLE IF EXISTS collaboration_review_decisions;
+    DROP TABLE IF EXISTS publication_review_policies;
     DROP TABLE IF EXISTS api_tokens;
     DROP TABLE IF EXISTS publication_versions;
     DROP TABLE IF EXISTS publications;
     DROP TABLE IF EXISTS audit_events;
+    DROP TABLE IF EXISTS outbox_events;
     DROP TABLE IF EXISTS idempotency_keys;
     DROP TABLE IF EXISTS owner_quotas;
     DROP TABLE IF EXISTS owners;
@@ -88,6 +91,7 @@ beforeEach(async () => {
     CREATE TABLE owner_quotas (owner_id TEXT PRIMARY KEY, max_tokens INTEGER NOT NULL DEFAULT 10);
     CREATE TABLE idempotency_keys (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL, operation_type TEXT, response_status INTEGER, response_body TEXT, expires_at TEXT NOT NULL, UNIQUE(owner_id, idempotency_key));
     CREATE TABLE audit_events (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, actor_id TEXT, action TEXT NOT NULL, resource_type TEXT NOT NULL, resource_id TEXT NOT NULL, metadata_json TEXT NOT NULL, occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE outbox_events (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, dedupe_key TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', available_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, processing_started_at TEXT, enqueue_lease_token TEXT, enqueue_lease_expires_at TEXT, last_enqueued_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, sent_at TEXT, retention_until TEXT, UNIQUE(owner_id, dedupe_key));
     CREATE TABLE publications (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'draft', active_version_id TEXT, revoked_version_id TEXT, expires_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, link_kind TEXT NOT NULL DEFAULT 'unlisted', context_key TEXT, generation INTEGER NOT NULL DEFAULT 0, retention_until TEXT, deleted_at TEXT, UNIQUE(owner_id, slug), UNIQUE(owner_id, context_key));
     CREATE TABLE publication_versions (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, version_number INTEGER NOT NULL, manifest_key TEXT NOT NULL, content_sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'staged', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, published_at TEXT, is_complete INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0, retention_until TEXT, deleted_at TEXT, storage_purged_at TEXT, UNIQUE(publication_id, version_number));
     CREATE TABLE upload_sessions (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, version_id TEXT NOT NULL, mode TEXT NOT NULL, manifest_sha256 TEXT NOT NULL, status TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, completed_at TEXT, operation_id TEXT NOT NULL, UNIQUE(owner_id, operation_id));
@@ -95,6 +99,8 @@ beforeEach(async () => {
     CREATE TABLE version_files (version_id TEXT NOT NULL, normalized_path TEXT NOT NULL, r2_key TEXT NOT NULL, byte_size INTEGER NOT NULL, sha256 TEXT NOT NULL, content_type TEXT NOT NULL, PRIMARY KEY(version_id, normalized_path));
     CREATE TABLE redirects (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, source_path TEXT NOT NULL, destination_path TEXT NOT NULL, status_code INTEGER NOT NULL, UNIQUE(publication_id, source_path));
     CREATE TABLE access_policies (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL UNIQUE, mode TEXT NOT NULL, password_hash TEXT, password_salt TEXT, password_iterations INTEGER NOT NULL DEFAULT 210000, auth_version INTEGER NOT NULL DEFAULT 1, approval_state TEXT NOT NULL DEFAULT 'approved', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE publication_review_policies (owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, requires_approval INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(owner_id, publication_id));
+    CREATE TABLE collaboration_review_decisions (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, version_id TEXT NOT NULL, actor_id TEXT NOT NULL, decision TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, superseded_at TEXT, UNIQUE(owner_id, version_id, actor_id));
     CREATE TABLE access_grants (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, principal_type TEXT NOT NULL, principal_value TEXT NOT NULL, permission TEXT NOT NULL DEFAULT 'view', expires_at TEXT, revoked_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(owner_id, publication_id, principal_type, principal_value));
     CREATE TABLE password_attempts (publication_id TEXT NOT NULL, fingerprint TEXT NOT NULL, failed_count INTEGER NOT NULL DEFAULT 0, window_started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, blocked_until TEXT, PRIMARY KEY(publication_id, fingerprint));
     CREATE TABLE api_tokens (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, token_hash TEXT NOT NULL, label TEXT NOT NULL, scopes_json TEXT NOT NULL, expires_at TEXT, revoked_at TEXT, last_used_at TEXT);
@@ -147,10 +153,10 @@ describe("policy-enforced public delivery", () => {
     expect((await publicRequest(asset, { headers: { Cookie: currentCookie } })).status).toBe(401);
   });
 
-  it("keeps expiry, approval, grants, negotiation, and edge social routes under the same policy", async () => {
+  it("keeps expiry, grants, negotiation, and edge social routes under the same policy", async () => {
     const publication = await publishedFixture({ mode: "allowlist", approval: "pending" });
     const path = `/p/${publication.slug}/`;
-    expect((await publicRequest(path)).status).toBe(404);
+    expect((await publicRequest(path)).status).toBe(401);
     const policyKey = crypto.randomUUID();
     const expiresAt = new Date(Date.now() + 60_000).toISOString();
     const policyRequest = () => control(`/v1/owners/${ownerId}/publications/${publication.publicationId}/access-policy`, { method: "PUT", headers: { "content-type": "application/json", "Idempotency-Key": policyKey }, body: JSON.stringify({ mode: "allowlist", approvalState: "approved", expiresAt }) });
