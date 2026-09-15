@@ -190,6 +190,9 @@ export function createWorkerClient({
   }
 
   function ownerRoute(suffix) { return `/v1/owners/${encodeURIComponent(ownerId)}/${suffix}`; }
+  // Keep the transport private to this client. Callers expose explicit local
+  // operations, never an arbitrary remote-path proxy to the browser.
+  function control(suffix, options) { return request(ownerRoute(suffix), options); }
   return {
     origin: baseUrl,
     ownerId,
@@ -200,12 +203,55 @@ export function createWorkerClient({
       if (status.apiVersion !== 2 || REQUIRED_WORKER_CAPABILITIES.some((item) => !available.has(item))) {
         throw appError("Worker does not support the Pagecast V2 upload, access, and version APIs. Deploy a compatible Worker.", 409);
       }
-      return { apiVersion: status.apiVersion, capabilities: [...available].sort() };
+      return {
+        apiVersion: status.apiVersion,
+        capabilities: [...available].sort(),
+        deployment: status.deployment,
+        environment: status.environment,
+        hostname: status.hostname,
+        customDomain: status.customDomain,
+        bindings: status.bindings
+      };
     },
     listVersions: (publicationId) => request(ownerRoute(`publications/${encodeURIComponent(publicationId)}`)),
+    listPublications: () => control("publications"),
+    publication: (publicationId) => control(`publications/${encodeURIComponent(publicationId)}?include=publication`),
+    accessPolicy: (publicationId) => control(`publications/${encodeURIComponent(publicationId)}/access-policy`),
+    grants: (publicationId) => control(`publications/${encodeURIComponent(publicationId)}/grants`),
+    organization: () => control("organization"),
+    setOrganization: (payload, idempotencyKey = requestId()) => control("organization", { method: "PUT", body: payload, idempotencyKey }),
+    actors: () => control("actors"),
+    memberships: () => control("memberships"),
+    inviteMember: (payload, idempotencyKey = requestId()) => control("memberships", { method: "POST", body: payload, idempotencyKey }),
+    removeMember: (membershipId, idempotencyKey = requestId()) => control(`memberships/${encodeURIComponent(membershipId)}`, { method: "DELETE", body: {}, idempotencyKey }),
+    acceptMember: (membershipId, invitation, idempotencyKey = requestId()) => control(`memberships/${encodeURIComponent(membershipId)}/accept`, { method: "POST", body: {}, headers: { "X-Pagecast-Invitation": invitation }, idempotencyKey }),
+    comments: (publicationId) => control(`publications/${encodeURIComponent(publicationId)}/comments`),
+    createComment: (publicationId, payload, idempotencyKey = requestId()) => control(`publications/${encodeURIComponent(publicationId)}/comments`, { method: "POST", body: payload, idempotencyKey }),
+    updateComment: (publicationId, commentId, payload, idempotencyKey = requestId()) => control(`publications/${encodeURIComponent(publicationId)}/comments/${encodeURIComponent(commentId)}`, { method: "PATCH", body: payload, idempotencyKey }),
+    resolveComment: (publicationId, commentId, resolved, idempotencyKey = requestId()) => control(`publications/${encodeURIComponent(publicationId)}/comments/${encodeURIComponent(commentId)}/resolve`, { method: "POST", body: { resolved }, idempotencyKey }),
+    deleteComment: (publicationId, commentId, idempotencyKey = requestId()) => control(`publications/${encodeURIComponent(publicationId)}/comments/${encodeURIComponent(commentId)}`, { method: "DELETE", body: {}, idempotencyKey }),
+    reviews: (publicationId) => control(`publications/${encodeURIComponent(publicationId)}/reviews`),
+    review: (publicationId, payload, idempotencyKey = requestId()) => control(`publications/${encodeURIComponent(publicationId)}/reviews`, { method: "POST", body: payload, idempotencyKey }),
+    webhooks: () => control("webhooks"),
+    createWebhook: (payload, idempotencyKey = requestId()) => control("webhooks", { method: "POST", body: payload, idempotencyKey }),
+    updateWebhook: (webhookId, payload, idempotencyKey = requestId()) => control(`webhooks/${encodeURIComponent(webhookId)}`, { method: "PATCH", body: payload, idempotencyKey }),
+    deleteWebhook: (webhookId, idempotencyKey = requestId()) => control(`webhooks/${encodeURIComponent(webhookId)}`, { method: "DELETE", body: {}, idempotencyKey }),
+    rotateWebhook: (webhookId, idempotencyKey = requestId()) => control(`webhooks/${encodeURIComponent(webhookId)}/rotate`, { method: "POST", body: {}, idempotencyKey }),
+    webhookDeliveries: (webhookId) => control(`webhooks/${encodeURIComponent(webhookId)}/deliveries`),
+    jobs: () => control("jobs"),
+    createJob: (payload, idempotencyKey = requestId()) => control("jobs", { method: "POST", body: payload, idempotencyKey }),
+    audit: ({ cursor = "", limit = 50 } = {}) => control(`audit?limit=${encodeURIComponent(String(limit))}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+    analytics: (publicationId, kind) => control(`analytics/${kind}?publicationId=${encodeURIComponent(publicationId)}`),
     rollback: (publicationId, versionId, idempotencyKey = requestId()) => request(ownerRoute(`publications/${encodeURIComponent(publicationId)}/versions/${encodeURIComponent(versionId)}/rollback`), { method: "POST", body: {}, idempotencyKey }),
+    activate: (publicationId, versionId, idempotencyKey = requestId()) => control(`publications/${encodeURIComponent(publicationId)}/versions/${encodeURIComponent(versionId)}/activate`, { method: "POST", body: {}, idempotencyKey }),
+    revoke: (publicationId, idempotencyKey = requestId()) => control(`publications/${encodeURIComponent(publicationId)}/revoke`, { method: "POST", body: {}, idempotencyKey }),
+    restore: (publicationId, idempotencyKey = requestId()) => control(`publications/${encodeURIComponent(publicationId)}/restore`, { method: "POST", body: {}, idempotencyKey }),
     setAccessPolicy: (publicationId, policy, idempotencyKey = requestId()) => request(ownerRoute(`publications/${encodeURIComponent(publicationId)}/access-policy`), { method: "PUT", body: policy, idempotencyKey }),
     setExpiry: (publicationId, expiresAt, idempotencyKey = requestId()) => request(ownerRoute(`publications/${encodeURIComponent(publicationId)}/access-policy`), { method: "PATCH", body: { expiresAt }, idempotencyKey }),
+    createGrant: (publicationId, payload, idempotencyKey = requestId()) => control(`publications/${encodeURIComponent(publicationId)}/grants`, { method: "POST", body: payload, idempotencyKey }),
+    revokeGrant: (publicationId, grantId, idempotencyKey = requestId()) => control(`publications/${encodeURIComponent(publicationId)}/grants/${encodeURIComponent(grantId)}`, { method: "DELETE", body: {}, idempotencyKey }),
+    jobAction: (jobId, action, idempotencyKey = requestId()) => control(`jobs/${encodeURIComponent(jobId)}/${action}`, { method: "POST", body: {}, idempotencyKey }),
+    deliveryRetry: (webhookId, deliveryId, idempotencyKey = requestId()) => control(`webhooks/${encodeURIComponent(webhookId)}/deliveries/${encodeURIComponent(deliveryId)}/retry`, { method: "POST", body: {}, idempotencyKey }),
     async publish({ rootDir, title, mode = "create", publicationId, contextKey, slug, linkKind = "unlisted", operation = {}, checkpoint = async () => {}, beforeActivate = async () => {} } = {}) {
       const files = await buildWorkerManifest(rootDir);
       const key = operation.idempotencyKey || requestId();

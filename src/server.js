@@ -827,12 +827,7 @@ function normalizeWorkersConfig(value = {}) {
       profiles.push({
         profileId, origin, ownerId, credentialRef: WORKER_CREDENTIAL_FILE,
         allowLoopbackHttp: candidate?.allowLoopbackHttp === true,
-        health: candidate?.health && typeof candidate.health === "object" ? {
-          checkedAt: typeof candidate.health.checkedAt === "string" ? candidate.health.checkedAt : null,
-          ok: candidate.health.ok === true,
-          apiVersion: Number(candidate.health.apiVersion) || null,
-          capabilities: Array.isArray(candidate.health.capabilities) ? candidate.health.capabilities.filter((item) => typeof item === "string").sort() : []
-        } : null
+        health: normalizeWorkerHealth(candidate?.health)
       });
     } catch {
       // An invalid historical profile must not become an implicit network target.
@@ -841,6 +836,33 @@ function normalizeWorkersConfig(value = {}) {
   const activeProfileId = profiles.some((profile) => profile.profileId === value?.activeProfileId)
     ? value.activeProfileId : null;
   return { activeProfileId, profiles };
+}
+
+const WORKER_BINDING_NAMES = ["d1", "r2", "durableObject", "queue", "assets"];
+
+function workerHealthString(value, pattern, maxLength) {
+  const candidate = typeof value === "string" ? value.trim() : "";
+  return candidate.length > 0 && candidate.length <= maxLength && pattern.test(candidate) ? candidate : null;
+}
+
+function normalizeWorkerHealth(value) {
+  if (!value || typeof value !== "object") return null;
+  const bindings = {};
+  for (const binding of WORKER_BINDING_NAMES) {
+    const state = value.bindings?.[binding];
+    if (["ready", "configured", "unavailable"].includes(state)) bindings[binding] = state;
+  }
+  return {
+    checkedAt: typeof value.checkedAt === "string" ? value.checkedAt : null,
+    ok: value.ok === true,
+    apiVersion: Number(value.apiVersion) || null,
+    capabilities: Array.isArray(value.capabilities) ? [...new Set(value.capabilities.filter((item) => typeof item === "string" && /^[a-z0-9._-]{1,80}$/.test(item)))].sort().slice(0, 32) : [],
+    deployment: workerHealthString(value.deployment, /^[A-Za-z0-9._-]+$/, 128),
+    environment: workerHealthString(value.environment, /^[A-Za-z0-9._-]+$/, 80),
+    hostname: workerHealthString(value.hostname, /^[A-Za-z0-9.-]+$/, 253),
+    customDomain: workerHealthString(value.customDomain, /^[A-Za-z0-9.-]+$/, 253),
+    bindings
+  };
 }
 
 async function copyPublicTree(sourceRoot, destinationRoot, { excludedRoots = [] } = {}) {
@@ -1517,6 +1539,15 @@ export function createConfigStore({
       badge: config.badge,
       defaultExpiry: config.defaultExpiry,
       cloudflareSyncEnabled: config.cloudflareSyncEnabled,
+      workers: {
+        activeProfileId: config.workers.activeProfileId,
+        profiles: config.workers.profiles.map(({ profileId, origin, ownerId, health }) => ({
+          profileId, origin, ownerId,
+          configured: true,
+          verified: health?.ok === true,
+          health: normalizeWorkerHealth(health)
+        }))
+      },
       telemetryConsent: config.telemetry,
       local: config.local
     });
@@ -1575,7 +1606,7 @@ export function createConfigStore({
           profiles: [...current.workers.profiles, {
             profileId, origin: normalizedOrigin, ownerId: normalizedOwnerId,
             credentialRef: WORKER_CREDENTIAL_FILE, allowLoopbackHttp,
-            health: { checkedAt: nowIso(), ok: true, ...capability }
+            health: normalizeWorkerHealth({ checkedAt: nowIso(), ok: true, ...capability })
           }]
         }
       }));
@@ -1601,6 +1632,18 @@ export function createConfigStore({
       throw appError("Worker profile was disconnected, but its orphaned secure credential could not be deleted. Remove it from the Pagecast credential store manually.", 500);
     }
     return next;
+  }
+
+  async function recordWorkerHealth(profileId, health) {
+    return enqueueConfigMutation((current) => normalizeConfig({
+      ...current,
+      workers: {
+        ...current.workers,
+        profiles: current.workers.profiles.map((profile) => profile.profileId === profileId
+          ? { ...profile, health: normalizeWorkerHealth({ checkedAt: nowIso(), ok: health?.ok === true, ...health }) }
+          : profile)
+      }
+    }));
   }
 
   async function workerClient(profileId = config.workers.activeProfileId, { fetchImpl = fetch } = {}) {
@@ -1711,6 +1754,7 @@ export function createConfigStore({
     updatePages,
     connectWorker,
     disconnectWorker,
+    recordWorkerHealth,
     workerClient,
     updateFeedback,
     getOwnerId,
@@ -2526,6 +2570,9 @@ export function createReportStore({
         passwordProtected
       }),
       backend: publication.target?.backend === "workers" ? "workers" : "pages",
+      workerPublicationId: publication.target?.backend === "workers" ? publication.target.publicationId : null,
+      activeVersionId: publication.target?.backend === "workers" ? publication.target.activeVersionId || null : null,
+      accessMode: publication.target?.backend === "workers" ? publication.target.accessMode || "unlisted" : null,
       targetAttributed:
         publication.targetAttributed === true || Boolean(storedProjectRef(publication)),
       active,
@@ -3254,6 +3301,23 @@ export function createReportStore({
         match.report.updatedAt = previousReportUpdatedAt;
         throw error;
       }
+    }
+    return match;
+  }
+
+  async function restorePublication(token) {
+    const match = findPublication(token);
+    if (!match) throw appError("Published link was not found.", 404);
+    if (!match.publication.revokedAt) return match;
+    const priorRevokedAt = match.publication.revokedAt;
+    const priorUpdatedAt = match.report.updatedAt;
+    match.publication.revokedAt = null;
+    match.publication.updatedAt = nowIso();
+    match.report.updatedAt = match.publication.updatedAt;
+    try { await save(); } catch (error) {
+      match.publication.revokedAt = priorRevokedAt;
+      match.report.updatedAt = priorUpdatedAt;
+      throw error;
     }
     return match;
   }
@@ -4188,6 +4252,7 @@ export function createReportStore({
     protectedPublicationManifest,
     setPublicationExpiry: serializeStoreMutation(setPublicationExpiry),
     revokePublication: serializeStoreMutation(revokePublication),
+    restorePublication: serializeStoreMutation(restorePublication),
     revokeAll: serializeStoreMutation(revokeAll),
     syncSnapshot: serializeStoreMutation(syncSnapshot),
     adoptPublicationTarget: serializeStoreMutation(adoptPublicationTarget),
@@ -5013,6 +5078,11 @@ export async function executeDaemonCommand({
 function reportDeploymentTargets(store, report, currentPages) {
   const targets = new Map();
   for (const publication of store.activeSnapshotPublications(report)) {
+    // Worker publications own their version, access, and delivery lifecycle in
+    // the Worker API. This target list feeds Pages-only deploy operations.
+    if (publication.target?.backend === "workers") {
+      continue;
+    }
     const pagesConfig = pagesConfigForPublication(publication, currentPages);
     const key = projectRefFilesystemKey(pagesConfig);
     if (!targets.has(key)) {
@@ -5463,6 +5533,27 @@ async function handleApi(
     });
   }
 
+  function workerPublication(token) {
+    const match = store.findPublication(token);
+    if (!match?.publication?.target || match.publication.target.backend !== "workers") {
+      throw appError("That publication is not backed by a Pagecast Worker.", 404);
+    }
+    return match;
+  }
+
+  function assertPagesPublication(match) {
+    if (match?.publication?.target?.backend === "workers") {
+      throw appError("This is a Worker publication. Use its Worker delivery controls instead.", 409);
+    }
+    return match;
+  }
+
+  async function withWorkerPublication(token, callback) {
+    const match = workerPublication(token);
+    const { profile, client } = await configStore.workerClient(match.publication.target.profileId, { fetchImpl: serviceFetch });
+    return callback({ match, profile, client, publicationId: match.publication.target.publicationId });
+  }
+
   async function publishSnapshot(id, body = {}) {
     const sourceReport = store.get(id);
     if (sourceReport?.kind === "folder" && sourceReport.buildCommand) {
@@ -5821,6 +5912,7 @@ async function handleApi(
   }
 
   async function syncSnapshotPublication({ report, publication }) {
+    assertPagesPublication({ report, publication });
     const currentPages = configStore.get().pages;
     let pagesConfig = pagesConfigForPublication(publication, currentPages);
     await store.beginOperations([
@@ -5886,6 +5978,7 @@ async function handleApi(
   async function revokeSnapshotPublications(publications) {
     let revokedCount = 0;
     for (const publication of publications) {
+      assertPagesPublication({ publication });
       if (publication.revokedAt || publication.kind !== "snapshot") {
         continue;
       }
@@ -6188,6 +6281,214 @@ async function handleApi(
       },
       config: configStore.getPublicConfig()
     });
+    return;
+  }
+
+  // The dashboard only ever speaks to these local, specific endpoints. They
+  // select a configured profile and fixed Worker control-plane operation; no
+  // remote URL, bearer credential, or arbitrary method/path crosses the UI.
+  if (url.pathname === "/api/workers/connect" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    if (Object.keys(body).some((key) => !["origin", "ownerId", "token", "allowLoopbackHttp"].includes(key))) throw appError("Invalid Worker connection request.", 400);
+    if (typeof body.token !== "string" || !body.token.trim()) throw appError("A Worker credential is required.", 400);
+    await configStore.connectWorker({ origin: body.origin, ownerId: body.ownerId, token: body.token, allowLoopbackHttp: body.allowLoopbackHttp === true, fetchImpl: serviceFetch });
+    // The credential is intentionally not returned and the UI clears it after
+    // this response; config only contains safe connection metadata.
+    sendJson(res, 201, { config: configStore.getPublicConfig() });
+    return;
+  }
+
+  if (url.pathname === "/api/workers/status" && req.method === "GET") {
+    sendJson(res, 200, { workers: configStore.getPublicConfig().workers });
+    return;
+  }
+
+  const workerHealthMatch = /^\/api\/workers\/([^/]+)\/health$/.exec(url.pathname);
+  if (workerHealthMatch && req.method === "POST") {
+    await readJsonBody(req);
+    const profileId = decodeURIComponent(workerHealthMatch[1]);
+    const { profile, client } = await configStore.workerClient(profileId, { fetchImpl: serviceFetch });
+    try {
+      const capability = await client.capabilities();
+      await configStore.recordWorkerHealth(profile.profileId, { ok: true, ...capability });
+    } catch (error) {
+      await configStore.recordWorkerHealth(profile.profileId, { ok: false });
+      throw error;
+    }
+    sendJson(res, 200, { workers: configStore.getPublicConfig().workers });
+    return;
+  }
+
+  const workerDisconnectMatch = /^\/api\/workers\/([^/]+)$/.exec(url.pathname);
+  if (workerDisconnectMatch && req.method === "DELETE") {
+    await readJsonBody(req);
+    await configStore.disconnectWorker(decodeURIComponent(workerDisconnectMatch[1]));
+    sendJson(res, 200, { config: configStore.getPublicConfig() });
+    return;
+  }
+
+  const workerOverviewMatch = /^\/api\/worker-publications\/([^/]+)\/overview$/.exec(url.pathname);
+  if (workerOverviewMatch && req.method === "GET") {
+    const token = decodeURIComponent(workerOverviewMatch[1]);
+    const section = url.searchParams.get("section");
+    if (!section || !["versions", "access", "team", "analytics", "automations"].includes(section)) throw appError("Choose a supported Worker dashboard section.", 400);
+    const payload = await withWorkerPublication(token, async ({ match, profile, client, publicationId }) => {
+      const read = async (key, action) => {
+        try { return [key, { state: "ready", data: await action() }]; }
+        catch (error) { return [key, { state: "unknown", error: error?.message || "Unavailable" }]; }
+      };
+      const resources = {
+        versions: () => [read("versions", () => client.listVersions(publicationId))],
+        access: () => [read("access", () => client.accessPolicy(publicationId)), read("grants", () => client.grants(publicationId))],
+        team: () => [read("organization", () => client.organization()), read("actors", () => client.actors()), read("memberships", () => client.memberships()), read("comments", () => client.comments(publicationId)), read("reviews", () => client.reviews(publicationId))],
+        analytics: () => [read("analytics", () => client.analytics(publicationId, "summary")), read("timeseries", () => client.analytics(publicationId, "timeseries")), read("events", () => client.analytics(publicationId, "events"))],
+        automations: () => [read("webhooks", () => client.webhooks()), read("jobs", async () => {
+          const jobs = await client.jobs();
+          const items = Array.isArray(jobs.jobs) ? jobs.jobs : [];
+          return { ...jobs, jobs: items.map(({ artifactKey, ...job }) => ({ ...job, artifactAvailable: Boolean(artifactKey), contentType: null })) };
+        })]
+      };
+      const entries = await Promise.all(resources[section]());
+      return { token, publicationId, origin: profile.origin, ownerId: profile.ownerId, stored: { activeVersionId: match.publication.target.activeVersionId || null, accessMode: match.publication.target.accessMode || "unlisted", linkKind: match.publication.target.linkKind || "unlisted" }, resources: Object.fromEntries(entries) };
+    });
+    sendJson(res, 200, payload);
+    return;
+  }
+
+  const workerAuditMatch = /^\/api\/worker-publications\/([^/]+)\/audit$/.exec(url.pathname);
+  if (workerAuditMatch && req.method === "GET") {
+    const token = decodeURIComponent(workerAuditMatch[1]);
+    sendJson(res, 200, await withWorkerPublication(token, ({ client }) => client.audit({ cursor: url.searchParams.get("cursor") || "", limit: 50 })));
+    return;
+  }
+
+  const workerVersionActionMatch = /^\/api\/worker-publications\/([^/]+)\/versions\/([^/]+)\/(activate|rollback)$/.exec(url.pathname);
+  if (workerVersionActionMatch && req.method === "POST") {
+    const body = await readJsonBody(req);
+    if (body.confirm !== true) throw appError("Confirm the version change before continuing.", 400);
+    const [, encodedToken, encodedVersionId, action] = workerVersionActionMatch;
+    const token = decodeURIComponent(encodedToken); const versionId = decodeURIComponent(encodedVersionId);
+    const result = await withWorkerPublication(token, async ({ match, client, publicationId }) => {
+      await (action === "rollback" ? client.rollback(publicationId, versionId) : client.activate(publicationId, versionId));
+      match.publication.target = { ...match.publication.target, activeVersionId: versionId };
+      await store.syncSnapshot(token);
+      return { token, versionId, action };
+    });
+    sendJson(res, 200, result);
+    return;
+  }
+
+  const workerRevokeMatch = /^\/api\/worker-publications\/([^/]+)\/(revoke|restore)$/.exec(url.pathname);
+  if (workerRevokeMatch && req.method === "POST") {
+    const body = await readJsonBody(req);
+    if (body.confirm !== true) throw appError("Confirm this availability change before continuing.", 400);
+    const token = decodeURIComponent(workerRevokeMatch[1]); const action = workerRevokeMatch[2];
+    await withWorkerPublication(token, async ({ client, publicationId }) => {
+      await (action === "revoke" ? client.revoke(publicationId) : client.restore(publicationId));
+    });
+    const result = action === "revoke" ? await store.revokePublication(token) : await store.restorePublication(token);
+    sendJson(res, 200, { token, action, publication: store.formatPublication(result.publication, options) });
+    return;
+  }
+
+  const workerAccessMatch = /^\/api\/worker-publications\/([^/]+)\/access$/.exec(url.pathname);
+  if (workerAccessMatch && req.method === "PUT") {
+    const body = await readJsonBody(req);
+    if (body.confirm !== true || !["public", "unlisted", "password", "allowlist"].includes(body.mode)) throw appError("Confirm a valid access mode before continuing.", 400);
+    const token = decodeURIComponent(workerAccessMatch[1]);
+    await withWorkerPublication(token, async ({ match, client, publicationId }) => {
+      await client.setAccessPolicy(publicationId, { mode: body.mode, ...(typeof body.password === "string" ? { password: body.password } : {}), ...(body.expiresAt === null || typeof body.expiresAt === "string" ? { expiresAt: body.expiresAt } : {}) });
+      match.publication.target = { ...match.publication.target, accessMode: body.mode };
+      await store.syncSnapshot(token);
+    });
+    sendJson(res, 200, { token, accessMode: body.mode });
+    return;
+  }
+
+  const workerAccessExpiryMatch = /^\/api\/worker-publications\/([^/]+)\/access\/expiry$/.exec(url.pathname);
+  if (workerAccessExpiryMatch && req.method === "PATCH") {
+    const body = await readJsonBody(req);
+    if (body.confirm !== true || (body.expiresAt !== null && typeof body.expiresAt !== "string")) throw appError("Confirm a valid access expiry before continuing.", 400);
+    const token = decodeURIComponent(workerAccessExpiryMatch[1]);
+    await withWorkerPublication(token, ({ client, publicationId }) => client.setExpiry(publicationId, body.expiresAt));
+    sendJson(res, 200, { token, expiresAt: body.expiresAt });
+    return;
+  }
+
+  const workerGrantMatch = /^\/api\/worker-publications\/([^/]+)\/grants(?:\/([^/]+))?$/.exec(url.pathname);
+  if (workerGrantMatch) {
+    const token = decodeURIComponent(workerGrantMatch[1]); const grantId = workerGrantMatch[2] ? decodeURIComponent(workerGrantMatch[2]) : null;
+    if (req.method === "GET" && !grantId) { sendJson(res, 200, await withWorkerPublication(token, ({ client, publicationId }) => client.grants(publicationId))); return; }
+    if (req.method === "POST" && !grantId) {
+      const body = await readJsonBody(req); if (body.confirm !== true) throw appError("Confirm grant creation before continuing.", 400);
+      const result = await withWorkerPublication(token, ({ client, publicationId }) => client.createGrant(publicationId, { permission: body.permission, expiresAt: body.expiresAt ?? null }));
+      // A credential can be returned once by the remote service. It is passed
+      // through only in this response, never retained in React query/cache.
+      sendJson(res, 201, result); return;
+    }
+    if (req.method === "DELETE" && grantId) { await readJsonBody(req); sendJson(res, 200, await withWorkerPublication(token, ({ client, publicationId }) => client.revokeGrant(publicationId, grantId))); return; }
+  }
+
+  const workerJobActionMatch = /^\/api\/worker-publications\/([^/]+)\/jobs\/([^/]+)\/(cancel|retry)$/.exec(url.pathname);
+  if (workerJobActionMatch && req.method === "POST") {
+    const body = await readJsonBody(req); if (body.confirm !== true) throw appError("Confirm the job action before continuing.", 400);
+    sendJson(res, 200, await withWorkerPublication(decodeURIComponent(workerJobActionMatch[1]), ({ client }) => client.jobAction(decodeURIComponent(workerJobActionMatch[2]), workerJobActionMatch[3])));
+    return;
+  }
+
+  const workerJobCreateMatch = /^\/api\/worker-publications\/([^/]+)\/jobs$/.exec(url.pathname);
+  if (workerJobCreateMatch && req.method === "POST") {
+    const body = await readJsonBody(req); if (body.confirm !== true) throw appError("Confirm job creation before continuing.", 400);
+    sendJson(res, 201, await withWorkerPublication(decodeURIComponent(workerJobCreateMatch[1]), ({ client, publicationId }) => client.createJob({ kind: body.kind, publicationId, versionId: body.versionId, dedupeKey: body.dedupeKey, payload: body.payload })));
+    return;
+  }
+
+  const workerCollaborationMatch = /^\/api\/worker-publications\/([^/]+)\/collaboration\/(organization|members|comments|reviews)(?:\/([^/]+))?(?:\/(resolve|accept))?$/.exec(url.pathname);
+  if (workerCollaborationMatch) {
+    const token = decodeURIComponent(workerCollaborationMatch[1]); const resource = workerCollaborationMatch[2]; const id = workerCollaborationMatch[3] ? decodeURIComponent(workerCollaborationMatch[3]) : null; const action = workerCollaborationMatch[4] || "";
+    if (resource === "organization" && req.method === "PUT") { const body = await readJsonBody(req); sendJson(res, 200, await withWorkerPublication(token, ({ client }) => client.setOrganization({ namespace: body.namespace, displayName: body.displayName }))); return; }
+    if (resource === "members" && req.method === "POST" && !id) { const body = await readJsonBody(req); const result = await withWorkerPublication(token, ({ client }) => client.inviteMember({ actorId: body.actorId, role: body.role })); sendJson(res, 201, result); return; }
+    if (resource === "members" && req.method === "DELETE" && id) { await readJsonBody(req); sendJson(res, 200, await withWorkerPublication(token, ({ client }) => client.removeMember(id))); return; }
+    if (resource === "members" && req.method === "POST" && id && action === "accept") { const body = await readJsonBody(req); if (typeof body.invitation !== "string") throw appError("An invitation is required.", 400); sendJson(res, 200, await withWorkerPublication(token, ({ client }) => client.acceptMember(id, body.invitation))); return; }
+    if (resource === "comments" && req.method === "POST" && !id) { const body = await readJsonBody(req); sendJson(res, 201, await withWorkerPublication(token, ({ client, publicationId }) => client.createComment(publicationId, { body: body.body, versionId: body.versionId }))); return; }
+    if (resource === "comments" && req.method === "PATCH" && id) { const body = await readJsonBody(req); sendJson(res, 200, await withWorkerPublication(token, ({ client, publicationId }) => client.updateComment(publicationId, id, { body: body.body }))); return; }
+    if (resource === "comments" && req.method === "POST" && id && action === "resolve") { const body = await readJsonBody(req); sendJson(res, 200, await withWorkerPublication(token, ({ client, publicationId }) => client.resolveComment(publicationId, id, body.resolved === true))); return; }
+    if (resource === "comments" && req.method === "DELETE" && id) { await readJsonBody(req); sendJson(res, 200, await withWorkerPublication(token, ({ client, publicationId }) => client.deleteComment(publicationId, id))); return; }
+    if (resource === "reviews" && req.method === "POST") { const body = await readJsonBody(req); sendJson(res, 201, await withWorkerPublication(token, ({ client, publicationId }) => client.review(publicationId, { versionId: body.versionId, decision: body.decision }))); return; }
+  }
+
+  const workerWebhookMatch = /^\/api\/worker-publications\/([^/]+)\/webhooks(?:\/([^/]+)(?:\/(rotate))?)?$/.exec(url.pathname);
+  if (workerWebhookMatch) {
+    const token = decodeURIComponent(workerWebhookMatch[1]); const webhookId = workerWebhookMatch[2] ? decodeURIComponent(workerWebhookMatch[2]) : null; const rotate = workerWebhookMatch[3];
+    if (req.method === "GET" && !webhookId) { sendJson(res, 200, await withWorkerPublication(token, ({ client }) => client.webhooks())); return; }
+    if (req.method === "POST" && !webhookId) { const body = await readJsonBody(req); if (body.confirm !== true || !Array.isArray(body.eventTypes) || body.eventTypes.some((item) => !["publication.published", "publication.expired"].includes(item))) throw appError("Confirm a supported webhook topic before continuing.", 400); sendJson(res, 201, await withWorkerPublication(token, ({ client }) => client.createWebhook({ destination: body.destination, eventTypes: body.eventTypes }))); return; }
+    if (req.method === "PATCH" && webhookId) { const body = await readJsonBody(req); if (Object.keys(body).some((key) => !["destination", "eventTypes", "disabled"].includes(key))) throw appError("Invalid webhook update.", 400); sendJson(res, 200, await withWorkerPublication(token, ({ client }) => client.updateWebhook(webhookId, body))); return; }
+    if (req.method === "DELETE" && webhookId) { await readJsonBody(req); sendJson(res, 200, await withWorkerPublication(token, ({ client }) => client.deleteWebhook(webhookId))); return; }
+    if (req.method === "POST" && webhookId && rotate) { const body = await readJsonBody(req); if (body.confirm !== true) throw appError("Confirm webhook rotation before continuing.", 400); sendJson(res, 200, await withWorkerPublication(token, ({ client }) => client.rotateWebhook(webhookId))); return; }
+  }
+
+  const workerDeliveryListMatch = /^\/api\/worker-publications\/([^/]+)\/webhooks\/([^/]+)\/deliveries$/.exec(url.pathname);
+  if (workerDeliveryListMatch && req.method === "GET") {
+    sendJson(res, 200, await withWorkerPublication(decodeURIComponent(workerDeliveryListMatch[1]), ({ client }) => client.webhookDeliveries(decodeURIComponent(workerDeliveryListMatch[2]))));
+    return;
+  }
+
+  const workerDeliveryRetryMatch = /^\/api\/worker-publications\/([^/]+)\/webhooks\/([^/]+)\/deliveries\/([^/]+)\/retry$/.exec(url.pathname);
+  if (workerDeliveryRetryMatch && req.method === "POST") {
+    const body = await readJsonBody(req); if (body.confirm !== true) throw appError("Confirm delivery retry before continuing.", 400);
+    sendJson(res, 200, await withWorkerPublication(decodeURIComponent(workerDeliveryRetryMatch[1]), ({ client }) => client.deliveryRetry(decodeURIComponent(workerDeliveryRetryMatch[2]), decodeURIComponent(workerDeliveryRetryMatch[3]))));
+    return;
+  }
+
+  const workerMigrationMatch = /^\/api\/publications\/([^/]+)\/migrate-to-worker$/.exec(url.pathname);
+  if (workerMigrationMatch && req.method === "POST") {
+    const body = await readJsonBody(req); if (body.confirm !== true || Object.keys(body).some((key) => !["confirm", "password"].includes(key))) throw appError("Confirm migration; the Pages URL will remain available for recovery.", 400);
+    const token = decodeURIComponent(workerMigrationMatch[1]); const match = store.findPublication(token);
+    if (!match || match.publication.target?.backend === "workers") throw appError("Choose a Pages publication that has not already migrated.", 409);
+    if (!match.report.sourcePath) throw appError("This Pages publication has no recoverable local source and remains Pages-only.", 409);
+    if (match.report.passwordProtected && (typeof body.password !== "string" || body.password.length < 12)) throw appError("A protected Pages publication requires a new Worker password of at least 12 characters.", 400);
+    const result = await publishWorkerSnapshotOneShot({ path: match.report.sourcePath, mode: "new", label: match.publication.label, password: match.report.passwordProtected ? body.password : undefined, disableProtection: !match.report.passwordProtected, expiresAt: match.publication.expiresAt, linkKind: match.publication.drop ? "public" : "unlisted", drop: match.publication.drop === true, attachToReportId: match.report.id, dataDir: store.dataDir, workerFetchImpl: serviceFetch, store, configStore });
+    sendJson(res, 201, { ...result, preservedPagesUrl: match.publication.publicUrl, recovery: "The Pages publication remains unchanged; revoke the Worker publication to recover." });
     return;
   }
 
@@ -6737,7 +7038,7 @@ async function handleApi(
     const fresh = store.get(report.id);
     const latest = [...(fresh?.publications || [])]
       .reverse()
-      .find((p) => !p.revokedAt && p.kind === "snapshot");
+      .find((p) => !p.revokedAt && p.kind === "snapshot" && p.target?.backend !== "workers");
 
     let publication;
     if (latest) {
@@ -6769,9 +7070,11 @@ async function handleApi(
       throw appError("Set `confirm: true` to attach this legacy link to the selected project.", 400);
     }
     const token = decodeURIComponent(targetAdoptionMatch[1]);
-    if (!store.findPublication(token)) {
+    const existing = store.findPublication(token);
+    if (!existing) {
       throw appError("Published link was not found.", 404);
     }
+    assertPagesPublication(existing);
     const current = configStore.get().pages;
     const selectedAccountId = body.accountId || current.accountId;
     const selectedProjectName = body.projectName || current.projectName;
@@ -6817,6 +7120,7 @@ async function handleApi(
     if (!existing) {
       throw appError("Published link was not found.", 404);
     }
+    assertPagesPublication(existing);
     if (existing.publication.kind !== "snapshot") {
       throw appError("Only snapshot publications can be synced.", 400);
     }
@@ -6842,6 +7146,7 @@ async function handleApi(
     if (!existing) {
       throw appError("Published link was not found.", 404);
     }
+    assertPagesPublication(existing);
     if (existing.publication.kind !== "snapshot") {
       throw appError("Only snapshot publications can expire.", 400);
     }
@@ -6882,6 +7187,7 @@ async function handleApi(
     if (!existing) {
       throw appError("Published link was not found.", 404);
     }
+    assertPagesPublication(existing);
     const previous = {
       slug: existing.publication.slug || existing.publication.token,
       drop: existing.publication.drop === true,
@@ -6958,6 +7264,9 @@ async function handleApi(
     if (!reportBeforeRevoke) {
       throw appError("Report was not found.", 404);
     }
+    if (reportBeforeRevoke.publications?.some((publication) => publication.target?.backend === "workers")) {
+      throw appError("This report has a Worker publication. Use its Worker delivery controls instead.", 409);
+    }
     const snapshotRevokedCount = await revokeSnapshotPublications(
       reportBeforeRevoke.publications || []
     );
@@ -6974,6 +7283,9 @@ async function handleApi(
     const id = decodeURIComponent(deleteMatch[1]);
     const reportBeforeDelete = store.get(id);
     if (reportBeforeDelete) {
+      if (reportBeforeDelete.publications?.some((publication) => publication.target?.backend === "workers")) {
+        throw appError("This report has a Worker publication. Use its Worker delivery controls instead.", 409);
+      }
       await revokeSnapshotPublications(reportBeforeDelete.publications || []);
     }
     const removed = await store.remove(id);
@@ -6998,6 +7310,7 @@ async function handleApi(
     if (!existing) {
       throw appError("Published link was not found.", 404);
     }
+    assertPagesPublication(existing);
     if (!existing.publication.revokedAt && existing.publication.kind === "snapshot") {
       await revokeSnapshotPublications([existing.publication]);
     } else if (existing.publication.revokedAt) {

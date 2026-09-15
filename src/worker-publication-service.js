@@ -64,6 +64,7 @@ export async function publishWorkerSnapshotOneShot({
   contextId = "", workspaceId = "", itemKey = "", mode = "", newLink = false,
   update = "", env = process.env, dataDir, workerFetchImpl = fetch,
   expiresAt: explicitExpiresAt = undefined, linkKind = "unlisted", drop = false,
+  attachToReportId = "",
   store: suppliedStore = null, configStore: suppliedConfigStore = null
 } = {}, {
   createReportStore, createConfigStore, normalizePublishMode,
@@ -80,7 +81,9 @@ export async function publishWorkerSnapshotOneShot({
     throw appError("Worker password protection requires a password of at least 12 characters.", 400);
   }
   const publicationContext = resolvePublicationContext({ contextId, workspaceId, itemKey, sourcePath: reportPath, env });
-  const matched = store.findPublishMatch({ ...publishMode, contextKey: publicationContext.contextKey });
+  const attachedReport = attachToReportId ? store.get(attachToReportId) : null;
+  if (attachToReportId && !attachedReport) throw appError("The selected Pages report no longer exists.", 404);
+  const matched = attachToReportId ? null : store.findPublishMatch({ ...publishMode, contextKey: publicationContext.contextKey });
   if (publishMode.mode === "update" && matched?.publication?.target?.backend !== "workers") {
     throw appError("`--backend workers --update` requires an existing Worker publication; migrate or create a new Worker link instead.", 409);
   }
@@ -88,7 +91,9 @@ export async function publishWorkerSnapshotOneShot({
   const workerLinkKind = existing?.publication?.target?.linkKind || (existing?.publication?.drop === true ? "public" : (linkKind === "public" || drop === true ? "public" : "unlisted"));
   const sourceStat = await fs.stat(reportPath).catch(() => null);
   if (!sourceStat) throw appError("Report path was not found.", 404);
-  const report = matched
+  const report = attachedReport
+    ? await (sourceStat.isDirectory() ? store.replaceSourceWithFolder(attachedReport.id, reportPath) : store.replaceSourceWithPath(attachedReport.id, reportPath))
+    : matched
     ? await (sourceStat.isDirectory() ? store.replaceSourceWithFolder(matched.report.id, reportPath) : store.replaceSourceWithPath(matched.report.id, reportPath))
     : await (sourceStat.isDirectory() ? store.addFolder({ folderPath: reportPath }) : store.addPath(reportPath));
   const source = store.get(report.id);

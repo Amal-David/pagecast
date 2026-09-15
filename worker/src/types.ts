@@ -26,6 +26,7 @@ export type Env = Omit<Cloudflare.Env, "JOBS"> & {
   MCP_ALLOWED_HOSTNAMES?: string;
   MCP_ALLOWED_ORIGIN_HOSTNAMES?: string;
   BROWSER?: BrowserProvider;
+  CF_VERSION_METADATA?: { id?: string; tag?: string };
   PUBLIC_ORIGIN?: string;
   JOBS: Queue<JobMessage>;
   TOKEN_HASH_KEY: string;

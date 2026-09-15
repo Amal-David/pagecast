@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { activeMembership, roleAllows } from "./collaboration";
 import type { AuthActor } from "./auth";
+import { listRedactedAuditEvents } from "./audit";
 import { isPagecastId } from "./identifiers";
 import type { Env } from "./types";
 
@@ -207,23 +208,8 @@ function registerAuditTool(server: McpServer, actor: AuthActor, env: Env): void 
     description: "List this owner’s redacted audit records. Raw visitor identifiers, credentials, and local paths are never returned.",
     inputSchema: z.object({ limit: z.number().int().min(1).max(100).optional() }),
   }, async ({ limit }) => {
-    const rows = await env.DB.prepare("SELECT id, actor_id, action, resource_type, resource_id, metadata_json, occurred_at FROM audit_events WHERE owner_id = ? ORDER BY occurred_at DESC LIMIT ?")
-      .bind(actor.ownerId, limit ?? 50).all<Record<string, unknown>>();
-    const events = rows.results.map((row) => ({
-      id: row.id,
-      actorId: row.actor_id,
-      action: row.action,
-      resourceType: row.resource_type,
-      resourceId: row.resource_id,
-      metadata: safeMetadata(row.metadata_json),
-      occurredAt: row.occurred_at,
-    }));
-    return toolResult(200, { events });
+    return toolResult(200, await listRedactedAuditEvents(env.DB, actor.ownerId!, { limit }));
   });
-}
-
-function safeMetadata(value: unknown): unknown {
-  try { return redact(JSON.parse(String(value))); } catch { return {}; }
 }
 
 async function buildServer(actor: AuthActor, request: Request, env: Env, dispatchControl: ControlDispatcher): Promise<McpServer> {

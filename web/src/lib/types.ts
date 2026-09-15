@@ -24,6 +24,10 @@ export interface Publication {
   expired: boolean;
   localUrl: string | null;
   publicUrl: string | null;
+  backend: "pages" | "workers";
+  workerPublicationId: string | null;
+  activeVersionId: string | null;
+  accessMode: "public" | "unlisted" | "password" | "allowlist" | null;
 }
 
 export type ReportKind = "path" | "upload" | "folder";
@@ -212,6 +216,7 @@ export interface AppConfig {
   // Cloudflare Pages. Manual sync is still available when this is off.
   cloudflareSyncEnabled: boolean;
   telemetryConsent: boolean | null;
+  workers?: { activeProfileId: string | null; profiles: Array<{ profileId: string; origin: string; ownerId: string; configured: boolean; verified: boolean; health: { checkedAt: string | null; ok: boolean; apiVersion: number | null; capabilities: string[]; deployment: string | null; environment: string | null; hostname: string | null; customDomain: string | null; bindings: Partial<Record<"d1" | "r2" | "durableObject" | "queue" | "assets", "ready" | "configured" | "unavailable">> } | null }> };
 }
 
 export interface CloudflareProjectsResponse {
@@ -266,6 +271,64 @@ export interface StatusResponse {
   operations: OperationJournalEntry[];
   cloudflare: CloudflareStatus;
   config: AppConfig;
+}
+
+export interface WorkerOverview {
+  token: string;
+  publicationId: string;
+  origin: string;
+  ownerId: string;
+  stored: { activeVersionId: string | null; accessMode: string; linkKind: string };
+  resources: Record<string, WorkerResource>;
+}
+
+export type WorkerOverviewSection = "versions" | "access" | "team" | "analytics" | "automations";
+
+export interface WorkerResource<T = unknown> {
+  state: "ready" | "unknown";
+  data?: T;
+  error?: string;
+}
+
+export interface WorkerMutationResult {
+  token?: string;
+  action?: string;
+  versionId?: string;
+  accessMode?: string;
+  publication?: Publication;
+  credential?: string;
+  secret?: string;
+  invitation?: string;
+  [key: string]: unknown;
+}
+
+export interface WorkerGrantInput {
+  permission: "view" | "comment" | "edit";
+  expiresAt?: string | null;
+}
+
+export interface WorkerAccessInput {
+  mode: "public" | "unlisted" | "password" | "allowlist";
+  password?: string;
+  expiresAt?: string | null;
+}
+
+export interface WorkerWebhookInput {
+  destination?: string;
+  eventTypes?: string[];
+  disabled?: boolean;
+}
+
+export interface WorkerJobInput {
+  kind: string;
+  versionId?: string;
+  dedupeKey?: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface WorkerAuditPage {
+  events: Record<string, unknown>[];
+  nextCursor: string;
 }
 
 export interface ReportsResponse {

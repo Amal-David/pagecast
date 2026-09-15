@@ -7,7 +7,7 @@ import {
   timingSafeEqual,
   type AuthActor,
 } from "./auth";
-import { auditStatement } from "./audit";
+import { auditStatement, listRedactedAuditEvents } from "./audit";
 import { verifyAccessIdentity } from "./access";
 import { readBoundedTextBody } from "./body";
 import { activeMembership, executeCollaborationMutation, isCollaborationMutation, roleAllows, type CollaborationAction, type CollaborationMutation } from "./collaboration";
@@ -765,6 +765,56 @@ async function createAccessGrant(request: Request, env: Env, actor: AuthActor, o
   return Response.json({ ...body, credential: `pcg_${body.id}.${replaySecret}` }, { status: 201 });
 }
 
+type BindingState = "ready" | "configured" | "unavailable";
+
+async function boundedBindingCheck(check: () => Promise<unknown> | unknown): Promise<BindingState> {
+  try {
+    await Promise.race([
+      Promise.resolve().then(check),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("status_check_timed_out")), 250)),
+    ]);
+    return "ready";
+  } catch {
+    return "unavailable";
+  }
+}
+
+function customDomain(value: unknown): string | null {
+  try {
+    const url = new URL(typeof value === "string" ? value : "");
+    return url.protocol === "https:" && url.pathname === "/" && !url.search && !url.hash && !url.hostname.endsWith(".workers.dev")
+      ? url.hostname
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function statusProjection(request: Request, env: Env): Promise<Record<string, unknown>> {
+  const bindings = {
+    d1: env.DB ? await boundedBindingCheck(() => env.DB.prepare("SELECT 1 AS pagecast_status").first()) : "unavailable",
+    r2: env.PUBLICATIONS ? await boundedBindingCheck(() => env.PUBLICATIONS.list({ limit: 1 })) : "unavailable",
+    // Creating an ID is a local namespace validation only. Do not fetch the
+    // object: that could instantiate it just to answer a health request.
+    durableObject: env.PUBLICATION_OWNER ? await boundedBindingCheck(() => env.PUBLICATION_OWNER.idFromName("pagecast-status-probe")) : "unavailable",
+    // Queues expose no read-only probe. Never send a synthetic status message.
+    queue: env.JOBS && typeof env.JOBS.send === "function" ? "configured" : "unavailable",
+    assets: env.ASSETS ? await boundedBindingCheck(() => env.ASSETS.fetch(new Request("https://pagecast.invalid/__pagecast_status_probe__", { method: "HEAD" }))) : "unavailable",
+  } satisfies Record<string, BindingState>;
+  const url = new URL(request.url);
+  return {
+    service: "pagecast",
+    status: "ok",
+    apiVersion: 2,
+    capabilities: ["publications.upload", "publications.access", "publications.versions"],
+    deployment: env.CF_VERSION_METADATA?.id ?? env.CF_VERSION_METADATA?.tag ?? null,
+    environment: typeof env.ENVIRONMENT === "string" ? env.ENVIRONMENT : null,
+    hostname: url.hostname || null,
+    customDomain: customDomain(env.PUBLIC_ORIGIN),
+    bindings,
+  };
+}
+
 async function revokeAccessGrant(request: Request, env: Env, actor: AuthActor, ownerId: string, publicationId: string, grantId: string): Promise<Response> {
   return publicationMutation(request, env, actor, ownerId, { kind: "publication", operation: "revoke-grant", data: { publicationId, grantId } });
 }
@@ -781,11 +831,18 @@ async function handleControl(request: Request, env: Env, url: URL): Promise<Resp
   if (request.headers.has("Cf-Access-Jwt-Assertion") && !accessIdentity) return error("invalid_access_identity", 401);
   const analyticsResponse = await handleAnalyticsControl(request, env, url, actor);
   if (analyticsResponse) return analyticsResponse;
+  const auditPath = /^\/v1\/owners\/([^/]+)\/audit$/.exec(url.pathname);
+  if (auditPath && request.method === "GET") {
+    const ownerId = auditPath[1];
+    return owns(actor, ownerId) && hasScope(actor, "audit:read")
+      ? Response.json(await listRedactedAuditEvents(env.DB, ownerId, { limit: url.searchParams.get("limit"), cursor: url.searchParams.get("cursor") }))
+      : error("forbidden", 403);
+  }
   if (url.pathname === "/v1/status" && request.method === "GET") {
     if (!hasScope(actor, "status:read")) {
       return error("forbidden", 403);
     }
-    return Response.json({ service: "pagecast", status: "ok", apiVersion: 2, capabilities: ["publications.upload", "publications.access", "publications.versions"], actor: actor.kind, ownerId: actor.ownerId });
+    return Response.json({ ...(await statusProjection(request, env)), actor: actor.kind, ownerId: actor.ownerId });
   }
 
   const routeContext: ControlRouteContext = {

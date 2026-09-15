@@ -170,6 +170,21 @@ test("Worker client rejects a reachable but incompatible capability surface", as
   await assert.rejects(client.capabilities(), /does not support/);
 });
 
+test("Worker control requests preserve a disabled-only webhook toggle and delivery endpoint", async () => {
+  const requests = [];
+  const client = createWorkerClient({
+    origin: "https://worker.example", ownerId: "owner", token: "token", retries: 0,
+    fetchImpl: async (url, options = {}) => {
+      requests.push({ url, options });
+      return Response.json({ ok: true });
+    }
+  });
+  await client.updateWebhook("webhook-id", { disabled: true });
+  await client.webhookDeliveries("webhook-id");
+  assert.deepEqual(JSON.parse(requests[0].options.body), { disabled: true });
+  assert.match(requests[1].url, /\/v1\/owners\/owner\/webhooks\/webhook-id\/deliveries$/);
+});
+
 test("Worker upload resumes a journaled session with stable file idempotency and activates last", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-worker-upload-"));
   const requests = [];

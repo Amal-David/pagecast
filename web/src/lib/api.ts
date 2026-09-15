@@ -19,6 +19,17 @@ import type {
   ReportsResponse,
   StatusResponse
 } from "@/lib/types";
+import type {
+  AppConfig,
+  WorkerAccessInput,
+  WorkerAuditPage,
+  WorkerGrantInput,
+  WorkerJobInput,
+  WorkerMutationResult,
+  WorkerOverview,
+  WorkerOverviewSection,
+  WorkerWebhookInput
+} from "@/lib/types";
 import { createCsrfRecovery } from "@/lib/csrf-recovery.js";
 
 // Mirrors the server error envelope: { error: { message, statusCode } }.
@@ -283,5 +294,34 @@ export const api = {
   pruneDeployments: (keep: number) =>
     request<PruneDeploymentsResponse>("/api/deployments/prune", {
       json: { keep }
-    })
+    }),
+
+  workerStatus: () => request<{ workers: NonNullable<AppConfig["workers"]> }>("/api/workers/status"),
+  connectWorker: (payload: { origin: string; ownerId: string; token: string; allowLoopbackHttp?: boolean }) => request<ConfigResponse>("/api/workers/connect", { json: payload }),
+  disconnectWorker: (profileId: string) => request<ConfigResponse>(`/api/workers/${encodeURIComponent(profileId)}`, { method: "DELETE" }),
+  checkWorkerHealth: (profileId: string) => request<{ workers: NonNullable<AppConfig["workers"]> }>(`/api/workers/${encodeURIComponent(profileId)}/health`, { json: {} }),
+  workerOverview: (token: string, section: WorkerOverviewSection) => request<WorkerOverview>(`/api/worker-publications/${encodeURIComponent(token)}/overview?section=${encodeURIComponent(section)}`),
+  workerAudit: (token: string, cursor?: string) => request<WorkerAuditPage>(`/api/worker-publications/${encodeURIComponent(token)}/audit${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`),
+  workerVersion: (token: string, versionId: string, action: "activate" | "rollback") => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/versions/${encodeURIComponent(versionId)}/${action}`, { json: { confirm: true } }),
+  workerAvailability: (token: string, action: "revoke" | "restore") => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/${action}`, { json: { confirm: true } }),
+  workerAccess: (token: string, payload: WorkerAccessInput) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/access`, { method: "PUT", json: { ...payload, confirm: true } }),
+  workerAccessExpiry: (token: string, expiresAt: string | null) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/access/expiry`, { method: "PATCH", json: { expiresAt, confirm: true } }),
+  createWorkerGrant: (token: string, payload: WorkerGrantInput) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/grants`, { json: { ...payload, confirm: true } }),
+  revokeWorkerGrant: (token: string, grantId: string) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/grants/${encodeURIComponent(grantId)}`, { method: "DELETE" }),
+  setWorkerOrganization: (token: string, payload: { namespace: string; displayName: string }) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/collaboration/organization`, { method: "PUT", json: payload }),
+  inviteWorkerMember: (token: string, payload: { actorId: string; role: string }) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/collaboration/members`, { json: payload }),
+  removeWorkerMember: (token: string, membershipId: string) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/collaboration/members/${encodeURIComponent(membershipId)}`, { method: "DELETE" }),
+  createWorkerComment: (token: string, payload: { body: string; versionId?: string }) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/collaboration/comments`, { json: payload }),
+  resolveWorkerComment: (token: string, commentId: string, resolved: boolean) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/collaboration/comments/${encodeURIComponent(commentId)}/resolve`, { json: { resolved } }),
+  deleteWorkerComment: (token: string, commentId: string) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/collaboration/comments/${encodeURIComponent(commentId)}`, { method: "DELETE" }),
+  createWorkerReview: (token: string, payload: { versionId: string; decision: string }) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/collaboration/reviews`, { json: payload }),
+  createWorkerWebhook: (token: string, payload: WorkerWebhookInput) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/webhooks`, { json: { ...payload, confirm: true } }),
+  updateWorkerWebhook: (token: string, webhookId: string, payload: WorkerWebhookInput) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/webhooks/${encodeURIComponent(webhookId)}`, { method: "PATCH", json: payload }),
+  deleteWorkerWebhook: (token: string, webhookId: string) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/webhooks/${encodeURIComponent(webhookId)}`, { method: "DELETE" }),
+  rotateWorkerWebhook: (token: string, webhookId: string) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/webhooks/${encodeURIComponent(webhookId)}/rotate`, { json: { confirm: true } }),
+  workerWebhookDeliveries: (token: string, webhookId: string) => request<{ deliveries: Record<string, unknown>[] }>(`/api/worker-publications/${encodeURIComponent(token)}/webhooks/${encodeURIComponent(webhookId)}/deliveries`),
+  retryWorkerDelivery: (token: string, webhookId: string, deliveryId: string) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/webhooks/${encodeURIComponent(webhookId)}/deliveries/${encodeURIComponent(deliveryId)}/retry`, { json: { confirm: true } }),
+  createWorkerJob: (token: string, payload: WorkerJobInput) => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/jobs`, { json: { ...payload, confirm: true } }),
+  workerJobAction: (token: string, jobId: string, action: "cancel" | "retry") => request<WorkerMutationResult>(`/api/worker-publications/${encodeURIComponent(token)}/jobs/${encodeURIComponent(jobId)}/${action}`, { json: { confirm: true } }),
+  migrateToWorker: (token: string, password?: string) => request<WorkerMutationResult>(`/api/publications/${encodeURIComponent(token)}/migrate-to-worker`, { json: { confirm: true, ...(password ? { password } : {}) } })
 };

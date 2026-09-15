@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useQueryClient } from "@tanstack/react-query";
 import { useCloudflareConnectionJob } from "@/hooks/use-cloudflare";
 import { api } from "@/lib/api";
 import { copyToClipboard } from "@/lib/format";
@@ -33,6 +34,7 @@ function normalizeProjectName(value: string) {
 
 export function PagecastHomeOnboarding({ suggestedProjectName }: { suggestedProjectName: string }) {
   const connect = useCloudflareConnectionJob();
+  const queryClient = useQueryClient();
   const [projectName, setProjectName] = useState(suggestedProjectName);
   const [job, setJob] = useState<CloudflareConnectionJob | null>(null);
   const normalizedProjectName = useMemo(
@@ -50,14 +52,17 @@ export function PagecastHomeOnboarding({ suggestedProjectName }: { suggestedProj
         setJob(next);
         if (next.status === "connected") {
           toast.success("Pagecast Home is ready.");
-          window.location.reload();
+          void Promise.all([
+            queryClient.invalidateQueries({ queryKey: ["status"] }),
+            queryClient.invalidateQueries({ queryKey: ["reports"] })
+          ]);
         }
       } catch (error) {
         setJob((current) => current ? { ...current, status: "failed", error: error instanceof Error ? error.message : "Could not read connection progress." } : current);
       }
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [job]);
+  }, [job, queryClient]);
 
   const start = async (accountId?: string) => {
     const next = await connect.mutateAsync({
