@@ -6,10 +6,12 @@ became unsafe when later features composed with them.
 
 ## Product boundary
 
-Pagecast turns local static content into public Cloudflare Pages links. It is a
-single-operator desktop/local service, not a remotely exposed multi-user admin
-system. The published output is static, while the local dashboard may read
-files, run user-configured build commands, and invoke Wrangler.
+Pagecast turns local static content into Cloudflare Pages links or versioned
+Pagecast Worker publications. The privileged dashboard remains a
+single-operator local service. The optional Worker is a separately deployed,
+owner-scoped control and delivery plane; it does not make the local admin server
+remote. Published output stays static while the local dashboard may read files,
+run user-configured build commands, and invoke Wrangler.
 
 Consequences:
 
@@ -25,6 +27,9 @@ Consequences:
   keep separate local staging and selection state. They may target the same
   remote project only through an explicit direct-deploy choice, which replaces
   that project's contents.
+- Pages remains the default backend. Selecting or migrating to Workers is an
+  explicit per-publication decision, and migration leaves the Pages publication
+  available as an independent recovery path.
 
 ## Core invariants
 
@@ -48,7 +53,7 @@ the operation journal until recovery completes. Explicit whole-site
 `pages deploy` is stateless and has no such journal; after an ambiguous timeout,
 check Cloudflare deployment history before retrying.
 
-### Target identity is explicit
+### Backend and target identity are explicit
 
 The canonical Cloudflare identity is `ProjectRef { accountId, projectName }`.
 Hostnames and deployment URLs are metadata because Cloudflare can assign a
@@ -61,6 +66,16 @@ explicit adoption. Ambiguous legacy records stay quarantined until the operator
 attaches the original target. Explicit direct deploy remains an intentional
 replacement operation.
 
+A Worker publication records `{ backend: "workers", profileId, origin, ownerId,
+publicationId, activeVersionId }`. Existing Worker operations resolve that
+stored profile instead of whichever profile is currently selected. Pages-only
+report sync, password, edit, rename, expiry, and revoke paths exclude Worker
+targets. Worker versions and access policies use the Worker API.
+
+Worker credentials live in a separate private `0600` file. The browser sees an
+allowlisted status projection, not the credential, bootstrap secret, password
+hash, token digest, local capability, R2 key, or visitor identifier.
+
 ### Deploy complete desired state, then reconcile
 
 Managed publishing materializes a fresh desired site for exactly one target;
@@ -72,6 +87,33 @@ target, and protection changes compensate already-updated targets after a later
 failure. The operation journal makes every incomplete target explicit and
 retryable.
 
+Worker publishing stages an isolated Pages-compatible root. A single file does
+not expose siblings; Markdown and non-index entries become `index.html`.
+Uploads use immutable R2 keys, a canonical stored manifest, bounded parallel
+streams, owner coordination, D1 receipts, and durable client checkpoints.
+Access policy is applied before activation. The active-version pointer is the
+only mutable delivery switch, so rollback activates an earlier complete version
+without rewriting its files.
+
+### Worker control and operations plane
+
+The Worker uses D1 for owner, token, publication, access, collaboration,
+analytics, audit, webhook, job, and idempotency state. R2 stores immutable
+publication files, manifests, and generated artifacts. A Durable Object
+serializes mutations for one owner. Queue consumers execute webhook and job
+work; a 15-minute Cron repairs enqueue gaps, expired leases, retention, and due
+work.
+
+The Worker control API requires scoped bearer tokens, owner matching, and
+Origin policy. Bootstrap authentication can create the first scoped token but
+is not a publishing credential. One-time grant, invitation, token, and webhook
+secrets are returned only by their creating or rotating mutation.
+
+The remote `/mcp` route is stateless Streamable HTTP over the same control
+services. It accepts only expiring scoped tokens, applies strict Host/Origin
+allowlists, exposes explicit tool-to-scope mappings, and requires confirmation
+for destructive tools. It cannot read local paths or execute local builds.
+
 ### Adapter parity
 
 Dashboard, CLI, MCP, extension, goal, and auto-sync calls are adapters over the
@@ -81,12 +123,13 @@ daemon may change transport, but must not change behavior or JSON shape.
 
 ### Analytics privacy boundary
 
-Access events are keyed by immutable publication token, not slug. D1 owns
-append-only detailed events and atomic aggregate totals; old KV aggregates are
-migration input and reactions storage only. The Worker HMACs a transient
-connecting address with a per-Home secret before constructing an event and
-never persists or returns the raw value. Detailed events expire after 30 days;
-aggregates remain. Local APIs expose an allowlisted event shape only.
+Access events are keyed by immutable publication identity, not slug. D1 owns
+append-only detailed events, atomic aggregate totals, and daily ingest limits.
+The Worker HMACs a transient connecting address before constructing an event
+and never persists or returns the raw value. Detailed events and unique rows
+expire after 30 days; aggregates remain. Browser APIs expose an allowlisted
+event shape only. The older optional Pages Activity Worker remains compatible
+and separate from the V2 Worker dataset.
 
 ### Stable package boundary
 
@@ -109,10 +152,15 @@ helper must not silently make it a package export.
 | PR #8 Windows process support and later build commands | A generic shell-spawn workaround mixed platform quoting with user build-command semantics. | POSIX uses `sh -lc`; Windows uses `%ComSpec% /d /s /c`; argument-based Wrangler execution stays in its gateway. |
 | Early release workflow → npm/Docker/extension releases | Publishing jobs could run without proving the exact source, generated bundle, package boundary, and component versions. | Release artifacts depend on one verification gate, exact component alignment, pinned action revisions and direct Wrangler version, installed-tarball smoke, and offline container proof. Registry transitive dependencies and remote publication are not an atomic/reproducible transaction. |
 | Feature growth in `src/server.js` | Security, target, state, Wrangler, and service behavior accumulated in one compatibility module, making cross-feature invariants hard to see. | Extract acyclic policy/service modules while retaining `server.js` as the compatibility facade and composition root. |
+| Pages-only lifecycle → Worker V2 | A shared report can contain both Pages and Worker publications, so treating every active snapshot as a Pages target can mutate the wrong backend. | Backend identity is stored per publication. Pages target selection excludes Worker rows; Worker operations use fixed owner-scoped endpoints and the publication's recorded profile. |
 
 ## Compatibility rules
 
 - Existing publication URLs are not rotated automatically.
+- Pages remains the default. Existing Pages publications are not migrated,
+  revoked, or replaced automatically.
+- Worker migration adds a second publication to the same report and preserves
+  the Pages URL until an operator separately revokes it.
 - Old word-only links keep resolving; they do not retroactively gain capability
   entropy.
 - Legacy publications without account/project identity remain readable but
@@ -135,3 +183,6 @@ Before merging a feature that publishes or mutates state, prove:
    result shape?
 6. Does the package root remain unchanged unless an API addition is deliberate?
 7. Do Linux, Windows, package, bundle, and container checks cover the change?
+8. Does each report-level operation select only publications for its backend?
+9. Does any Worker response expose a secret, storage key, visitor identifier,
+   or another owner's record?

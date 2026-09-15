@@ -1,8 +1,18 @@
 # Set a unique value locally; never commit .dev.vars.
 ADMIN_TOKEN=replace-with-a-long-random-local-token
 TOKEN_HASH_KEY=replace-with-a-second-long-random-local-token
-ANALYTICS_HMAC_KEY=replace-with-a-second-long-random-local-token
-COOKIE_SIGNING_KEY=replace-with-a-third-long-random-local-token
-WEBHOOK_SIGNING_KEY=replace-with-a-fourth-long-random-local-token
+ANALYTICS_HMAC_KEY=replace-with-a-third-long-random-local-token
+COOKIE_SIGNING_KEY=replace-with-a-fourth-long-random-local-token
+WEBHOOK_SIGNING_KEY=replace-with-a-fifth-long-random-local-token
 # Required only when an operator configures the optional Browser Run binding.
 PUBLIC_ORIGIN=https://pagecast.example
+# Optional Cloudflare Access identity verification. Set all three together.
+# ACCESS_JWT_ISSUER=https://your-team.cloudflareaccess.com
+# ACCESS_JWKS_URL=https://your-team.cloudflareaccess.com/cdn-cgi/access/certs
+# ACCESS_JWT_AUDIENCE=your-application-audience
+# Required for remote MCP on a custom hostname. Comma-separate additional hosts.
+# MCP_ALLOWED_HOSTNAMES=pagecast.example
+# MCP_ALLOWED_ORIGIN_HOSTNAMES=agent.example
+# Optional bounded analytics overrides. Defaults: 1000 per owner/day, 2000 global/day.
+# ANALYTICS_DAILY_EVENT_LIMIT=1000
+# ANALYTICS_GLOBAL_DAILY_EVENT_LIMIT=2000
