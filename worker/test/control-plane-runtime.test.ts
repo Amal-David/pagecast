@@ -32,7 +32,12 @@ describe("control-plane boundary", () => {
     expect(missing.status).toBe(401);
     expect(query.status).toBe(401);
     expect(accepted.status).toBe(200);
-    expect(await accepted.text()).not.toContain("bootstrap-secret-that-must-never-appear-in-a-response");
+    const body = await accepted.json() as { apiVersion?: number; capabilities?: string[] };
+    expect(body.apiVersion).toBe(2);
+    expect(body.capabilities).toEqual(expect.arrayContaining([
+      "publications.upload", "publications.access", "publications.versions",
+    ]));
+    expect(JSON.stringify(body)).not.toContain("bootstrap-secret-that-must-never-appear-in-a-response");
   });
 
   it("rejects hostile browser control origins without reflecting CORS", async () => {

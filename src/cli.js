@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 
 import {
   createConfigStore,
+  createReportStore,
   deleteCloudflarePagesDeployment,
   deployCloudflarePagesSite,
   getCloudflarePagesStatus,
@@ -20,6 +21,7 @@ import {
   pruneCloudflarePagesDeployments,
   publishGoalProgress,
   publishReportSnapshot,
+  rollbackWorkerPublication,
   setupCloudflareFeedback,
   setupCloudflarePages,
   startServers,
@@ -469,6 +471,7 @@ const VALUE_FLAGS = new Set([
   "account",
   "account-id",
   "branch",
+  "backend",
   "context-id",
   "data-dir",
   "expires",
@@ -477,14 +480,19 @@ const VALUE_FLAGS = new Set([
   "label",
   "item-key",
   "mode",
+  "origin",
+  "owner",
+  "owner-id",
   "output",
   "password",
   "path-token",
   "port",
   "project",
   "project-name",
+  "profile",
   "public-port",
   "slug",
+  "token",
   "update"
 ]);
 
@@ -990,6 +998,7 @@ async function publish(args) {
       mode: optionValue(parsed, "mode"),
       newLink: parsed.flags.has("new-link"),
       update: optionValue(parsed, "update"),
+      backend: optionValue(parsed, "backend") || "pages",
       nonInteractive: parsed.flags.has("non-interactive"),
       env: process.env,
       dataDir
@@ -1010,6 +1019,70 @@ async function publish(args) {
   } catch (error) {
     printError(error, json);
   }
+}
+
+async function workers(args) {
+  const [subcommand, ...rest] = args;
+  const parsed = parseFlags(rest);
+  const json = wantsJson(parsed);
+  const configStore = createConfigStore({ dataDir });
+  try {
+    await configStore.init();
+    if (subcommand === "connect") {
+      const result = await configStore.connectWorker({
+        origin: optionValue(parsed, "origin"), ownerId: optionValue(parsed, "owner", "owner-id"),
+        token: optionValue(parsed, "token"), allowLoopbackHttp: parsed.flags.has("allow-loopback-http")
+      });
+      const profile = result.workers.profiles.find((item) => item.profileId === result.workers.activeProfileId);
+      console.log(json ? JSON.stringify({ ok: true, worker: profile }) : `Connected Worker: ${profile.origin}`);
+      return;
+    }
+    if (subcommand === "disconnect") {
+      const result = await configStore.disconnectWorker(optionValue(parsed, "profile"));
+      console.log(json ? JSON.stringify({ ok: true, workers: result.workers }) : "Worker connection removed.");
+      return;
+    }
+    if (subcommand === "status") {
+      const { profile, client } = await configStore.workerClient(optionValue(parsed, "profile"));
+      const capability = await client.capabilities();
+      const result = { origin: profile.origin, ownerId: profile.ownerId, health: { ok: true, checkedAt: new Date().toISOString(), ...capability } };
+      console.log(json ? JSON.stringify({ ok: true, worker: result }) : `Worker ready: ${result.origin}`);
+      return;
+    }
+    const store = createReportStore({ dataDir });
+    await store.init({ persist: false });
+    const publicationToken = parsed.positionals[0] || "";
+    const match = store.findPublication(publicationToken);
+    if (subcommand === "migrate") {
+      if (!match || match.publication.target?.backend === "workers" || match.report.importedFromCloudflare || !match.report.sourcePath) {
+        throw { message: "This Pages publication has no recoverable local source and remains Pages-only.", statusCode: 409 };
+      }
+      const migrationPassword = optionValue(parsed, "password");
+      if (match.report.passwordProtected && migrationPassword.length < 12) {
+        throw { message: "Migrating a protected Pages publication requires a new Worker --password of at least 12 characters.", statusCode: 400 };
+      }
+      const result = await publishReportSnapshot({ path: match.report.sourcePath, label: match.publication.label, backend: "workers", newLink: true, password: migrationPassword, expiresAt: match.publication.expiresAt || null, linkKind: match.publication.drop === true ? "public" : "unlisted", drop: match.publication.drop === true, dataDir, workspaceId: homeInitialization?.workspaceId || dataDir });
+      console.log(json ? JSON.stringify({ ok: true, ...result, preservedPagesUrl: match.publication.publicUrl }) : `Migrated to Worker: ${result.url}\nPages link preserved: ${match.publication.publicUrl}`);
+      return;
+    }
+    if (!match?.publication?.target || match.publication.target.backend !== "workers") {
+      throw { message: "That publication is not a Worker-backed Pagecast link.", statusCode: 404 };
+    }
+    const { client } = await configStore.workerClient(match.publication.target.profileId);
+    if (subcommand === "versions") {
+      const result = await client.listVersions(match.publication.target.publicationId);
+      console.log(json ? JSON.stringify({ ok: true, ...result }) : result.versions.map((version) => `${version.versionNumber}\t${version.id}\t${version.status}`).join("\n"));
+      return;
+    }
+    if (subcommand === "rollback") {
+      const versionId = parsed.positionals[1] || "";
+      if (!versionId) throw { message: "Usage: pagecast workers rollback <publication-token> <version-id>", statusCode: 400 };
+      const result = await rollbackWorkerPublication({ token: publicationToken, versionId, dataDir });
+      console.log(json ? JSON.stringify({ ok: true, ...result }) : `Rolled back ${publicationToken}.`);
+      return;
+    }
+    throw { message: `Unknown workers command: ${subcommand || ""}`, statusCode: 400 };
+  } catch (error) { printError(error, json); }
 }
 
 async function mcp(args) {
@@ -1356,6 +1429,11 @@ function usage() {
       "  pagecast pages deployments list [--json]              List Cloudflare Pages deployment snapshots",
       "  pagecast pages deployments delete <id> [--force] [--json]  Remove one deployment snapshot",
       "  pagecast pages deployments prune --keep <N> [--yes] [--json]  Keep the N newest, remove the rest",
+      "  pagecast workers connect --origin <https://...> --owner <id> --token <token> [--json]",
+      "  pagecast workers status|disconnect [--json]             Inspect or remove the Worker connection",
+      "  pagecast workers versions <publication-token> [--json]   List immutable Worker versions",
+      "  pagecast workers rollback <publication-token> <version-id> [--json]",
+      "  pagecast workers migrate <pages-publication-token> [--json]",
       "  pagecast feedback setup [--account <id>] [--json]     Set up reactions + view analytics",
       "  pagecast feedback status [--json]                     Show feedback configuration",
       "  pagecast goal publish <file>|--path-token <token> [--slug goal] [--json]",
@@ -1407,6 +1485,11 @@ async function run() {
 
   if (command === "pages") {
     await pages(rest);
+    return;
+  }
+
+  if (command === "workers") {
+    await workers(rest);
     return;
   }
 

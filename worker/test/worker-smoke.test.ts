@@ -28,8 +28,12 @@ describe("Pagecast Worker", () => {
 
     const [firstA, secondA, firstB] = await Promise.all([mutation(ownerA), mutation(ownerA), mutation(ownerB)]);
 
-    await expect(firstA.json()).resolves.toEqual({ ownerId: ownerAId, sequence: 1 });
-    await expect(secondA.json()).resolves.toEqual({ ownerId: ownerAId, sequence: 2 });
+    const ownerAResults = await Promise.all([
+      firstA.json<{ ownerId: string; sequence: number }>(),
+      secondA.json<{ ownerId: string; sequence: number }>(),
+    ]);
+    expect(ownerAResults.map((result) => result.ownerId)).toEqual([ownerAId, ownerAId]);
+    expect(ownerAResults.map((result) => result.sequence).sort()).toEqual([1, 2]);
     await expect(firstB.json()).resolves.toEqual({ ownerId: ownerBId, sequence: 1 });
   });
 });

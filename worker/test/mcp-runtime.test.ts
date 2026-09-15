@@ -84,8 +84,8 @@ describe("remote Pagecast MCP", () => {
     expect(MCP_CAPABILITY_MAP.filter(isMappedCapability).every((entry) => MCP_REGISTERED_TOOL_NAMES.has(entry.tool))).toBe(true);
     expect([...MCP_REGISTERED_TOOL_NAMES].every((tool) => MCP_CAPABILITY_MAP.some((entry) => entry.tool === tool))).toBe(true);
     const mapped = MCP_CAPABILITY_MAP.filter(isMappedCapability);
-    expect(mapped).toHaveLength(55);
-    expect(new Set(mapped.map((entry) => entry.action)).size).toBe(55);
+    expect(mapped).toHaveLength(56);
+    expect(new Set(mapped.map((entry) => entry.action)).size).toBe(56);
     expect(new Set(mapped.map((entry) => entry.tool))).toEqual(MCP_REGISTERED_TOOL_NAMES);
     expect(mapped.every((entry) => entry.scope.length > 0)).toBe(true);
     expect(MCP_CAPABILITY_MAP.filter((entry) => entry.exception)).toHaveLength(3);

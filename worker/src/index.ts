@@ -785,7 +785,7 @@ async function handleControl(request: Request, env: Env, url: URL): Promise<Resp
     if (!hasScope(actor, "status:read")) {
       return error("forbidden", 403);
     }
-    return Response.json({ service: "pagecast", status: "ok", actor: actor.kind, ownerId: actor.ownerId });
+    return Response.json({ service: "pagecast", status: "ok", apiVersion: 2, capabilities: ["publications.upload", "publications.access", "publications.versions"], actor: actor.kind, ownerId: actor.ownerId });
   }
 
   const routeContext: ControlRouteContext = {

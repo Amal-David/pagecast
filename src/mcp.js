@@ -157,6 +157,7 @@ function publishContextOptions(args, { workspaceId, itemKey, forceNew = false } 
   const mode = optionalString(args, "mode") || "upsert";
   const publication = optionalString(args, "publication");
   return {
+    backend: optionalString(args, "backend") || "pages",
     contextId: optionalString(args, "contextId"),
     workspaceId,
     itemKey,
@@ -255,7 +256,8 @@ function toolDefinitions() {
           mode: { type: "string", enum: ["upsert", "new", "update"], description: "Update the matching agent-context link, create a new link, or update a known publication." },
           contextId: { type: "string", description: "Optional agent session or conversation identifier; Pagecast stores only its hash." },
           publication: { type: "string", description: "Existing URL, slug, or token required by update mode." },
-          itemKey: { type: "string", description: "Stable logical item key; defaults to the absolute source path." }
+          itemKey: { type: "string", description: "Stable logical item key; defaults to the absolute source path." },
+          backend: { type: "string", enum: ["pages", "workers"], description: "Optional publishing backend. Worker credentials are configured only by the local CLI." }
         }
       },
       annotations: {
@@ -284,7 +286,8 @@ function toolDefinitions() {
           mode: { type: "string", enum: ["upsert", "new", "update"], description: "Update the matching agent-context link, create a new link, or update a known publication." },
           contextId: { type: "string", description: "Optional agent session or conversation identifier; Pagecast stores only its hash." },
           publication: { type: "string", description: "Existing URL, slug, or token required by update mode." },
-          itemKey: { type: "string", description: "Stable logical item key for deterministic content upserts." }
+          itemKey: { type: "string", description: "Stable logical item key for deterministic content upserts." },
+          backend: { type: "string", enum: ["pages", "workers"], description: "Optional publishing backend. Worker credentials are configured only by the local CLI." }
         }
       },
       annotations: {

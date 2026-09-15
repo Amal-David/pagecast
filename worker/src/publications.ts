@@ -26,6 +26,7 @@ export type PublicationMutation =
   | { kind: "publication"; operation: "revoke"; data: { publicationId: string } }
   | { kind: "publication"; operation: "restore"; data: { publicationId: string } }
   | { kind: "publication"; operation: "set-access-policy"; data: { publicationId: string; mode: unknown; approvalState: unknown; passwordHash: unknown; passwordSalt: unknown; passwordIterations: unknown; expiresAt?: unknown } }
+  | { kind: "publication"; operation: "set-expiry"; data: { publicationId: string; expiresAt: unknown } }
   | { kind: "publication"; operation: "create-grant"; data: { publicationId: string; grantId: string; credentialHash: string; permission: unknown; expiresAt: unknown } }
   | { kind: "publication"; operation: "revoke-grant"; data: { publicationId: string; grantId: string } };
 
@@ -142,9 +143,25 @@ export async function executePublicationMutation(
     case "revoke": return revokePublication(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
     case "restore": return restorePublication(env, ownerId, { ...envelope, mutation: packet.mutation });
     case "set-access-policy": return setAccessPolicy(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
+    case "set-expiry": return setExpiry(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
     case "create-grant": return createAccessGrant(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
     case "revoke-grant": return revokeAccessGrant(env.DB, ownerId, { ...envelope, mutation: packet.mutation });
   }
+}
+
+async function setExpiry(db: D1Database, ownerId: string, packet: PublicationPacket<"set-expiry">): Promise<Response> {
+  const { publicationId, expiresAt } = packet.mutation.data;
+  if (typeof publicationId !== "string" || (expiresAt !== null && (typeof expiresAt !== "string" || !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now()))) return terminal(db, ownerId, packet, 400, { error: "invalid_expiry" });
+  const publication = await db.prepare("SELECT id FROM publications WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").bind(publicationId, ownerId).first<{ id: string }>();
+  if (!publication) return terminal(db, ownerId, packet, 404, { error: "publication_not_found" });
+  const body = { publicationId, expiresAt, authVersionChanged: true, expiryChanged: true };
+  try { await db.batch([
+    db.prepare("UPDATE publications SET expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_id = ?").bind(expiresAt, publicationId, ownerId),
+    db.prepare("UPDATE access_policies SET auth_version = auth_version + 1, updated_at = CURRENT_TIMESTAMP WHERE publication_id = ? AND owner_id = ?").bind(publicationId, ownerId),
+    auditStatement(db, { ownerId, actorId: packet.actorId, action: "publication.expiry_updated", resourceType: "publication", resourceId: publicationId, metadata: { expiresAt } }),
+    receiptStatement(db, ownerId, packet, 200, body),
+  ]); } catch { return failure(); }
+  return success(200, body);
 }
 
 async function setAccessPolicy(db: D1Database, ownerId: string, packet: PublicationPacket<"set-access-policy">): Promise<Response> {

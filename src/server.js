@@ -118,7 +118,20 @@ import {
   normalizePublishMode,
   resolvePublicationContext
 } from "./publication-context.js";
+import {
+  createWorkerClient,
+  normalizeWorkerOrigin,
+  readWorkerCredentials,
+  removeWorkerCredential,
+  writeWorkerCredential,
+  WORKER_CREDENTIAL_FILE
+} from "./worker-client.js";
 import { registerPagecastWorkspace } from "./pagecast-home.js";
+import { contentTypeFor, listPublicTreeFiles } from "./publication-files.js";
+import {
+  publishWorkerSnapshotOneShot as publishWorkerSnapshotOneShotService,
+  rollbackWorkerPublication as rollbackWorkerPublicationService
+} from "./worker-publication-service.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -154,26 +167,6 @@ const PREVIEW_SECURITY_HEADERS = {
   "Cross-Origin-Resource-Policy": "same-origin"
 };
 
-const MIME_TYPES = new Map([
-  [".html", "text/html; charset=utf-8"],
-  [".htm", "text/html; charset=utf-8"],
-  [".css", "text/css; charset=utf-8"],
-  [".js", "text/javascript; charset=utf-8"],
-  [".json", "application/json; charset=utf-8"],
-  [".svg", "image/svg+xml"],
-  [".png", "image/png"],
-  [".jpg", "image/jpeg"],
-  [".jpeg", "image/jpeg"],
-  [".gif", "image/gif"],
-  [".webp", "image/webp"],
-  [".ico", "image/x-icon"],
-  [".txt", "text/plain; charset=utf-8"],
-  [".csv", "text/csv; charset=utf-8"],
-  [".pdf", "application/pdf"],
-  [".woff2", "font/woff2"],
-  [".woff", "font/woff"],
-  [".map", "application/json; charset=utf-8"]
-]);
 
 function isProvisionablePagesError(error) {
   const message = stripAnsi(error?.message || "");
@@ -182,9 +175,6 @@ function isProvisionablePagesError(error) {
   );
 }
 
-function contentTypeFor(filePath) {
-  return MIME_TYPES.get(path.extname(filePath).toLowerCase()) || "application/octet-stream";
-}
 
 function nowIso() {
   return new Date().toISOString();
@@ -773,6 +763,9 @@ function normalizeConfig(config = {}) {
       branch: DEFAULT_PAGES_BRANCH,
       baseUrl: normalizePagesBaseUrl(config.pages?.baseUrl, projectName)
     },
+    // Worker connection metadata is intentionally secret-free. Its bearer
+    // credential lives only in the mode-0600 Worker credential file.
+    workers: normalizeWorkersConfig(config.workers),
     feedback: normalizeFeedback(config.feedback),
     // A subtle "Published with Pagecast" badge on shared pages (the word-of-mouth
     // loop). On by default; can be turned off (the white-label/monetization lever).
@@ -821,6 +814,35 @@ function normalizeConfig(config = {}) {
   };
 }
 
+function normalizeWorkersConfig(value = {}) {
+  const profiles = [];
+  const seen = new Set();
+  for (const candidate of Array.isArray(value?.profiles) ? value.profiles : []) {
+    try {
+      const origin = normalizeWorkerOrigin(candidate?.origin, { allowLoopbackHttp: candidate?.allowLoopbackHttp === true });
+      const ownerId = String(candidate?.ownerId || "").trim();
+      const profileId = String(candidate?.profileId || "").trim();
+      if (!/^[A-Za-z0-9_-]{8,128}$/.test(profileId) || !/^[A-Za-z0-9_-]{1,128}$/.test(ownerId) || seen.has(profileId)) continue;
+      seen.add(profileId);
+      profiles.push({
+        profileId, origin, ownerId, credentialRef: WORKER_CREDENTIAL_FILE,
+        allowLoopbackHttp: candidate?.allowLoopbackHttp === true,
+        health: candidate?.health && typeof candidate.health === "object" ? {
+          checkedAt: typeof candidate.health.checkedAt === "string" ? candidate.health.checkedAt : null,
+          ok: candidate.health.ok === true,
+          apiVersion: Number(candidate.health.apiVersion) || null,
+          capabilities: Array.isArray(candidate.health.capabilities) ? candidate.health.capabilities.filter((item) => typeof item === "string").sort() : []
+        } : null
+      });
+    } catch {
+      // An invalid historical profile must not become an implicit network target.
+    }
+  }
+  const activeProfileId = profiles.some((profile) => profile.profileId === value?.activeProfileId)
+    ? value.activeProfileId : null;
+  return { activeProfileId, profiles };
+}
+
 async function copyPublicTree(sourceRoot, destinationRoot, { excludedRoots = [] } = {}) {
   const blockedRoots = [destinationRoot, ...excludedRoots].map((entry) => path.resolve(entry));
   await fs.rm(destinationRoot, { recursive: true, force: true });
@@ -861,40 +883,6 @@ async function copyPublicTree(sourceRoot, destinationRoot, { excludedRoots = [] 
   await copyDirectory(sourceRoot);
 }
 
-async function listPublicTreeFiles(rootDir) {
-  const files = [];
-
-  async function walk(currentSource, currentRelative = "") {
-    const entries = await fs.readdir(currentSource, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.name.startsWith(".")) {
-        continue;
-      }
-      const sourcePath = path.join(currentSource, entry.name);
-      const relativePath = path.join(currentRelative, entry.name);
-      if (entry.isSymbolicLink()) {
-        continue;
-      }
-      if (entry.isDirectory()) {
-        await walk(sourcePath, relativePath);
-        continue;
-      }
-      if (!entry.isFile()) {
-        continue;
-      }
-      files.push(relativePath.split(path.sep).join("/"));
-    }
-  }
-
-  try {
-    await walk(rootDir);
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      throw error;
-    }
-  }
-  return files.sort((a, b) => a.localeCompare(b));
-}
 
 function firstUsableIso(...values) {
   for (const value of values) {
@@ -1569,6 +1557,59 @@ export function createConfigStore({
     });
   }
 
+  async function connectWorker({ origin, ownerId, token, allowLoopbackHttp = false, fetchImpl = fetch } = {}) {
+    const normalizedOrigin = normalizeWorkerOrigin(origin, { allowLoopbackHttp });
+    const normalizedOwnerId = String(ownerId || "").trim();
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(normalizedOwnerId)) {
+      throw appError("Worker owner ID is invalid.", 400);
+    }
+    const profileId = randomBytes(12).toString("base64url");
+    const client = createWorkerClient({ origin: normalizedOrigin, ownerId: normalizedOwnerId, token, fetchImpl });
+    const capability = await client.capabilities();
+    await writeWorkerCredential({ dataDir, profileId, token });
+    try {
+      return await enqueueConfigMutation((current) => normalizeConfig({
+        ...current,
+        workers: {
+          activeProfileId: profileId,
+          profiles: [...current.workers.profiles, {
+            profileId, origin: normalizedOrigin, ownerId: normalizedOwnerId,
+            credentialRef: WORKER_CREDENTIAL_FILE, allowLoopbackHttp,
+            health: { checkedAt: nowIso(), ok: true, ...capability }
+          }]
+        }
+      }));
+    } catch (error) {
+      await removeWorkerCredential({ dataDir, profileId }).catch(() => {});
+      throw error;
+    }
+  }
+
+  async function disconnectWorker(profileId = config.workers.activeProfileId) {
+    const id = String(profileId || "");
+    if (!id) return get();
+    const next = await enqueueConfigMutation((current) => normalizeConfig({
+      ...current,
+      workers: {
+        activeProfileId: current.workers.activeProfileId === id ? null : current.workers.activeProfileId,
+        profiles: current.workers.profiles.filter((profile) => profile.profileId !== id)
+      }
+    }));
+    try {
+      await removeWorkerCredential({ dataDir, profileId: id });
+    } catch (error) {
+      throw appError("Worker profile was disconnected, but its orphaned secure credential could not be deleted. Remove it from the Pagecast credential store manually.", 500);
+    }
+    return next;
+  }
+
+  async function workerClient(profileId = config.workers.activeProfileId, { fetchImpl = fetch } = {}) {
+    const profile = config.workers.profiles.find((candidate) => candidate.profileId === profileId);
+    if (!profile) throw appError("No Worker connection is configured. Run `pagecast workers connect`.", 401);
+    const credentials = await readWorkerCredentials({ dataDir });
+    return { profile, client: createWorkerClient({ ...profile, token: credentials[profile.profileId], fetchImpl }) };
+  }
+
   function getOwnerId() {
     return config.installationId || "";
   }
@@ -1668,6 +1709,9 @@ export function createConfigStore({
     get,
     getPublicConfig,
     updatePages,
+    connectWorker,
+    disconnectWorker,
+    workerClient,
     updateFeedback,
     getOwnerId,
     isTargetManaged,
@@ -2109,6 +2153,23 @@ export function createReportStore({
     // staged-folder/URL-path key, so backfill slug from token.
     const slug = publication.slug || publication.token;
     const projectRef = storedProjectRef(publication);
+    let workerTarget = null;
+    try {
+      if (publication?.target?.backend === "workers" && typeof publication.target.publicationId === "string" && typeof publication.target.origin === "string" && typeof publication.target.ownerId === "string") {
+        workerTarget = {
+          backend: "workers", publicationId: publication.target.publicationId,
+          origin: normalizeWorkerOrigin(publication.target.origin, { allowLoopbackHttp: publication.target.allowLoopbackHttp === true }),
+          ownerId: publication.target.ownerId,
+          activeVersionId: typeof publication.target.activeVersionId === "string" ? publication.target.activeVersionId : null,
+          linkKind: publication.target.linkKind === "public" ? "public" : "unlisted",
+          accessMode: ["public", "unlisted", "password", "allowlist"].includes(publication.target.accessMode) ? publication.target.accessMode : "unlisted",
+          profileId: typeof publication.target.profileId === "string" ? publication.target.profileId : "",
+          allowLoopbackHttp: publication.target.allowLoopbackHttp === true
+        };
+      }
+    } catch {
+      workerTarget = null;
+    }
     return {
       ...publication,
       kind,
@@ -2116,7 +2177,8 @@ export function createReportStore({
       // Whether this link was published as a public "drop" (short, guessable
       // slug). Legacy publications default to the unlisted classification.
       drop: publication.drop === true,
-      targetAttributed: Boolean(projectRef),
+      target: workerTarget || { backend: "pages", projectRef },
+      targetAttributed: workerTarget ? true : Boolean(projectRef),
       publicUrl: kind === "snapshot" ? publication.publicUrl || null : null,
       pagesProjectName: normalizePagesProjectNameSafe(publication.pagesProjectName),
       pagesAccountId: normalizeAccountIdSafe(publication.pagesAccountId),
@@ -2463,6 +2525,7 @@ export function createReportStore({
         drop: publication.drop === true,
         passwordProtected
       }),
+      backend: publication.target?.backend === "workers" ? "workers" : "pages",
       targetAttributed:
         publication.targetAttributed === true || Boolean(storedProjectRef(publication)),
       active,
@@ -2576,6 +2639,27 @@ export function createReportStore({
     report.sourcePath = normalizedPath;
     report.rootDir = path.dirname(normalizedPath);
     report.entryFile = path.basename(normalizedPath);
+    report.workingDir = null;
+    report.buildCommand = "";
+    report.buildOutputDir = "";
+    report.buildOutputRoot = null;
+    report.buildStatus = "ready";
+    report.buildError = "";
+    report.sourceMode = "source-tracked";
+    report.updatedAt = nowIso();
+    await save();
+    return report;
+  }
+
+  async function replaceSourceWithFolder(id, folderPath) {
+    const report = reports.get(id);
+    if (!report) throw appError("Report was not found.", 404);
+    const normalizedPath = await normalizeLocalFolderPath(folderPath);
+    report.kind = "folder";
+    report.name = path.basename(normalizedPath);
+    report.sourcePath = normalizedPath;
+    report.rootDir = normalizedPath;
+    report.entryFile = await findFolderEntry(normalizedPath);
     report.workingDir = null;
     report.buildCommand = "";
     report.buildOutputDir = "";
@@ -4074,6 +4158,7 @@ export function createReportStore({
     get,
     addPath: serializeStoreMutation(addPath),
     replaceSourceWithPath: serializeStoreMutation(replaceSourceWithPath),
+    replaceSourceWithFolder: serializeStoreMutation(replaceSourceWithFolder),
     addFolder: serializeStoreMutation(addFolder),
     addUpload: serializeStoreMutation(addUpload),
     addFolderUpload: serializeStoreMutation(addFolderUpload),
@@ -5579,6 +5664,21 @@ async function handleApi(
       return;
     }
     if (body.command === "publish_report") {
+      if (payload.backend === "workers") {
+        const publishWorker = () => publishWorkerSnapshotOneShot({
+          ...payload,
+          dataDir: store.dataDir,
+          env: {},
+          workerFetchImpl: serviceFetch,
+          store,
+          configStore
+        });
+        const result = mutationQueue
+          ? await mutationQueue.enqueue(publishWorker)
+          : await publishWorker();
+        sendJson(res, 200, result);
+        return;
+      }
       const publishReport = async () => {
         const publishMode = normalizePublishMode({
           mode: payload.mode,
@@ -8129,6 +8229,9 @@ async function deployCloudflarePagesSiteOneShot({
 // structured (statusCode-bearing) error when the user is not signed in, so the
 // caller can turn it into clear guidance instead of a stack trace.
 export async function publishReportSnapshot(options = {}) {
+  if (options.backend && options.backend !== "pages" && options.backend !== "workers") {
+    throw appError("`backend` must be `pages` or `workers`.", 400);
+  }
   const dataDir = options.dataDir || path.join(PROJECT_ROOT, ".pagecast");
   const callerEnv = options.env || process.env;
   const routedContextId =
@@ -8152,12 +8255,27 @@ export async function publishReportSnapshot(options = {}) {
         itemKey: options.itemKey,
         mode: options.mode,
         newLink: options.newLink === true,
-        update: options.update
+        update: options.update,
+        ...(options.backend === "workers" ? {
+          backend: "workers",
+          expiresAt: options.expiresAt,
+          linkKind: options.linkKind,
+          drop: options.drop === true
+        } : {})
       },
       { fetchImpl: options.commandFetchImpl || fetch }
     );
     if (routed !== null) {
       return routed;
+    }
+  }
+  if (options.backend === "workers") {
+    const lease = new WorkspaceLease(dataDir);
+    await lease.acquire({ capability: randomBytes(32).toString("base64url") });
+    try {
+      return await publishWorkerSnapshotOneShot({ ...options, dataDir });
+    } finally {
+      await lease.release();
     }
   }
   const lease = new WorkspaceLease(dataDir);
@@ -8167,6 +8285,34 @@ export async function publishReportSnapshot(options = {}) {
   } finally {
     await lease.release();
   }
+}
+
+function workerPublicationDependencies() {
+  return {
+    createReportStore,
+    createConfigStore,
+    WorkspaceLease,
+    randomBytes,
+    fs,
+    appError,
+    normalizePublishMode,
+    resolvePublicationContext,
+    resolveExpiresAt
+  };
+}
+
+async function publishWorkerSnapshotOneShot(options = {}) {
+  return publishWorkerSnapshotOneShotService(
+    { ...options, dataDir: options.dataDir || path.join(PROJECT_ROOT, ".pagecast") },
+    workerPublicationDependencies()
+  );
+}
+
+export async function rollbackWorkerPublication(options = {}) {
+  return rollbackWorkerPublicationService(
+    { ...options, dataDir: options.dataDir || path.join(PROJECT_ROOT, ".pagecast") },
+    workerPublicationDependencies()
+  );
 }
 
 async function publishReportSnapshotOneShot({

@@ -31,6 +31,11 @@ export async function handlePublicationRoute(ctx: ControlRouteContext): Promise<
     }
     if (!ctx.hasScope("publications:write")) return ctx.error("forbidden", 403);
     if (request.method === "PUT") return ctx.updateAccessPolicy(ownerId, publicationId);
+    if (request.method === "PATCH") {
+      const parsed = await ctx.parseJson();
+      if (!parsed || "tooLarge" in parsed || !Object.hasOwn(parsed.payload, "expiresAt") || Object.keys(parsed.payload).some((key) => key !== "expiresAt")) return ctx.error("invalid_expiry", 400);
+      return ctx.publicationMutation(ownerId, { kind: "publication", operation: "set-expiry", data: { publicationId, expiresAt: parsed.payload.expiresAt } });
+    }
   }
 
   const grantsPath = /^\/v1\/owners\/([^/]+)\/publications\/([^/]+)\/grants(?:\/([A-Za-z0-9_-]{32,64}))?$/.exec(url.pathname);
