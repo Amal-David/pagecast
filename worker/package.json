@@ -1,0 +1,46 @@
+{
+  "name": "@pagecast/worker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "test": "npm run test:contracts && vitest run",
+    "test:contracts": "node --test test/*-contract.test.mjs",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit && tsc -p test/tsconfig.json --noEmit",
+    "check": "npm run typecheck && npm test",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local --config wrangler.jsonc",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote --config wrangler.jsonc",
+    "deploy:dry-run": "wrangler deploy --dry-run --config wrangler.jsonc",
+    "deploy": "npm run db:migrate:remote && wrangler deploy --config wrangler.jsonc"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.1.9",
+    "@types/node": "26.5.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.131.2"
+  },
+  "cloudflare": {
+    "bindings": {
+      "ADMIN_TOKEN": {
+        "description": "Generate a unique 32-byte random value. This bootstrap credential protects Pagecast administration."
+      },
+      "TOKEN_HASH_KEY": {
+        "description": "Generate a second unique 32-byte random value used only to hash personal API tokens."
+      },
+      "ANALYTICS_HMAC_KEY": {
+        "description": "Generate a unique 32-byte random value used only for privacy-preserving visitor identifiers."
+      },
+      "COOKIE_SIGNING_KEY": {
+        "description": "Generate a unique 32-byte random value used only to sign protected-publication sessions."
+      },
+      "WEBHOOK_SIGNING_KEY": {
+        "description": "Generate a unique 32-byte random value used only to derive webhook signing secrets."
+      }
+    }
+  }
+}
