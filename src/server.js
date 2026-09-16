@@ -1541,8 +1541,8 @@ export function createConfigStore({
       cloudflareSyncEnabled: config.cloudflareSyncEnabled,
       workers: {
         activeProfileId: config.workers.activeProfileId,
-        profiles: config.workers.profiles.map(({ profileId, origin, ownerId, health }) => ({
-          profileId, origin, ownerId,
+        profiles: config.workers.profiles.map(({ profileId, origin, ownerId, allowLoopbackHttp, health }) => ({
+          profileId, origin, ownerId, allowLoopbackHttp,
           configured: true,
           verified: health?.ok === true,
           health: normalizeWorkerHealth(health)

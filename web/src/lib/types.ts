@@ -216,7 +216,7 @@ export interface AppConfig {
   // Cloudflare Pages. Manual sync is still available when this is off.
   cloudflareSyncEnabled: boolean;
   telemetryConsent: boolean | null;
-  workers?: { activeProfileId: string | null; profiles: Array<{ profileId: string; origin: string; ownerId: string; configured: boolean; verified: boolean; health: { checkedAt: string | null; ok: boolean; apiVersion: number | null; capabilities: string[]; deployment: string | null; environment: string | null; hostname: string | null; customDomain: string | null; bindings: Partial<Record<"d1" | "r2" | "durableObject" | "queue" | "assets", "ready" | "configured" | "unavailable">> } | null }> };
+  workers?: { activeProfileId: string | null; profiles: Array<{ profileId: string; origin: string; ownerId: string; allowLoopbackHttp: boolean; configured: boolean; verified: boolean; health: { checkedAt: string | null; ok: boolean; apiVersion: number | null; capabilities: string[]; deployment: string | null; environment: string | null; hostname: string | null; customDomain: string | null; bindings: Partial<Record<"d1" | "r2" | "durableObject" | "queue" | "assets", "ready" | "configured" | "unavailable">> } | null }> };
 }
 
 export interface CloudflareProjectsResponse {

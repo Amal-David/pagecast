@@ -33,7 +33,7 @@ export function WorkerConnectionCard({ workers }: { workers: AppConfig["workers"
       origin: active.origin,
       ownerId: active.ownerId,
       token,
-      allowLoopbackHttp: active.origin.startsWith("http://localhost") || active.origin.startsWith("http://127.")
+      allowLoopbackHttp: active.allowLoopbackHttp
     }, {
       onSuccess: () => setRotating(false),
       onSettled: () => setToken("")

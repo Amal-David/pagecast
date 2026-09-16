@@ -6,6 +6,7 @@ import {
   getJob,
   listJobs,
   processJobMessage,
+  recoverJobMessage,
   repairOutbox,
   scheduledJobs,
   signWebhookPayload,
@@ -122,6 +123,31 @@ describe("jobs and signed webhooks", () => {
     await processJobMessage(workerEnv, { id: created.body.id, kind: "link_check", ownerId, payload: { jobId: created.body.id } });
 
     expect(await env.DB.prepare("SELECT status, error_code, attempt_count FROM jobs WHERE id = ? AND owner_id = ?").bind(created.body.id, ownerId).first<{ status: string; error_code: string; attempt_count: number }>()).toEqual({ status: "failed", error_code: "inspection_version_not_found", attempt_count: 1 });
+  });
+
+  it("retries a transient inspection read and completes when the artifact becomes available", async () => {
+    const created = await insertJob(workerEnv, ownerId, { kind: "link_check", publicationId, versionId: "jobs-version", dedupeKey: "transient-inspection-read" });
+    const message = { id: created.body.id, kind: "link_check" as const, ownerId, payload: { jobId: created.body.id } };
+    let failRead = true;
+    const transientReadEnv = {
+      ...workerEnv,
+      PUBLICATIONS: {
+        get: async (key: string) => {
+          if (failRead && key === "jobs/index.html") throw new Error("R2 temporarily unavailable");
+          return env.PUBLICATIONS.get(key);
+        },
+        put: env.PUBLICATIONS.put.bind(env.PUBLICATIONS),
+        delete: env.PUBLICATIONS.delete.bind(env.PUBLICATIONS),
+      },
+    } as Env;
+
+    await expect(processJobMessage(transientReadEnv, message)).rejects.toThrow("R2 temporarily unavailable");
+    await recoverJobMessage(transientReadEnv, message);
+    expect(await env.DB.prepare("SELECT status, error_code, attempt_count FROM jobs WHERE id = ? AND owner_id = ?").bind(created.body.id, ownerId).first<{ status: string; error_code: string; attempt_count: number }>()).toEqual({ status: "retrying", error_code: "queue_processing_failed", attempt_count: 1 });
+
+    failRead = false;
+    await processJobMessage(transientReadEnv, message);
+    expect(await env.DB.prepare("SELECT status, attempt_count, artifact_key FROM jobs WHERE id = ? AND owner_id = ?").bind(created.body.id, ownerId).first<{ status: string; attempt_count: number; artifact_key: string | null }>()).toMatchObject({ status: "completed", attempt_count: 2, artifact_key: expect.stringContaining(`/jobs/${created.body.id}/`) });
   });
 
   it("uses an injected provider only with a Pagecast-relative target and stores render or audit artifacts", async () => {

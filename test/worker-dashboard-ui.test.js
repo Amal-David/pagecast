@@ -102,4 +102,5 @@ test("Worker connection card exposes in-place credential rotation", async () => 
   assert.match(connection, /Rotate credential/);
   assert.match(connection, /Replace the local credential for this exact Worker owner and origin/);
   assert.match(connection, /Existing publications keep using this profile/);
+  assert.match(connection, /allowLoopbackHttp: active\.allowLoopbackHttp/);
 });

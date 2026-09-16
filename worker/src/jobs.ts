@@ -175,7 +175,9 @@ export async function processJobMessage(env: Env, message: JobMessage): Promise<
     try {
       await runLocalInspection(env, job);
     } catch (cause) {
-      return finishJob(env.DB, job, "failed", inspectionFailureCode(cause));
+      const errorCode = inspectionFailureCode(cause);
+      if (errorCode === "inspection_failed") throw cause;
+      return finishJob(env.DB, job, "failed", errorCode);
     }
   }
   if (job.cancelled_at) return finishJob(env.DB, job, "cancelled", "cancelled");

@@ -54,6 +54,27 @@ test("credential rotation preserves the matching Worker profile used by existing
   }
 });
 
+test("public profiles preserve loopback HTTP permission for credential rotation", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-worker-loopback-"));
+  try {
+    const store = await configure(dataDir);
+    assert.equal(store.getPublicConfig().workers.profiles[0].allowLoopbackHttp, false);
+    for (const origin of ["http://[::1]:8787", "http://dev.localhost:8787"]) {
+      await store.connectWorker({ origin, ownerId: "owner", token: "old-credential", allowLoopbackHttp: true, fetchImpl: workerStatus("old-credential") });
+      const profile = store.getPublicConfig().workers.profiles.find((item) => item.origin === origin);
+      assert.equal(profile.allowLoopbackHttp, true);
+      assert.equal(profile.token, undefined);
+      await store.connectWorker({
+        origin: profile.origin, ownerId: profile.ownerId, allowLoopbackHttp: profile.allowLoopbackHttp,
+        token: "new-credential", fetchImpl: workerStatus("new-credential")
+      });
+      assert.equal(store.get().workers.activeProfileId, profile.profileId);
+      const { client } = await store.workerClient(profile.profileId, { fetchImpl: workerStatus("new-credential") });
+      await client.capabilities();
+    }
+  } finally { await fs.rm(dataDir, { recursive: true, force: true }); }
+});
+
 test("failed verification keeps the prior credential and profile usable", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-worker-rotation-"));
   try {
