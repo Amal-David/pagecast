@@ -30,7 +30,9 @@ test("Worker credentials have an isolated 0600 file and never enter connection m
   try {
     await writeWorkerCredential({ dataDir, profileId: "profile_123", token: "pcat_secret" });
     assert.deepEqual(await readWorkerCredentials({ dataDir }), { profile_123: "pcat_secret" });
-    assert.equal((await fs.stat(workerCredentialPath({ dataDir }))).mode & 0o777, 0o600);
+    if (process.platform !== "win32") {
+      assert.equal((await fs.stat(workerCredentialPath({ dataDir }))).mode & 0o777, 0o600);
+    }
   } finally { await fs.rm(dataDir, { recursive: true, force: true }); }
 });
 
