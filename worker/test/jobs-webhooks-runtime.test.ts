@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   deliverWebhook,
   enqueueJobRecord,
+  getJob,
+  listJobs,
   processJobMessage,
   repairOutbox,
   scheduledJobs,
@@ -18,20 +20,20 @@ const ownerId = "jobs-owner";
 const publicationId = "jobs-publication";
 const workerEnv = { ...env, WEBHOOK_SIGNING_KEY: "webhook-signing-key", JOBS: { send: async () => undefined } } as unknown as Env;
 
-async function insertWebhook(env: Env, ownerId: string, eventTypes = ["publication.published"]): Promise<{ status: number; body: WebhookBody }> {
+async function insertWebhook(env: Env, ownerId: string, eventTypes = ["publication.published"]): Promise<WebhookBody> {
   const id = crypto.randomUUID();
   const destination = "https://hooks.example.test/pagecast";
   await env.DB.prepare("INSERT INTO webhook_subscriptions (id, owner_id, destination, event_types_json, secret_version) VALUES (?, ?, ?, ?, 1)").bind(id, ownerId, destination, JSON.stringify(eventTypes)).run();
-  return { status: 201, body: { id, destination, eventTypes, secretVersion: 1, secret: `pcwh_${id}.${await webhookSecret(env, id, 1)}` } };
+  return { id, destination, eventTypes, secretVersion: 1, secret: `pcwh_${id}.${await webhookSecret(env, id, 1)}` };
 }
 
 async function insertJob(env: Env, ownerId: string, input: { kind: JobBody["kind"]; publicationId?: string; versionId?: string; dedupeKey: string; payload?: Record<string, unknown> }): Promise<{ status: number; body: JobBody }> {
-  if (!validateJobInput(input)) return { status: 400, body: { id: "", kind: input.kind, publicationId: null, versionId: null, status: "invalid", dedupeKey: input.dedupeKey } };
+  if (!validateJobInput(input)) return { status: 400, body: { id: "", kind: input.kind, publicationId: null, versionId: null, status: "invalid", dedupeKey: input.dedupeKey, hasArtifact: false } };
   const existing = await env.DB.prepare("SELECT id, kind, publication_id, version_id, status, dedupe_key, artifact_key, error_code FROM jobs WHERE owner_id = ? AND dedupe_key = ?").bind(ownerId, input.dedupeKey).first<Record<string, unknown>>();
-  if (existing) return { status: 200, body: { id: String(existing.id), kind: existing.kind as JobBody["kind"], publicationId: existing.publication_id as string | null, versionId: existing.version_id as string | null, status: String(existing.status), dedupeKey: String(existing.dedupe_key) } };
+  if (existing) return { status: 200, body: { id: String(existing.id), kind: existing.kind as JobBody["kind"], publicationId: existing.publication_id as string | null, versionId: existing.version_id as string | null, status: String(existing.status), dedupeKey: String(existing.dedupe_key), hasArtifact: typeof existing.artifact_key === "string" } };
   const id = crypto.randomUUID();
   await env.DB.prepare("INSERT INTO jobs (id, owner_id, publication_id, version_id, kind, payload_json, dedupe_key) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(id, ownerId, input.publicationId ?? null, input.versionId ?? null, input.kind, JSON.stringify(input.payload ?? {}), input.dedupeKey).run();
-  return { status: 201, body: { id, kind: input.kind, publicationId: input.publicationId ?? null, versionId: input.versionId ?? null, status: "queued", dedupeKey: input.dedupeKey } };
+  return { status: 201, body: { id, kind: input.kind, publicationId: input.publicationId ?? null, versionId: input.versionId ?? null, status: "queued", dedupeKey: input.dedupeKey, hasArtifact: false } };
 }
 
 beforeEach(async () => {
@@ -51,7 +53,7 @@ beforeEach(async () => {
     PRAGMA foreign_keys = ON;
     CREATE TABLE owners (id TEXT PRIMARY KEY);
     CREATE TABLE publications (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, slug TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'published', active_version_id TEXT, expires_at TEXT, deleted_at TEXT, UNIQUE(owner_id, id));
-    CREATE TABLE publication_versions (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, deleted_at TEXT, retention_until TEXT, storage_purged_at TEXT, UNIQUE(owner_id, id));
+    CREATE TABLE publication_versions (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, manifest_key TEXT, deleted_at TEXT, retention_until TEXT, storage_purged_at TEXT, UNIQUE(owner_id, id));
     CREATE TABLE version_files (version_id TEXT NOT NULL, normalized_path TEXT NOT NULL, r2_key TEXT NOT NULL, byte_size INTEGER NOT NULL, sha256 TEXT NOT NULL, content_type TEXT NOT NULL, PRIMARY KEY(version_id, normalized_path));
     CREATE TABLE webhook_subscriptions (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, destination TEXT NOT NULL, event_types_json TEXT NOT NULL, secret_version INTEGER NOT NULL, disabled_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(owner_id, id));
     CREATE TABLE outbox_events (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, dedupe_key TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', available_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, processing_started_at TEXT, enqueue_lease_token TEXT, enqueue_lease_expires_at TEXT, last_enqueued_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, sent_at TEXT, retention_until TEXT, UNIQUE(owner_id, dedupe_key));
@@ -77,29 +79,49 @@ describe("jobs and signed webhooks", () => {
       expect(validateWebhookDestination(destination)).toBeNull();
     }
     const webhook = await insertWebhook(workerEnv, ownerId);
-    expect(webhook.status).toBe(201);
-    const webhookBody = webhook.body as WebhookBody;
-    const delivery = await deliverWebhook(workerEnv, ownerId, webhookBody.id, "outbox-redirect", { version: "v1", id: "outbox-redirect", type: "publication.published", createdAt: "2026-09-15T00:00:00.000Z", data: {} }, async () => new Response(null, { status: 302 }));
+    const delivery = await deliverWebhook(workerEnv, ownerId, webhook.id, "outbox-redirect", { version: "v1", id: "outbox-redirect", type: "publication.published", createdAt: "2026-09-15T00:00:00.000Z", data: {} }, async () => new Response(null, { status: 302 }));
     expect(delivery.status).toBe("dead_lettered");
   });
 
   it("returns a derived secret only at creation and uses a stable versioned signature fixture", async () => {
     const webhook = await insertWebhook(workerEnv, ownerId);
-    expect((webhook.body as WebhookBody).secret).toMatch(/^pcwh_/);
+    expect(webhook.secret).toMatch(/^pcwh_/);
     const signature = await signWebhookPayload(workerEnv, "webhook-fixture", 1, "1700000000", '{"version":"v1"}');
     expect(signature).toBe("v1,t=1700000000,sha256=569d3774dc094ee0a19fe316cb86aa3aaea27680b099992ef968dce5d8fd13b2");
   });
 
   it("deduplicates queue messages, records terminal provider failure, and retains a D1 dead letter", async () => {
     const created = await insertJob(workerEnv, ownerId, { kind: "screenshot", publicationId, versionId: "jobs-version", dedupeKey: "render-jobs-version" });
-    expect(created.status).toBe(201);
     const createdBody = created.body as JobBody;
     await processJobMessage(workerEnv, { id: createdBody.id, kind: "screenshot", ownerId, payload: { jobId: createdBody.id } });
     await processJobMessage(workerEnv, { id: createdBody.id, kind: "screenshot", ownerId, payload: { jobId: createdBody.id } });
     const job = await env.DB.prepare("SELECT status, attempt_count, error_code FROM jobs WHERE id = ?").bind(createdBody.id).first<{ status: string; attempt_count: number; error_code: string }>();
     expect(job).toEqual({ status: "failed", attempt_count: 1, error_code: "unsupported_provider" });
-    const retry = await insertJob(workerEnv, ownerId, { kind: "screenshot", publicationId, versionId: "jobs-version", dedupeKey: "render-jobs-version" });
-    expect(retry.status).toBe(200);
+    await expect(env.DB.prepare("SELECT COUNT(*) AS count FROM jobs WHERE owner_id = ? AND dedupe_key = ?").bind(ownerId, "render-jobs-version").first<{ count: number }>()).resolves.toEqual({ count: 1 });
+  });
+
+  it("reports artifact availability without exposing the R2 object key", async () => {
+    const created = await insertJob(workerEnv, ownerId, { kind: "link_check", publicationId, versionId: "jobs-version", dedupeKey: "job-body-artifact" });
+    const key = `owners/${ownerId}/jobs/${created.body.id}/private-artifact.json`;
+    await env.DB.prepare("UPDATE jobs SET artifact_key = ? WHERE id = ? AND owner_id = ?").bind(key, created.body.id, ownerId).run();
+
+    const job = await (await getJob(workerEnv, ownerId, created.body.id)).json() as Record<string, unknown>;
+    const listed = await (await listJobs(workerEnv, ownerId)).json() as { jobs: Array<Record<string, unknown>> };
+
+    expect(job).toMatchObject({ id: created.body.id, hasArtifact: true });
+    expect(job).not.toHaveProperty("artifactKey");
+    expect(JSON.stringify(job)).not.toContain(key);
+    expect(listed.jobs[0]).toMatchObject({ id: created.body.id, hasArtifact: true });
+    expect(JSON.stringify(listed.jobs[0])).not.toContain(key);
+  });
+
+  it("records a stable inspection error when the selected version was deleted", async () => {
+    const created = await insertJob(workerEnv, ownerId, { kind: "link_check", publicationId, versionId: "jobs-version", dedupeKey: "deleted-inspection" });
+    await env.DB.prepare("UPDATE publication_versions SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_id = ?").bind("jobs-version", ownerId).run();
+
+    await processJobMessage(workerEnv, { id: created.body.id, kind: "link_check", ownerId, payload: { jobId: created.body.id } });
+
+    expect(await env.DB.prepare("SELECT status, error_code, attempt_count FROM jobs WHERE id = ? AND owner_id = ?").bind(created.body.id, ownerId).first<{ status: string; error_code: string; attempt_count: number }>()).toEqual({ status: "failed", error_code: "inspection_version_not_found", attempt_count: 1 });
   });
 
   it("uses an injected provider only with a Pagecast-relative target and stores render or audit artifacts", async () => {
@@ -141,13 +163,13 @@ describe("jobs and signed webhooks", () => {
     await processJobMessage(workerEnv, { id: createdBody.id, kind: "link_check", ownerId, payload: { jobId: createdBody.id } });
     expect(await env.DB.prepare("SELECT status FROM jobs WHERE id = ?").bind(createdBody.id).first<{ status: string }>()).toEqual({ status: "cancelled" });
     const webhook = await insertWebhook(workerEnv, ownerId);
-    await deliverWebhook(workerEnv, ownerId, (webhook.body as WebhookBody).id, "outbox-retry", { version: "v1", id: "outbox-retry", type: "publication.published", createdAt: "2026-09-15T00:00:00.000Z", data: {} }, async () => new Response(null, { status: 500 }));
+    await deliverWebhook(workerEnv, ownerId, webhook.id, "outbox-retry", { version: "v1", id: "outbox-retry", type: "publication.published", createdAt: "2026-09-15T00:00:00.000Z", data: {} }, async () => new Response(null, { status: 500 }));
     const delivery = await env.DB.prepare("SELECT id, status FROM webhook_deliveries WHERE outbox_id = ?").bind("outbox-retry").first<{ id: string; status: string }>();
     expect(delivery?.status).toBe("retrying");
     await env.DB.prepare("UPDATE webhook_deliveries SET status = 'pending', next_attempt_at = CURRENT_TIMESTAMP, dead_lettered_at = NULL WHERE id = ? AND owner_id = ?").bind(delivery!.id, ownerId).run();
     expect(await env.DB.prepare("SELECT status FROM webhook_deliveries WHERE id = ?").bind(delivery!.id).first<{ status: string }>()).toEqual({ status: "pending" });
-    await deliverWebhook(workerEnv, ownerId, (webhook.body as WebhookBody).id, "outbox-retry", { version: "v1", id: "outbox-retry", type: "publication.published", createdAt: "2026-09-15T00:00:00.000Z", data: {} }, async () => new Response(null, { status: 500 }));
-    await deliverWebhook(workerEnv, ownerId, (webhook.body as WebhookBody).id, "outbox-retry", { version: "v1", id: "outbox-retry", type: "publication.published", createdAt: "2026-09-15T00:00:00.000Z", data: {} }, async () => new Response(null, { status: 500 }));
+    await deliverWebhook(workerEnv, ownerId, webhook.id, "outbox-retry", { version: "v1", id: "outbox-retry", type: "publication.published", createdAt: "2026-09-15T00:00:00.000Z", data: {} }, async () => new Response(null, { status: 500 }));
+    await deliverWebhook(workerEnv, ownerId, webhook.id, "outbox-retry", { version: "v1", id: "outbox-retry", type: "publication.published", createdAt: "2026-09-15T00:00:00.000Z", data: {} }, async () => new Response(null, { status: 500 }));
     expect(await env.DB.prepare("SELECT status, error_code FROM webhook_deliveries WHERE id = ?").bind(delivery!.id).first<{ status: string; error_code: string }>()).toEqual({ status: "dead_lettered", error_code: "http_500" });
   });
 
@@ -173,7 +195,7 @@ describe("jobs and signed webhooks", () => {
     const webhook = await insertWebhook(recovered, ownerId);
     await env.DB.batch([
       env.DB.prepare("INSERT INTO outbox_events (id, owner_id, event_type, payload_json, dedupe_key, status) VALUES ('lease-outbox', ?, 'publication.published', ?, 'lease-outbox', 'sent')").bind(ownerId, JSON.stringify({ version: "v1", id: "lease-outbox", type: "publication.published", createdAt: "2026-09-15T00:00:00.000Z", data: {} })),
-      env.DB.prepare("INSERT INTO webhook_deliveries (id, owner_id, subscription_id, outbox_id, status, sending_lease_expires_at) VALUES ('lease-delivery', ?, ?, 'lease-outbox', 'sending', datetime('now', '-1 second'))").bind(ownerId, (webhook.body as WebhookBody).id),
+      env.DB.prepare("INSERT INTO webhook_deliveries (id, owner_id, subscription_id, outbox_id, status, sending_lease_expires_at) VALUES ('lease-delivery', ?, ?, 'lease-outbox', 'sending', datetime('now', '-1 second'))").bind(ownerId, webhook.id),
     ]);
     sent.length = 0;
     await repairOutbox(recovered);
@@ -181,7 +203,7 @@ describe("jobs and signed webhooks", () => {
     expect(sent).toContain("lease-delivery");
 
     const exhaustedWebhook = await insertWebhook(recovered, ownerId);
-    await env.DB.prepare("INSERT INTO webhook_deliveries (id, owner_id, subscription_id, outbox_id, status, attempt, sending_lease_expires_at) VALUES ('exhausted-delivery', ?, ?, 'lease-outbox', 'sending', 3, datetime('now', '-1 second'))").bind(ownerId, (exhaustedWebhook.body as WebhookBody).id).run();
+    await env.DB.prepare("INSERT INTO webhook_deliveries (id, owner_id, subscription_id, outbox_id, status, attempt, sending_lease_expires_at) VALUES ('exhausted-delivery', ?, ?, 'lease-outbox', 'sending', 3, datetime('now', '-1 second'))").bind(ownerId, exhaustedWebhook.id).run();
     await repairOutbox(recovered);
     expect(await env.DB.prepare("SELECT status, error_code FROM webhook_deliveries WHERE id = 'exhausted-delivery'").first<{ status: string; error_code: string }>()).toEqual({ status: "dead_lettered", error_code: "sending_lease_expired" });
   });
@@ -272,7 +294,7 @@ describe("jobs and signed webhooks", () => {
       expect(await (await env.PUBLICATIONS.get(artifact!.r2_key))!.text()).toContain(kind === "link_check" ? "externalSkipped" : "Hello");
     }
     const webhook = await insertWebhook(workerEnv, ownerId);
-    const id = (webhook.body as WebhookBody).id;
+    const id = webhook.id;
     expect((await deliverWebhook(workerEnv, ownerId, id, "retry-429", { version: "v1", id: "retry-429", type: "publication.published", createdAt: "2026-09-15T00:00:00.000Z", data: {} }, async () => new Response(null, { status: 429 }))).status).toBe("retrying");
     expect((await deliverWebhook(workerEnv, ownerId, id, "terminal-400", { version: "v1", id: "terminal-400", type: "publication.published", createdAt: "2026-09-15T00:00:00.000Z", data: {} }, async () => new Response(null, { status: 400 }))).status).toBe("dead_lettered");
   });
@@ -285,5 +307,19 @@ describe("jobs and signed webhooks", () => {
     await processJobMessage(workerEnv, { id: body.id, kind: "cleanup", ownerId, payload: { jobId: body.id } });
     expect(await env.PUBLICATIONS.get("jobs/index.html")).not.toBeNull();
     expect(await env.DB.prepare("SELECT storage_purged_at FROM publication_versions WHERE id = 'jobs-version'").first<{ storage_purged_at: string | null }>()).toEqual({ storage_purged_at: null });
+  });
+
+  it("purges an inactive version's manifest with its retained files", async () => {
+    const manifestKey = "jobs/manifest.json";
+    await env.PUBLICATIONS.put(manifestKey, "{}");
+    await env.DB.prepare("UPDATE publication_versions SET deleted_at = datetime('now', '-1 day'), retention_until = datetime('now', '-1 second'), manifest_key = ? WHERE id = ? AND owner_id = ?").bind(manifestKey, "jobs-version", ownerId).run();
+    await env.DB.prepare("UPDATE publications SET active_version_id = NULL WHERE id = ? AND owner_id = ?").bind(publicationId, ownerId).run();
+    const created = await insertJob(workerEnv, ownerId, { kind: "cleanup", publicationId, versionId: "jobs-version", dedupeKey: "purge-retained-version" });
+
+    await processJobMessage(workerEnv, { id: created.body.id, kind: "cleanup", ownerId, payload: { jobId: created.body.id } });
+
+    expect(await env.PUBLICATIONS.get("jobs/index.html")).toBeNull();
+    expect(await env.PUBLICATIONS.get(manifestKey)).toBeNull();
+    expect(await env.DB.prepare("SELECT storage_purged_at FROM publication_versions WHERE id = ? AND owner_id = ?").bind("jobs-version", ownerId).first<{ storage_purged_at: string | null }>()).toMatchObject({ storage_purged_at: expect.any(String) });
   });
 });

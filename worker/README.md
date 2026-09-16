@@ -172,7 +172,9 @@ sufficient when Cloudflare copies this directory.
 
 Uploads accept at most 25 files, 16 MiB per file, and 256 MiB total. Upload
 sessions expire after 24 hours. The client hashes and uploads at most four files
-at once, checkpoints progress, applies access policy, and activates last.
+at once, checkpoints progress, applies access policy, and activates last. Each
+file upload has a five-minute request deadline; control requests retain the
+30-second default.
 
 Public delivery supports `GET`, `HEAD`, byte ranges, ETags, MIME types, content
 negotiation, social metadata, cache policy, public/unlisted/password/allowlist
@@ -205,8 +207,9 @@ and terminal failures become dead letters.
 `link_check` and `index` inspect the selected immutable version inside R2 and do
 not crawl arbitrary external URLs. `screenshot`, `pdf`, and
 `accessibility_check` need the optional `BROWSER` binding and `PUBLIC_ORIGIN`.
-Without that provider, those jobs fail visibly with `provider_missing`; Pagecast
-does not claim that a paid Browser service is active.
+Without that provider, those jobs fail visibly with `unsupported_provider`; a
+provider error during the job fails with `provider_failed`. Pagecast does not
+claim that a paid Browser service is active.
 
 ## Custom domains
 

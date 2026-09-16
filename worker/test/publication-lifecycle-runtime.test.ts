@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { digestToken } from "../src/auth";
-import { normalizeManifest, r2Key, sha256 } from "../src/publications";
+import { cleanupPublicationStorage, executePublicationMutation, normalizeManifest, r2Key, sha256 } from "../src/publications";
 import type { Env } from "../src/types";
 
 const ownerId = "owner-publication-lifecycle";
@@ -62,7 +62,7 @@ beforeEach(async () => {
     CREATE TABLE audit_events (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, actor_id TEXT, action TEXT NOT NULL, resource_type TEXT NOT NULL, resource_id TEXT NOT NULL, metadata_json TEXT NOT NULL, occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE outbox_events (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, dedupe_key TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', available_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, processing_started_at TEXT, enqueue_lease_token TEXT, enqueue_lease_expires_at TEXT, last_enqueued_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, sent_at TEXT, retention_until TEXT, UNIQUE(owner_id, dedupe_key));
     CREATE TABLE publications (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'draft', active_version_id TEXT, revoked_version_id TEXT, expires_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, link_kind TEXT NOT NULL DEFAULT 'unlisted', context_key TEXT, generation INTEGER NOT NULL DEFAULT 0, retention_until TEXT, deleted_at TEXT, UNIQUE(owner_id, slug), UNIQUE(owner_id, context_key));
-    CREATE TABLE publication_versions (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, version_number INTEGER NOT NULL, manifest_key TEXT NOT NULL, content_sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'staged', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, published_at TEXT, is_complete INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0, retention_until TEXT, deleted_at TEXT, storage_purged_at TEXT, UNIQUE(publication_id, version_number));
+    CREATE TABLE publication_versions (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, version_number INTEGER NOT NULL, manifest_key TEXT, content_sha256 TEXT NOT NULL, byte_size INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'staged', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, published_at TEXT, is_complete INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0, retention_until TEXT, deleted_at TEXT, storage_purged_at TEXT, UNIQUE(publication_id, version_number));
     CREATE TABLE upload_sessions (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, publication_id TEXT NOT NULL, version_id TEXT NOT NULL, mode TEXT NOT NULL, manifest_sha256 TEXT NOT NULL, status TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, completed_at TEXT, operation_id TEXT NOT NULL, UNIQUE(owner_id, operation_id));
     CREATE TABLE upload_session_files (session_id TEXT NOT NULL, normalized_path TEXT NOT NULL, r2_key TEXT NOT NULL, expected_bytes INTEGER NOT NULL, expected_sha256 TEXT NOT NULL, content_type TEXT NOT NULL, received_bytes INTEGER, received_sha256 TEXT, uploaded_at TEXT, PRIMARY KEY(session_id, normalized_path), UNIQUE(r2_key));
     CREATE TABLE version_files (version_id TEXT NOT NULL, normalized_path TEXT NOT NULL, r2_key TEXT NOT NULL, byte_size INTEGER NOT NULL, sha256 TEXT NOT NULL, content_type TEXT NOT NULL, PRIMARY KEY(version_id, normalized_path));
@@ -233,6 +233,98 @@ describe("manifest-driven publication lifecycle", () => {
     expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${first.versionId}`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(409);
     expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/revoke`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
     expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/restore`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
+  });
+
+  it("keeps the retained version when a revoked publication is revoked again", async () => {
+    const first = await createSession();
+    await request(`/v1/owners/${ownerId}/upload-sessions/${first.sessionId}/files/index.html`, {
+      method: "PUT", headers: { "content-type": "text/html", "X-Content-SHA256": await sha256(first.html) }, body: first.html,
+    });
+    await request(`/v1/owners/${ownerId}/upload-sessions/${first.sessionId}/complete`, {
+      method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+    await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${first.versionId}/activate`, {
+      method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+    for (const key of [crypto.randomUUID(), crypto.randomUUID()]) {
+      expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/revoke`, {
+        method: "POST", headers: { "Idempotency-Key": key },
+      })).status).toBe(200);
+    }
+    expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/restore`, {
+      method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+    })).status).toBe(200);
+    expect(await env.DB.prepare("SELECT active_version_id FROM publications WHERE id = ?").bind(first.publicationId).first<{ active_version_id: string | null }>())
+      .toEqual({ active_version_id: first.versionId });
+  });
+
+  it("rejects password policies outside the bounded PBKDF2 work factor range", async () => {
+    const first = await createSession();
+    const packet = (passwordIterations: number, idempotencyKey: string) => ({
+      actorId: null,
+      fingerprint: `password-iterations:${passwordIterations}`,
+      idempotencyKey,
+      mutation: {
+        kind: "publication" as const,
+        operation: "set-access-policy" as const,
+        data: {
+          publicationId: first.publicationId,
+          mode: "password",
+          approvalState: "approved",
+          passwordHash: "a".repeat(64),
+          passwordSalt: "password-salt-that-is-long-enough",
+          passwordIterations,
+        },
+      },
+    });
+    for (const iterations of [99_999, 1_000_001]) {
+      const response = await executePublicationMutation(workerEnv, ownerId, packet(iterations, crypto.randomUUID()));
+      expect(await response.json()).toMatchObject({ status: 400, body: { error: "invalid_access_policy" } });
+    }
+    const accepted = await executePublicationMutation(workerEnv, ownerId, packet(100_000, crypto.randomUUID()));
+    expect(await accepted.json()).toMatchObject({ status: 200, body: { publicationId: first.publicationId } });
+  });
+
+  it("purges an expired deleted version's immutable manifest with its files", async () => {
+    const first = await createSession();
+    await request(`/v1/owners/${ownerId}/upload-sessions/${first.sessionId}/files/index.html`, {
+      method: "PUT", headers: { "content-type": "text/html", "X-Content-SHA256": await sha256(first.html) }, body: first.html,
+    });
+    await request(`/v1/owners/${ownerId}/upload-sessions/${first.sessionId}/complete`, {
+      method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+    const manifest = await env.DB.prepare("SELECT manifest_key FROM publication_versions WHERE id = ?").bind(first.versionId).first<{ manifest_key: string }>();
+    expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${first.versionId}`, {
+      method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() },
+    })).status).toBe(200);
+    await env.DB.prepare("UPDATE publication_versions SET retention_until = datetime('now', '-1 second') WHERE id = ?").bind(first.versionId).run();
+
+    await cleanupPublicationStorage(workerEnv);
+
+    expect(await env.PUBLICATIONS.get(manifest!.manifest_key)).toBeNull();
+    expect(await env.PUBLICATIONS.get(r2Key(ownerId, first.publicationId, first.versionId, "index.html"))).toBeNull();
+    expect(await env.DB.prepare("SELECT storage_purged_at FROM publication_versions WHERE id = ?").bind(first.versionId).first<{ storage_purged_at: string | null }>())
+      .toMatchObject({ storage_purged_at: expect.any(String) });
+  });
+
+  it("continues purging a legacy deleted version that has no manifest key", async () => {
+    const first = await createSession();
+    await request(`/v1/owners/${ownerId}/upload-sessions/${first.sessionId}/files/index.html`, {
+      method: "PUT", headers: { "content-type": "text/html", "X-Content-SHA256": await sha256(first.html) }, body: first.html,
+    });
+    await request(`/v1/owners/${ownerId}/upload-sessions/${first.sessionId}/complete`, {
+      method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+    expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${first.versionId}`, {
+      method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() },
+    })).status).toBe(200);
+    await env.DB.prepare("UPDATE publication_versions SET manifest_key = NULL, retention_until = datetime('now', '-1 second') WHERE id = ?").bind(first.versionId).run();
+
+    await cleanupPublicationStorage(workerEnv);
+
+    expect(await env.PUBLICATIONS.get(r2Key(ownerId, first.publicationId, first.versionId, "index.html"))).toBeNull();
+    expect(await env.DB.prepare("SELECT storage_purged_at FROM publication_versions WHERE id = ?").bind(first.versionId).first<{ storage_purged_at: string | null }>())
+      .toMatchObject({ storage_purged_at: expect.any(String) });
   });
 
   it("restores the version that was active at revoke time, not a newer staged version", async () => {

@@ -11,6 +11,7 @@ const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 256 * 1024 * 1024;
 const PARALLELISM = 4;
 const REQUEST_TIMEOUT_MS = 30_000;
+const UPLOAD_TIMEOUT_MS = 300_000;
 const MAX_RETRY_DELAY_MS = 2_000;
 export const WORKER_CREDENTIAL_FILE = "worker-credentials.json";
 export const REQUIRED_WORKER_CAPABILITIES = Object.freeze([
@@ -146,7 +147,8 @@ async function discardResponse(response) {
 
 export function createWorkerClient({
   origin, ownerId, token, fetchImpl = fetch, retries = 2,
-  timeoutMs = REQUEST_TIMEOUT_MS, sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)), random = Math.random
+  timeoutMs = REQUEST_TIMEOUT_MS, uploadTimeoutMs = UPLOAD_TIMEOUT_MS,
+  sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)), random = Math.random
 } = {}) {
   const baseUrl = normalizeWorkerOrigin(origin, { allowLoopbackHttp: true });
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(ownerId || ""))) throw appError("Worker owner ID is invalid.");
@@ -159,7 +161,7 @@ export function createWorkerClient({
     let lastError;
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      const timeout = setTimeout(() => controller.abort(), raw ? uploadTimeoutMs : timeoutMs);
       try {
         const requestBody = bodyFactory ? bodyFactory() : raw ? body : body === undefined ? undefined : JSON.stringify(body);
         const response = await fetchImpl(`${baseUrl}${pathname}`, {

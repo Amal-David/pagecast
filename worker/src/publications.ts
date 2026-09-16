@@ -62,6 +62,8 @@ const MAX_MANIFEST_FILES = 25;
 const MAX_MANIFEST_BYTES = 256 * 1024 * 1024;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_PATH_BYTES = 256;
+const MIN_PASSWORD_ITERATIONS = 100_000;
+const MAX_PASSWORD_ITERATIONS = 1_000_000;
 const UNLISTED_CAPABILITY_BYTES = 16;
 const UNLISTED_CAPABILITY_HEX_LENGTH = UNLISTED_CAPABILITY_BYTES * 2;
 const MAX_SLUG_LENGTH = 63;
@@ -168,7 +170,7 @@ async function setAccessPolicy(db: D1Database, ownerId: string, packet: Publicat
   const { publicationId, mode, approvalState, passwordHash, passwordSalt, passwordIterations, expiresAt } = packet.mutation.data;
   const changesExpiry = Object.prototype.hasOwnProperty.call(packet.mutation.data, "expiresAt");
   if (typeof publicationId !== "string" || !isAccessMode(mode) || !isApprovalState(approvalState) ||
-    (mode === "password" && (typeof passwordHash !== "string" || !/^[a-f0-9]{64}$/.test(passwordHash) || typeof passwordSalt !== "string" || passwordSalt.length < 16 || !Number.isInteger(passwordIterations))) ||
+    (mode === "password" && (typeof passwordHash !== "string" || !/^[a-f0-9]{64}$/.test(passwordHash) || typeof passwordSalt !== "string" || passwordSalt.length < 16 || !validPasswordIterations(passwordIterations))) ||
     (changesExpiry && expiresAt !== null && (typeof expiresAt !== "string" || !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now()))) {
     return terminal(db, ownerId, packet, 400, { error: "invalid_access_policy" });
   }
@@ -467,8 +469,13 @@ async function renamePublication(db: D1Database, ownerId: string, packet: Public
 async function revokePublication(db: D1Database, ownerId: string, packet: PublicationPacket<"revoke">): Promise<Response> {
   const publicationId = packet.mutation.data.publicationId;
   if (typeof publicationId !== "string") return terminal(db, ownerId, packet, 400, { error: "invalid_publication" });
-  const publication = await db.prepare("SELECT active_version_id FROM publications WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").bind(publicationId, ownerId).first<{ active_version_id: string | null }>();
+  const publication = await db.prepare("SELECT active_version_id, state FROM publications WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").bind(publicationId, ownerId).first<{ active_version_id: string | null; state: string }>();
   if (!publication) return terminal(db, ownerId, packet, 404, { error: "publication_not_found" });
+  if (publication.state === "revoked") {
+    const body = { publicationId, revoked: true };
+    try { await db.batch([receiptStatement(db, ownerId, packet, 200, body)]); } catch { return failure(); }
+    return success(200, body);
+  }
   try {
     await db.batch([
       db.prepare("UPDATE publication_versions SET status = 'superseded', generation = generation + 1 WHERE id = ? AND owner_id = ?").bind(publication.active_version_id, ownerId),
@@ -501,10 +508,10 @@ export async function cleanupPublicationStorage(env: { DB: D1Database; PUBLICATI
     await env.PUBLICATIONS.delete(files.results.map((file) => file.r2_key));
     await env.DB.prepare("UPDATE upload_sessions SET status = 'expired' WHERE id = ? AND status = 'open'").bind(session.id).run();
   }
-  const versions = await env.DB.prepare("SELECT v.id FROM publication_versions v JOIN publications p ON p.id = v.publication_id WHERE v.deleted_at IS NOT NULL AND v.storage_purged_at IS NULL AND (v.retention_until IS NULL OR v.retention_until <= CURRENT_TIMESTAMP) AND (p.active_version_id IS NULL OR p.active_version_id != v.id) LIMIT 25").all<{ id: string }>();
+  const versions = await env.DB.prepare("SELECT v.id, v.manifest_key FROM publication_versions v JOIN publications p ON p.id = v.publication_id WHERE v.deleted_at IS NOT NULL AND v.storage_purged_at IS NULL AND (v.retention_until IS NULL OR v.retention_until <= CURRENT_TIMESTAMP) AND (p.active_version_id IS NULL OR p.active_version_id != v.id) LIMIT 25").all<{ id: string; manifest_key: string | null }>();
   for (const version of versions.results) {
     const files = await env.DB.prepare("SELECT r2_key FROM version_files WHERE version_id = ?").bind(version.id).all<{ r2_key: string }>();
-    const keys = files.results.map((file) => file.r2_key);
+    const keys = [...files.results.map((file) => file.r2_key), ...(version.manifest_key ? [version.manifest_key] : [])];
     if (keys.length) await env.PUBLICATIONS.delete(keys);
     await env.DB.batch([
       env.DB.prepare("DELETE FROM version_files WHERE version_id = ?").bind(version.id),
@@ -538,3 +545,4 @@ function isLinkKind(value: unknown): value is "public" | "unlisted" { return val
 function isAccessMode(value: unknown): value is "public" | "unlisted" | "password" | "allowlist" { return value === "public" || value === "unlisted" || value === "password" || value === "allowlist"; }
 function isApprovalState(value: unknown): value is "approved" | "pending" | "rejected" { return value === "approved" || value === "pending" || value === "rejected"; }
 function isGrantPermission(value: unknown): value is "view" | "comment" | "edit" { return value === "view" || value === "comment" || value === "edit"; }
+function validPasswordIterations(value: unknown): value is number { return typeof value === "number" && Number.isInteger(value) && value >= MIN_PASSWORD_ITERATIONS && value <= MAX_PASSWORD_ITERATIONS; }

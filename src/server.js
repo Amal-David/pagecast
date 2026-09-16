@@ -5978,10 +5978,10 @@ async function handleApi(
   async function revokeSnapshotPublications(publications) {
     let revokedCount = 0;
     for (const publication of publications) {
-      assertPagesPublication({ publication });
       if (publication.revokedAt || publication.kind !== "snapshot") {
         continue;
       }
+      assertPagesPublication({ publication });
       const slug = publication.slug || publication.token;
       const pagesConfig = pagesConfigForPublication(publication, configStore.get().pages);
       await store.beginOperations([
@@ -6345,7 +6345,7 @@ async function handleApi(
         automations: () => [read("webhooks", () => client.webhooks()), read("jobs", async () => {
           const jobs = await client.jobs();
           const items = Array.isArray(jobs.jobs) ? jobs.jobs : [];
-          return { ...jobs, jobs: items.map(({ artifactKey, ...job }) => ({ ...job, artifactAvailable: Boolean(artifactKey), contentType: null })) };
+          return { ...jobs, jobs: items.map(({ artifactKey, ...job }) => ({ ...job, artifactAvailable: job.hasArtifact === true, contentType: null })) };
         })]
       };
       const entries = await Promise.all(resources[section]());
@@ -7264,7 +7264,7 @@ async function handleApi(
     if (!reportBeforeRevoke) {
       throw appError("Report was not found.", 404);
     }
-    if (reportBeforeRevoke.publications?.some((publication) => publication.target?.backend === "workers")) {
+    if (reportBeforeRevoke.publications?.some((publication) => publication.target?.backend === "workers" && !publication.revokedAt)) {
       throw appError("This report has a Worker publication. Use its Worker delivery controls instead.", 409);
     }
     const snapshotRevokedCount = await revokeSnapshotPublications(
@@ -7283,7 +7283,7 @@ async function handleApi(
     const id = decodeURIComponent(deleteMatch[1]);
     const reportBeforeDelete = store.get(id);
     if (reportBeforeDelete) {
-      if (reportBeforeDelete.publications?.some((publication) => publication.target?.backend === "workers")) {
+      if (reportBeforeDelete.publications?.some((publication) => publication.target?.backend === "workers" && !publication.revokedAt)) {
         throw appError("This report has a Worker publication. Use its Worker delivery controls instead.", 409);
       }
       await revokeSnapshotPublications(reportBeforeDelete.publications || []);
@@ -8573,7 +8573,8 @@ export async function publishReportSnapshot(options = {}) {
           backend: "workers",
           expiresAt: options.expiresAt,
           linkKind: options.linkKind,
-          drop: options.drop === true
+          drop: options.drop === true,
+          attachToReportId: options.attachToReportId
         } : {})
       },
       { fetchImpl: options.commandFetchImpl || fetch }

@@ -1,6 +1,6 @@
 import { auditStatement } from "./audit";
 import { findIdempotencyReceipt, idempotencyReceiptStatement, resolveIdempotencyReceipt } from "./idempotency";
-import { enqueueJobRecord, enqueueWebhookDelivery, parseJsonObject, validateJobInput, validateWebhookDestination, validateWebhookEventTypes } from "./jobs";
+import { enqueueJobRecord, enqueueWebhookDelivery, validateJobInput, validateWebhookDestination, validateWebhookEventTypes } from "./jobs";
 import type { Env, JobKind } from "./types";
 
 export type OperationsMutation =
@@ -65,13 +65,14 @@ async function rotateWebhook(env: Env, ownerId: string, packet: Packet): Promise
 
 async function updateWebhook(env: Env, ownerId: string, packet: Packet): Promise<Response> {
   const { webhookId: id, destination: suppliedDestination, eventTypes: suppliedEvents, disabled } = packet.mutation.data as Extract<OperationsMutation, { operation: "update-webhook" }>["data"];
-  const existing = await env.DB.prepare("SELECT destination, event_types_json, secret_version FROM webhook_subscriptions WHERE id = ? AND owner_id = ?").bind(id, ownerId).first<{ destination: string; event_types_json: string; secret_version: number }>();
+  const existing = await env.DB.prepare("SELECT destination, event_types_json, secret_version, disabled_at FROM webhook_subscriptions WHERE id = ? AND owner_id = ?").bind(id, ownerId).first<{ destination: string; event_types_json: string; secret_version: number; disabled_at: string | null }>();
   if (!existing) return terminal(env, ownerId, packet, 404, { error: "webhook_not_found" });
   const destination = suppliedDestination === undefined ? existing.destination : validateWebhookDestination(suppliedDestination);
-  const eventTypes = suppliedEvents === undefined ? validateWebhookEventTypes(parseJsonObject(existing.event_types_json)) : validateWebhookEventTypes(suppliedEvents);
+  const eventTypes = suppliedEvents === undefined ? validateWebhookEventTypes(parseJson(existing.event_types_json)) : validateWebhookEventTypes(suppliedEvents);
   if (!destination || !eventTypes || (disabled !== undefined && typeof disabled !== "boolean")) return terminal(env, ownerId, packet, 400, { error: "invalid_webhook" });
-  const body = { id, destination, eventTypes, secretVersion: existing.secret_version, disabled: disabled === true };
-  try { await env.DB.batch([idempotencyReceiptStatement(env.DB, ownerId, packet, 200, body), env.DB.prepare("UPDATE webhook_subscriptions SET destination = ?, event_types_json = ?, disabled_at = CASE WHEN ? THEN COALESCE(disabled_at, CURRENT_TIMESTAMP) ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_id = ?").bind(destination, JSON.stringify(eventTypes), disabled === true ? 1 : 0, id, ownerId), auditStatement(env.DB, { ownerId, actorId: packet.actorId, action: "webhook.updated", resourceType: "webhook", resourceId: id })]); } catch { return conflictOrFailure(env, ownerId, packet); }
+  const isDisabled = disabled === undefined ? existing.disabled_at !== null : disabled;
+  const body = { id, destination, eventTypes, secretVersion: existing.secret_version, disabled: isDisabled };
+  try { await env.DB.batch([idempotencyReceiptStatement(env.DB, ownerId, packet, 200, body), env.DB.prepare("UPDATE webhook_subscriptions SET destination = ?, event_types_json = ?, disabled_at = CASE WHEN ? IS NULL THEN disabled_at WHEN ? THEN COALESCE(disabled_at, CURRENT_TIMESTAMP) ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_id = ?").bind(destination, JSON.stringify(eventTypes), disabled === undefined ? null : 1, disabled === true ? 1 : 0, id, ownerId), auditStatement(env.DB, { ownerId, actorId: packet.actorId, action: "webhook.updated", resourceType: "webhook", resourceId: id })]); } catch { return conflictOrFailure(env, ownerId, packet); }
   return Response.json({ status: 200, body });
 }
 
@@ -137,3 +138,4 @@ async function retryJob(env: Env, ownerId: string, packet: Packet): Promise<Resp
 
 async function terminal(env: Env, ownerId: string, packet: Packet, status: number, body: Record<string, unknown>): Promise<Response> { try { await env.DB.batch([idempotencyReceiptStatement(env.DB, ownerId, packet, status, body)]); return Response.json({ status, body }); } catch { return conflictOrFailure(env, ownerId, packet); } }
 async function conflictOrFailure(env: Env, ownerId: string, packet: Packet): Promise<Response> { const existing = await findIdempotencyReceipt(env.DB, ownerId, packet.idempotencyKey); return existing ? Response.json(resolveIdempotencyReceipt(existing, packet.fingerprint)) : Response.json({ status: 502, body: { error: "mutation_failed" } }); }
+function parseJson(value: string): unknown { try { return JSON.parse(value); } catch { return null; } }

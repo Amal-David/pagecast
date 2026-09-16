@@ -6,9 +6,9 @@ import worker from "../src/index";
 const testEnv = { ...env, ADMIN_TOKEN: "operations-bootstrap", WEBHOOK_SIGNING_KEY: "operations-webhook-key", JOBS: { send: async () => undefined } } as unknown as Env;
 const fetchWorker = worker.fetch! as unknown as (request: Request, env: Env, ctx: ExecutionContext) => Promise<Response>;
 
-function request(ownerId: string, path: string, idempotencyKey: string, body: Record<string, unknown>) {
+function request(ownerId: string, path: string, idempotencyKey: string, body: Record<string, unknown>, method = "POST") {
   return new Request(`https://pagecast.test/v1/owners/${ownerId}/${path}`, {
-    method: "POST",
+    method,
     headers: { Authorization: "Bearer operations-bootstrap", "Idempotency-Key": idempotencyKey, "content-type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -37,6 +37,20 @@ describe("owner-coordinated job and webhook operations", () => {
     expect((await env.DB.prepare("SELECT response_body FROM idempotency_keys WHERE owner_id = ? AND idempotency_key = ?").bind(ownerId, key).first<{ response_body: string }>())?.response_body).not.toContain(created.secret);
     const conflict = await fetchWorker(request(ownerId, "webhooks", key, { destination: "https://hooks.example.test/other", eventTypes: ["publication.published"] }), testEnv, {} as ExecutionContext);
     expect(conflict.status).toBe(409);
+  });
+
+  it("preserves a disabled webhook when a PATCH changes only its destination", async () => {
+    const ownerId = `operations-owner-${crypto.randomUUID()}`;
+    await env.DB.prepare("INSERT INTO owners (id) VALUES (?)").bind(ownerId).run();
+    const created = await fetchWorker(request(ownerId, "webhooks", `create-${crypto.randomUUID()}`, { destination: "https://hooks.example.test/pagecast", eventTypes: ["publication.published"] }), testEnv, {} as ExecutionContext);
+    const webhook = await created.json() as { id: string };
+    await env.DB.prepare("UPDATE webhook_subscriptions SET disabled_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_id = ?").bind(webhook.id, ownerId).run();
+
+    const updated = await fetchWorker(request(ownerId, `webhooks/${webhook.id}`, `update-${crypto.randomUUID()}`, { destination: "https://hooks.example.test/updated" }, "PATCH"), testEnv, {} as ExecutionContext);
+
+    expect(updated.status).toBe(200);
+    expect(await updated.json()).toMatchObject({ id: webhook.id, disabled: true });
+    expect(await env.DB.prepare("SELECT destination, disabled_at FROM webhook_subscriptions WHERE id = ? AND owner_id = ?").bind(webhook.id, ownerId).first<{ destination: string; disabled_at: string | null }>()).toMatchObject({ destination: "https://hooks.example.test/updated", disabled_at: expect.any(String) });
   });
 
   it("serializes job creation through the owner receipt and returns the original job on replay", async () => {

@@ -15,7 +15,7 @@ const ENQUEUE_RETRY_SECONDS = 300;
 const RETENTION_BATCH_SIZE = 100;
 
 export interface WebhookBody { id: string; destination: string; eventTypes: string[]; secret?: string; secretVersion: number; disabledAt?: string | null }
-export interface JobBody { id: string; kind: JobKind; publicationId: string | null; versionId: string | null; status: string; dedupeKey: string; artifactKey?: string | null; errorCode?: string | null }
+export interface JobBody { id: string; kind: JobKind; publicationId: string | null; versionId: string | null; status: string; dedupeKey: string; hasArtifact: boolean; errorCode?: string | null }
 type DeliveryFetcher = (request: Request) => Promise<Response>;
 
 interface WebhookRow { id: string; destination: string; event_types_json: string; secret_version: number; disabled_at: string | null }
@@ -171,7 +171,13 @@ export async function processJobMessage(env: Env, message: JobMessage): Promise<
     if (expired.meta.changes && job.publication_id) await createOutboxEvent(env, job.owner_id, "publication.expired", { publicationId: job.publication_id, versionId: job.version_id }, `publication.expired:${job.publication_id}:${job.version_id ?? "none"}`);
   }
   if (job.kind === "cleanup") await cleanupVersionIfStillInactive(env, job);
-  if (job.kind === "link_check" || job.kind === "index") await runLocalInspection(env, job);
+  if (job.kind === "link_check" || job.kind === "index") {
+    try {
+      await runLocalInspection(env, job);
+    } catch (cause) {
+      return finishJob(env.DB, job, "failed", inspectionFailureCode(cause));
+    }
+  }
   if (job.cancelled_at) return finishJob(env.DB, job, "cancelled", "cancelled");
   await finishJob(env.DB, job, "completed", null);
 }
@@ -219,10 +225,10 @@ async function cleanupJobRetention(env: Env): Promise<void> {
 
 async function cleanupVersionIfStillInactive(env: Env, job: JobRow): Promise<void> {
   if (!job.version_id) return;
-  const version = await env.DB.prepare("SELECT v.id FROM publication_versions v JOIN publications p ON p.id = v.publication_id AND p.owner_id = v.owner_id WHERE v.id = ? AND v.owner_id = ? AND v.deleted_at IS NOT NULL AND v.retention_until <= CURRENT_TIMESTAMP AND v.storage_purged_at IS NULL AND (p.active_version_id IS NULL OR p.active_version_id <> v.id)").bind(job.version_id, job.owner_id).first<{ id: string }>();
+  const version = await env.DB.prepare("SELECT v.id, v.manifest_key FROM publication_versions v JOIN publications p ON p.id = v.publication_id AND p.owner_id = v.owner_id WHERE v.id = ? AND v.owner_id = ? AND v.deleted_at IS NOT NULL AND v.retention_until <= CURRENT_TIMESTAMP AND v.storage_purged_at IS NULL AND (p.active_version_id IS NULL OR p.active_version_id <> v.id)").bind(job.version_id, job.owner_id).first<{ id: string; manifest_key: string | null }>();
   if (!version) return;
   const files = await env.DB.prepare("SELECT r2_key FROM version_files WHERE version_id = ?").bind(job.version_id).all<{ r2_key: string }>();
-  await Promise.all(files.results.map((file) => env.PUBLICATIONS.delete(file.r2_key)));
+  await Promise.all([...files.results.map((file) => env.PUBLICATIONS.delete(file.r2_key)), ...(version.manifest_key ? [env.PUBLICATIONS.delete(version.manifest_key)] : [])]);
   await env.DB.prepare("UPDATE publication_versions SET storage_purged_at = CURRENT_TIMESTAMP WHERE id = ? AND storage_purged_at IS NULL").bind(job.version_id).run();
 }
 
@@ -278,6 +284,11 @@ async function runLocalInspection(env: Env, job: JobRow): Promise<void> {
     documents.push({ path: file.normalized_path, title: title ? textContent(title) : null, headings, excerpt });
   }
   await storeArtifact(env, job, JSON.stringify({ version: "v1", scope: "selected-immutable-version", requestedPath: requested, fileCount: manifest.size, documents, truncated: html.length > documents.length }), "application/json");
+}
+
+function inspectionFailureCode(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : "";
+  return ["inspection_version_required", "inspection_version_not_found", "artifact_too_large"].includes(message) ? message : "inspection_failed";
 }
 
 async function storeArtifact(env: Env, job: JobRow, body: ArrayBuffer | ReadableStream | string, contentType: string): Promise<void> {
@@ -446,5 +457,5 @@ async function browserUrl(env: Env, job: JobRow): Promise<string> {
   return new URL(targetPath, origin).toString();
 }
 function publicOrigin(value: unknown): string | null { try { const url = new URL(typeof value === "string" ? value : ""); return url.protocol === "https:" && !url.username && !url.password && !url.port && validHostname(url.hostname) && url.pathname === "/" && !url.search && !url.hash ? url.toString() : null; } catch { return null; } }
-function jobBody(row: Record<string, unknown>): JobBody { return { id: String(row.id), kind: row.kind as JobKind, publicationId: row.publication_id as string | null, versionId: row.version_id as string | null, status: String(row.status), dedupeKey: String(row.dedupe_key), artifactKey: row.artifact_key as string | null, errorCode: row.error_code as string | null }; }
+function jobBody(row: Record<string, unknown>): JobBody { return { id: String(row.id), kind: row.kind as JobKind, publicationId: row.publication_id as string | null, versionId: row.version_id as string | null, status: String(row.status), dedupeKey: String(row.dedupe_key), hasArtifact: typeof row.artifact_key === "string", errorCode: row.error_code as string | null }; }
 function jsonError(error: string, status: number): Response { return Response.json({ error }, { status }); }

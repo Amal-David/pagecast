@@ -18,7 +18,7 @@ import { createConfigStore, publishReportSnapshot, rollbackWorkerPublication, st
 import { materializeWorkerPublishRoot, publishWorkerSnapshotOneShot } from "../src/worker-publication-service.js";
 
 async function consumeWorkerUpload(options) {
-  if (!options.body?.[Symbol.asyncIterator]) return;
+  assert.equal(typeof options.body?.[Symbol.asyncIterator], "function", "uploads must supply a readable stream");
   const chunks = [];
   for await (const chunk of options.body) chunks.push(Buffer.from(chunk));
   const content = Buffer.concat(chunks);
@@ -251,6 +251,29 @@ test("Worker requests retry timed-out uploads and cancel retryable response bodi
   assert.equal(canceled, 1);
 });
 
+test("slow streamed uploads use their own deadline while control requests remain bounded", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-upload-deadline-"));
+  try {
+    await fs.writeFile(path.join(root, "index.html"), "slow upload");
+    const client = createWorkerClient({
+      origin: "https://worker.example", ownerId: "owner", token: "token", retries: 0,
+      timeoutMs: 5, uploadTimeoutMs: 500,
+      fetchImpl: async (url, options) => {
+        if (options.method === "PUT") {
+          await consumeWorkerUpload(options);
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          assert.equal(options.signal.aborted, false, "upload must outlive the control deadline");
+          return Response.json({ uploaded: true });
+        }
+        if (url.endsWith("/complete") || url.endsWith("/activate")) return Response.json({});
+        return new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("control deadline")), { once: true }));
+      }
+    });
+    await client.publish({ rootDir: root, title: "Slow", operation: { workerSessionId: "session", workerPublicationId: "pub", workerVersionId: "ver" } });
+    await assert.rejects(client.listVersions("pub"), /control deadline/);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test("Worker uploads run four at a time and checkpoint merged completed paths", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-worker-parallel-upload-"));
   try {
@@ -387,6 +410,7 @@ test("Worker create publish reaches activation without a temporal-dead-zone fail
         calls.push(`${options.method || "GET"} ${url}`);
         if (url.endsWith("/v1/status")) return Response.json({ apiVersion: 2, capabilities: ["publications.upload", "publications.access", "publications.versions"] });
         if (url.includes("upload-sessions") && options.method === "POST" && !url.includes("complete")) return Response.json({ sessionId: "session", publicationId: "publication", versionId: "version", slug: "worker-abc" });
+        if (options.method === "PUT" && url.endsWith("/access-policy")) return Response.json({ updated: true });
         if (options.method === "PUT") {
           await consumeWorkerUpload(options);
           return Response.json({ uploaded: true });
@@ -417,7 +441,8 @@ test("a live daemon owns a Worker folder publish instead of rejecting the held w
       requests.push(`${options.method || "GET"} ${url}`);
       if (url.endsWith("/v1/status")) return Response.json({ apiVersion: 2, capabilities: ["publications.upload", "publications.access", "publications.versions"] });
       if (url.includes("upload-sessions") && options.method === "POST" && !url.includes("complete")) return Response.json({ sessionId: "session", publicationId: "publication", versionId: "version", slug: "daemon-slug" });
-      if (options.method === "PUT") {
+      if (options.method === "PUT" && url.endsWith("/access-policy")) return Response.json({ updated: true });
+        if (options.method === "PUT") {
         await consumeWorkerUpload(options);
         return Response.json({ uploaded: true });
       }

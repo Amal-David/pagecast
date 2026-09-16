@@ -39,6 +39,26 @@ function request(path: string, token: string, init: RequestInit = {}) {
 beforeEach(installSchema);
 
 describe("actor-bound collaboration token and invitation flow", () => {
+  it("requires an idempotency key for collaboration grants and replays the same credential", async () => {
+    const path = `/v1/owners/${ownerId}/collaboration-grants`;
+    const body = JSON.stringify({ publicationId: "publication-http", actions: ["publication:view"] });
+    const withoutKey = await request(path, bootstrap, {
+      method: "POST", headers: { "content-type": "application/json" }, body,
+    });
+    expect(withoutKey.status).toBe(400);
+    expect(await env.DB.prepare("SELECT id FROM collaboration_grants").first()).toBeNull();
+
+    const headers = { "content-type": "application/json", "Idempotency-Key": "collaboration-grant-once" };
+    const first = await request(path, bootstrap, { method: "POST", headers, body });
+    const second = await request(path, bootstrap, { method: "POST", headers, body });
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    const firstBody = await first.json<{ id: string; credential: string }>();
+    const secondBody = await second.json<{ id: string; credential: string }>();
+    expect(secondBody).toEqual(firstBody);
+    expect(firstBody.credential).toMatch(new RegExp(`^pcg2_${firstBody.id}\\.`));
+  });
+
   it("requires the issued invitation exactly once before the actor can comment", async () => {
     const actor = await request(`/v1/owners/${ownerId}/actors`, bootstrap, { method: "POST", headers: { "content-type": "application/json", "Idempotency-Key": "actor" }, body: JSON.stringify({ actorId: "actor-http", displayName: "HTTP actor" }) });
     expect(actor.status).toBe(201);

@@ -1038,12 +1038,12 @@ async function workers(args) {
       return;
     }
     if (subcommand === "disconnect") {
-      const result = await configStore.disconnectWorker(optionValue(parsed, "profile"));
+      const result = await configStore.disconnectWorker(optionValue(parsed, "profile") || undefined);
       console.log(json ? JSON.stringify({ ok: true, workers: result.workers }) : "Worker connection removed.");
       return;
     }
     if (subcommand === "status") {
-      const { profile, client } = await configStore.workerClient(optionValue(parsed, "profile"));
+      const { profile, client } = await configStore.workerClient(optionValue(parsed, "profile") || undefined);
       const capability = await client.capabilities();
       const result = { origin: profile.origin, ownerId: profile.ownerId, health: { ok: true, checkedAt: new Date().toISOString(), ...capability } };
       console.log(json ? JSON.stringify({ ok: true, worker: result }) : `Worker ready: ${result.origin}`);
@@ -1061,7 +1061,7 @@ async function workers(args) {
       if (match.report.passwordProtected && migrationPassword.length < 12) {
         throw { message: "Migrating a protected Pages publication requires a new Worker --password of at least 12 characters.", statusCode: 400 };
       }
-      const result = await publishReportSnapshot({ path: match.report.sourcePath, label: match.publication.label, backend: "workers", newLink: true, password: migrationPassword, expiresAt: match.publication.expiresAt || null, linkKind: match.publication.drop === true ? "public" : "unlisted", drop: match.publication.drop === true, dataDir, workspaceId: homeInitialization?.workspaceId || dataDir });
+      const result = await publishReportSnapshot({ path: match.report.sourcePath, label: match.publication.label, backend: "workers", newLink: true, password: migrationPassword, expiresAt: match.publication.expiresAt || null, linkKind: match.publication.drop === true ? "public" : "unlisted", drop: match.publication.drop === true, attachToReportId: match.report.id, dataDir, workspaceId: homeInitialization?.workspaceId || dataDir });
       console.log(json ? JSON.stringify({ ok: true, ...result, preservedPagesUrl: match.publication.publicUrl }) : `Migrated to Worker: ${result.url}\nPages link preserved: ${match.publication.publicUrl}`);
       return;
     }
