@@ -17,6 +17,15 @@ import {
 import { createConfigStore, publishReportSnapshot, rollbackWorkerPublication, startServers } from "../src/server.js";
 import { materializeWorkerPublishRoot, publishWorkerSnapshotOneShot } from "../src/worker-publication-service.js";
 
+async function consumeWorkerUpload(options) {
+  if (!options.body?.[Symbol.asyncIterator]) return;
+  const chunks = [];
+  for await (const chunk of options.body) chunks.push(Buffer.from(chunk));
+  const content = Buffer.concat(chunks);
+  assert.equal(options.headers["Content-Length"], String(content.length));
+  assert.equal(options.headers["X-Content-SHA256"], createHash("sha256").update(content).digest("hex"));
+}
+
 test("Worker origins are HTTPS by default and allow explicit loopback development only", () => {
   assert.equal(normalizeWorkerOrigin("https://pagecast.example"), "https://pagecast.example");
   assert.throws(() => normalizeWorkerOrigin("http://pagecast.example"), /HTTPS/);
@@ -198,7 +207,10 @@ test("Worker upload resumes a journaled session with stable file idempotency and
         requests.push({ url, method: options.method, key: options.headers?.["Idempotency-Key"] });
         if (url.includes("/complete")) return Response.json({ status: "complete" });
         if (url.includes("/activate")) return Response.json({ publicationId: "pub", versionId: "ver", state: "published" });
-        if (options.method === "PUT") return Response.json({ uploaded: true });
+        if (options.method === "PUT") {
+          await consumeWorkerUpload(options);
+          return Response.json({ uploaded: true });
+        }
         throw new Error(`unexpected request ${url}`);
       }
     });
@@ -252,9 +264,13 @@ test("Worker uploads run four at a time and checkpoint merged completed paths", 
         if (options.method === "PUT") {
           active += 1;
           peak = Math.max(peak, active);
-          await new Promise((resolve) => setTimeout(resolve, 5));
-          active -= 1;
-          return Response.json({ uploaded: true });
+          try {
+            await consumeWorkerUpload(options);
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            return Response.json({ uploaded: true });
+          } finally {
+            active -= 1;
+          }
         }
         if (url.includes("upload-sessions") && options.method === "POST" && !url.includes("complete")) return Response.json({ sessionId: "session", publicationId: "publication", versionId: "version", slug: "slug" });
         if (url.includes("/complete")) return Response.json({ status: "complete" });
@@ -278,7 +294,11 @@ test("Worker upload resumes without re-uploading checkpointed paths", async () =
     const client = createWorkerClient({
       origin: "https://worker.example", ownerId: "owner", token: "token", retries: 0,
       fetchImpl: async (url, options = {}) => {
-        if (options.method === "PUT") { uploaded.push(decodeURIComponent(url.split("/").at(-1))); return Response.json({ uploaded: true }); }
+        if (options.method === "PUT") {
+          await consumeWorkerUpload(options);
+          uploaded.push(decodeURIComponent(url.split("/").at(-1)));
+          return Response.json({ uploaded: true });
+        }
         if (url.includes("/complete")) return Response.json({ status: "complete" });
         if (url.includes("/activate")) return Response.json({ state: "published" });
         throw new Error(`unexpected ${url}`);
@@ -298,7 +318,10 @@ test("a failed access-policy step prevents activation", async () => {
       origin: "https://worker.example", ownerId: "owner", token: "token", retries: 0,
       fetchImpl: async (url, options = {}) => {
         requests.push(url);
-        if (options.method === "PUT") return Response.json({ uploaded: true });
+        if (options.method === "PUT") {
+          await consumeWorkerUpload(options);
+          return Response.json({ uploaded: true });
+        }
         if (url.includes("/complete")) return Response.json({ status: "complete" });
         throw new Error(`unexpected request ${url}`);
       }
@@ -364,7 +387,10 @@ test("Worker create publish reaches activation without a temporal-dead-zone fail
         calls.push(`${options.method || "GET"} ${url}`);
         if (url.endsWith("/v1/status")) return Response.json({ apiVersion: 2, capabilities: ["publications.upload", "publications.access", "publications.versions"] });
         if (url.includes("upload-sessions") && options.method === "POST" && !url.includes("complete")) return Response.json({ sessionId: "session", publicationId: "publication", versionId: "version", slug: "worker-abc" });
-        if (options.method === "PUT") return Response.json({ uploaded: true });
+        if (options.method === "PUT") {
+          await consumeWorkerUpload(options);
+          return Response.json({ uploaded: true });
+        }
         if (url.includes("/complete")) return Response.json({ status: "complete" });
         if (url.includes("/activate")) return Response.json({ publicationId: "publication", versionId: "version", state: "published" });
         throw new Error(`unexpected ${options.method} ${url}`);
@@ -391,7 +417,10 @@ test("a live daemon owns a Worker folder publish instead of rejecting the held w
       requests.push(`${options.method || "GET"} ${url}`);
       if (url.endsWith("/v1/status")) return Response.json({ apiVersion: 2, capabilities: ["publications.upload", "publications.access", "publications.versions"] });
       if (url.includes("upload-sessions") && options.method === "POST" && !url.includes("complete")) return Response.json({ sessionId: "session", publicationId: "publication", versionId: "version", slug: "daemon-slug" });
-      if (options.method === "PUT") return Response.json({ uploaded: true });
+      if (options.method === "PUT") {
+        await consumeWorkerUpload(options);
+        return Response.json({ uploaded: true });
+      }
       if (url.includes("/complete")) return Response.json({ status: "complete" });
       if (url.includes("/activate")) return Response.json({ publicationId: "publication", versionId: "version", state: "published" });
       throw new Error(`unexpected ${options.method} ${url}`);
