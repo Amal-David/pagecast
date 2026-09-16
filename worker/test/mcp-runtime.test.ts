@@ -50,13 +50,13 @@ function isMappedCapability(entry: (typeof MCP_CAPABILITY_MAP)[number]): entry i
   return typeof entry.tool === "string";
 }
 
-async function call(body: unknown, actor = fullActor, expiresAt?: string) {
+async function call(body: unknown, actor = fullActor, expiresAt?: string, controlResult: Record<string, unknown> = { id: "safe-id", status: "ok", publicUrl: "https://pagecast.test/p/example" }) {
   const seen: Request[] = [];
   const response = await handleMcpRequest(request(body), env(expiresAt), {} as ExecutionContext, {
     authenticate: async () => actor,
     dispatchControl: async (input) => {
       seen.push(input);
-      return Response.json({ id: "safe-id", status: "ok", publicUrl: "https://pagecast.test/p/example" });
+      return Response.json(controlResult);
     },
   });
   return { response, seen };
@@ -139,6 +139,89 @@ describe("remote Pagecast MCP", () => {
     expect(seen[0].headers.get("Idempotency-Key")).toBe("revoke-once");
     const body = await response.text();
     expect(body).not.toContain("pcv2_example");
+  });
+
+  it("accepts the backend manifest shape and returns an authorized unlisted share result", async () => {
+    const shareSlug = `quarterly-${"a".repeat(32)}`;
+    const { response, seen } = await call({
+      jsonrpc: "2.0",
+      id: 9,
+      method: "tools/call",
+      params: {
+        name: "publication_create_upload_session",
+        arguments: {
+          mode: "create",
+          title: "Quarterly report",
+          slug: "quarterly",
+          linkKind: "unlisted",
+          manifest: [{ path: "index.html", bytes: 18, sha256: "a".repeat(64), contentType: "text/html" }],
+          idempotencyKey: "create-upload-once",
+        },
+      },
+    }, fullActor, undefined, { id: "safe-id", publicUrl: `https://pagecast.test/p/${shareSlug}/`, token: "must-not-leak" });
+    expect(seen).toHaveLength(1);
+    expect(await seen[0].json()).toMatchObject({ manifest: [{ path: "index.html", bytes: 18, contentType: "text/html" }] });
+    const text = await response.text();
+    expect(text).not.toContain("[redacted]");
+    expect(text).toContain(`https://pagecast.test/p/${shareSlug}/`);
+    expect(text).not.toContain("must-not-leak");
+  });
+
+  it("returns one-time credentials only from the tools that explicitly issue them", async () => {
+    const sensitive = { passwordHash: "password-hash", credentialHash: "credential-hash", r2Key: "owners/private", cookie: "session-cookie" };
+    const issued = [
+      {
+        name: "access_create_grant",
+        arguments: { publicationId: "publication", grant: {}, idempotencyKey: "grant-once" },
+        result: { ...sensitive, credential: "pcg_grant.secret" },
+        expected: "pcg_grant.secret",
+      },
+      {
+        name: "membership_invite",
+        arguments: { membership: {}, idempotencyKey: "invite-once" },
+        result: { ...sensitive, invitation: "pcm2_invitation.secret" },
+        expected: "pcm2_invitation.secret",
+      },
+      {
+        name: "collaboration_grant_create",
+        arguments: { grant: {}, idempotencyKey: "collaboration-grant-once" },
+        result: { ...sensitive, credential: "pcg2_collaboration.secret" },
+        expected: "pcg2_collaboration.secret",
+      },
+      {
+        name: "webhook_create",
+        arguments: { webhook: {}, idempotencyKey: "webhook-once" },
+        result: { ...sensitive, secret: "pcwh_webhook.secret" },
+        expected: "pcwh_webhook.secret",
+      },
+    ];
+    for (const item of issued) {
+      const { response } = await call({ jsonrpc: "2.0", id: item.name, method: "tools/call", params: { name: item.name, arguments: item.arguments } }, fullActor, undefined, item.result);
+      const body = JSON.stringify(await jsonRpc(response));
+      expect(body).toContain(item.expected);
+      expect(body).not.toContain("password-hash");
+      expect(body).not.toContain("credential-hash");
+      expect(body).not.toContain("owners/private");
+      expect(body).not.toContain("session-cookie");
+    }
+
+    const ordinary = await call({ jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "publication_list", arguments: {} } }, fullActor, undefined, { ...sensitive, credential: "pcg_hidden.secret", invitation: "pcm2_hidden.secret", secret: "pcwh_hidden.secret", token: "pcv2_hidden.secret" });
+    const ordinaryBody = JSON.stringify(await jsonRpc(ordinary.response));
+    expect(ordinaryBody).not.toContain("pcg_hidden.secret");
+    expect(ordinaryBody).not.toContain("pcm2_hidden.secret");
+    expect(ordinaryBody).not.toContain("pcwh_hidden.secret");
+    expect(ordinaryBody).not.toContain("pcv2_hidden.secret");
+  });
+
+  it("rejects an object manifest before it reaches the upload-session handler", async () => {
+    const result = await call({
+      jsonrpc: "2.0",
+      id: 10,
+      method: "tools/call",
+      params: { name: "publication_create_upload_session", arguments: { mode: "create", title: "Invalid", slug: "invalid", linkKind: "public", manifest: { path: "index.html" }, idempotencyKey: "invalid-manifest" } },
+    });
+    expect((await jsonRpc(result.response) as { result: { isError: boolean } }).result.isError).toBe(true);
+    expect(result.seen).toHaveLength(0);
   });
 
   it("rejects an inline base64 upload over 1 MiB before it reaches the HTTP upload route", async () => {

@@ -207,6 +207,8 @@ export function createWorkerClient({
       }
       return {
         apiVersion: status.apiVersion,
+        ownerId: status.ownerId,
+        actor: status.actor,
         capabilities: [...available].sort(),
         deployment: status.deployment,
         environment: status.environment,
@@ -287,7 +289,7 @@ export function createWorkerClient({
               "Content-Length": String(file.bytes),
               "X-Content-SHA256": file.sha256
             },
-            idempotencyKey: `${key}:${file.path}`
+            idempotencyKey: createHash("sha256").update(`${key}\0${file.path}`).digest("hex")
           });
           return file.path;
         }));

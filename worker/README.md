@@ -181,6 +181,13 @@ negotiation, social metadata, cache policy, public/unlisted/password/allowlist
 access, grants, and expiry. Unlisted URLs contain a memorable prefix plus 128
 bits of random capability entropy. They are bearer links, not user identity.
 
+The `allowlist` mode restricts delivery to a sharing credential or a session
+created by redeeming it. It does not look up recipient email addresses.
+Password links open a password form; restricted links open a credential form.
+Recipients can redeem a credential at `/p/<slug>/_auth/grant#<credential>`.
+The fragment is removed before form submission. Sessions remain scoped to that
+publication's isolated hostname; revoking a grant invalidates its sessions.
+
 ## Analytics, audit, and retention
 
 The Worker HMACs the transient connection address before an analytics event is
@@ -211,7 +218,7 @@ Without that provider, those jobs fail visibly with `unsupported_provider`; a
 provider error during the job fails with `provider_failed`. Pagecast does not
 claim that a paid Browser service is active.
 
-## Custom domains
+## Custom domains and isolated protected content
 
 Follow Cloudflare's [Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)
 guide and add the domain in **Cloudflare Dashboard → Workers & Pages → Pagecast
@@ -221,10 +228,35 @@ guide and add the domain in **Cloudflare Dashboard → Workers & Pages → Pagec
 {
   "vars": {
     "ENVIRONMENT": "production",
-    "PUBLIC_ORIGIN": "https://reports.example.com"
+    "PUBLIC_ORIGIN": "https://reports.example.com",
+    "CONTENT_ORIGIN": "https://content.reports.example.com"
   }
 }
 ```
+
+The one-click deployment and a single `PUBLIC_ORIGIN` remain sufficient for
+public and unlisted links. Add `CONTENT_ORIGIN` only when the deployment also
+needs password or grant-protected delivery.
+
+`CONTENT_ORIGIN` is required before Pagecast serves password-protected or
+grant-protected publications. It must be an HTTPS origin with no path, query,
+fragment, credentials, or port. Configure proxied wildcard DNS, a Worker route
+such as `https://*.content.reports.example.com/*`, and TLS coverage for
+`*.content.reports.example.com`; Pagecast then serves each publication from
+`<publication-id>.content.reports.example.com`. The browser sessions are
+host-only, and Pagecast redirects a shared-host URL to that exact publication
+host before sending any bytes. This prevents arbitrary HTML from one
+publication reading protected content from another publication on the same
+origin. Cloudflare Custom Domains require exact hostnames, so this setup uses
+[Worker routes](https://developers.cloudflare.com/workers/configuration/routing/routes/)
+and [wildcard DNS](https://developers.cloudflare.com/dns/manage-dns-records/reference/wildcard-dns-records/).
+Ensure the certificate covers the full content-host depth; a certificate for
+`*.example.com` does not cover `publication.content.reports.example.com`.
+
+Without `CONTENT_ORIGIN`, public and unlisted publications can still use the
+shared Worker hostname, but password and grant delivery fails closed with 503.
+Set the wildcard routing, TLS, and `CONTENT_ORIGIN` before enabling either protected
+access mode.
 
 Redeploy, verify `/health` and authenticated `/v1/status`, then reconnect local
 Pagecast to the custom origin. Adding the domain and changing DNS are operator

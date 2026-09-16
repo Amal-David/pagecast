@@ -1594,24 +1594,52 @@ export function createConfigStore({
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(normalizedOwnerId)) {
       throw appError("Worker owner ID is invalid.", 400);
     }
-    const profileId = randomBytes(12).toString("base64url");
+    const matchingProfiles = config.workers.profiles.filter((profile) =>
+      profile.origin === normalizedOrigin && profile.ownerId === normalizedOwnerId
+    );
+    const existingProfile = matchingProfiles.find((profile) => profile.profileId === config.workers.activeProfileId)
+      || (matchingProfiles.length === 1 ? matchingProfiles[0] : null);
+    if (matchingProfiles.length > 1 && !existingProfile) {
+      throw appError("More than one Worker profile matches this owner and origin. Disconnect the duplicate profile before rotating its credential.", 409);
+    }
+    const profileId = existingProfile?.profileId || randomBytes(12).toString("base64url");
     const client = createWorkerClient({ origin: normalizedOrigin, ownerId: normalizedOwnerId, token, fetchImpl });
     const capability = await client.capabilities();
+    if (capability.actor !== "token" || capability.ownerId !== normalizedOwnerId) {
+      throw appError("Use a scoped Worker token belonging to the selected owner.", 403);
+    }
+    const credentials = await readWorkerCredentials({ dataDir });
+    const previousToken = credentials[profileId];
     await writeWorkerCredential({ dataDir, profileId, token });
     try {
       return await enqueueConfigMutation((current) => normalizeConfig({
         ...current,
         workers: {
           activeProfileId: profileId,
-          profiles: [...current.workers.profiles, {
-            profileId, origin: normalizedOrigin, ownerId: normalizedOwnerId,
-            credentialRef: WORKER_CREDENTIAL_FILE, allowLoopbackHttp,
-            health: normalizeWorkerHealth({ checkedAt: nowIso(), ok: true, ...capability })
-          }]
+          profiles: existingProfile
+            ? current.workers.profiles.map((profile) => profile.profileId === profileId
+              ? {
+                  ...profile,
+                  health: normalizeWorkerHealth({ checkedAt: nowIso(), ok: true, ...capability })
+                }
+              : profile)
+            : [...current.workers.profiles, {
+                profileId, origin: normalizedOrigin, ownerId: normalizedOwnerId,
+                credentialRef: WORKER_CREDENTIAL_FILE, allowLoopbackHttp,
+                health: normalizeWorkerHealth({ checkedAt: nowIso(), ok: true, ...capability })
+              }]
         }
       }));
     } catch (error) {
-      await removeWorkerCredential({ dataDir, profileId }).catch(() => {});
+      try {
+        if (typeof previousToken === "string" && previousToken) {
+          await writeWorkerCredential({ dataDir, profileId, token: previousToken });
+        } else {
+          await removeWorkerCredential({ dataDir, profileId });
+        }
+      } catch (rollbackError) {
+        throw appError(`Worker profile changes could not be saved and the prior credential could not be restored (${rollbackError.message}).`, 500);
+      }
       throw error;
     }
   }
@@ -6395,13 +6423,21 @@ async function handleApi(
   if (workerAccessMatch && req.method === "PUT") {
     const body = await readJsonBody(req);
     if (body.confirm !== true || !["public", "unlisted", "password", "allowlist"].includes(body.mode)) throw appError("Confirm a valid access mode before continuing.", 400);
+    if (body.mode === "password" && (typeof body.password !== "string" || body.password.trim().length < 12)) {
+      throw appError("Enter a password of at least 12 characters before enabling password access.", 400);
+    }
     const token = decodeURIComponent(workerAccessMatch[1]);
-    await withWorkerPublication(token, async ({ match, client, publicationId }) => {
+    const result = await withWorkerPublication(token, async ({ match, client, publicationId }) => {
       await client.setAccessPolicy(publicationId, { mode: body.mode, ...(typeof body.password === "string" ? { password: body.password } : {}), ...(body.expiresAt === null || typeof body.expiresAt === "string" ? { expiresAt: body.expiresAt } : {}) });
-      match.publication.target = { ...match.publication.target, accessMode: body.mode };
+      const policy = await client.accessPolicy(publicationId);
+      if (!policy || !["public", "unlisted", "password", "allowlist"].includes(policy.mode)) {
+        throw appError("The Worker updated access but did not return the persisted policy. Refresh before making another access change.", 502);
+      }
+      match.publication.target = { ...match.publication.target, accessMode: policy.mode };
       await store.syncSnapshot(token);
+      return { token, accessMode: policy.mode, policy };
     });
-    sendJson(res, 200, { token, accessMode: body.mode });
+    sendJson(res, 200, result);
     return;
   }
 
@@ -6410,8 +6446,17 @@ async function handleApi(
     const body = await readJsonBody(req);
     if (body.confirm !== true || (body.expiresAt !== null && typeof body.expiresAt !== "string")) throw appError("Confirm a valid access expiry before continuing.", 400);
     const token = decodeURIComponent(workerAccessExpiryMatch[1]);
-    await withWorkerPublication(token, ({ client, publicationId }) => client.setExpiry(publicationId, body.expiresAt));
-    sendJson(res, 200, { token, expiresAt: body.expiresAt });
+    const result = await withWorkerPublication(token, async ({ match, client, publicationId }) => {
+      await client.setExpiry(publicationId, body.expiresAt);
+      const policy = await client.accessPolicy(publicationId);
+      if (!policy || !["public", "unlisted", "password", "allowlist"].includes(policy.mode)) {
+        throw appError("The Worker updated expiry but did not return the persisted policy. Refresh before making another access change.", 502);
+      }
+      match.publication.target = { ...match.publication.target, accessMode: policy.mode };
+      await store.syncSnapshot(token);
+      return { token, accessMode: policy.mode, policy };
+    });
+    sendJson(res, 200, result);
     return;
   }
 

@@ -63,8 +63,8 @@ port mapping.
   the edge; on the production site, expired links return `410` and revoked links
   return `404` after the cleanup deployment. Older immutable deployment URLs
   retain the content and gate state they originally shipped with until pruned.
-- A **Worker allowlist** can admit verified collaboration identity or a scoped
-  access grant. Password sessions are signed and versioned; changing policy or
+- A **Worker allowlist** requires a scoped sharing credential, redeemable for a
+  browser session. It is not an email-address allowlist. Password sessions are signed and versioned; changing policy or
   password invalidates older sessions. Failed password attempts use durable,
   HMAC-derived throttling keys.
 - Existing word-only URLs remain valid and are not silently rotated. They do
@@ -83,6 +83,13 @@ Cloudflare Access service-token headers, so protecting `/v1/*` requires an
 operator-provided route for that client.
 
 ## Worker control plane
+
+Executable Worker publications use separate publication hostnames when
+`CONTENT_ORIGIN` is configured. Protected content is unavailable without that
+configuration. Shared-host links redirect before content or session cookies are
+sent; sessions use host-only `__Host-` cookies on the publication hostname.
+All publication paths enforce the matching hostname, including asset and login
+requests. An operator must configure wildcard DNS, Worker routing, and TLS.
 
 - The bootstrap `ADMIN_TOKEN` can create the first owner-scoped token. Do not
   enter it into the local dashboard or use it for routine publishing.

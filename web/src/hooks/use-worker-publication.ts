@@ -51,7 +51,7 @@ export function useWorkerWebhookDeliveries(token: string, webhookId: string | nu
 export function useWorkerAction<T>(
   token: string,
   action: (input: T) => Promise<WorkerMutationResult>,
-  success: string,
+  success: string | ((result: WorkerMutationResult) => string),
   options: { onCredential?: (credential: string) => void } = {}
 ) {
   const queryClient = useQueryClient();
@@ -62,10 +62,11 @@ export function useWorkerAction<T>(
       const credential = [result.credential, result.secret, result.invitation, result.token]
         .find((value): value is string => typeof value === "string") || "";
       if (credential) options.onCredential?.(credential);
+      return typeof success === "function" ? success(result) : success;
     },
     gcTime: 0,
-    onSuccess: () => {
-      toast.success(success);
+    onSuccess: (successMessage) => {
+      toast.success(successMessage);
       void Promise.all([
         queryClient.invalidateQueries({ queryKey: workerKeys.publication(token) }),
         queryClient.invalidateQueries({ queryKey: workerKeys.profile }),

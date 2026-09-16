@@ -153,7 +153,7 @@ async function expireTransientRows(db: D1Database): Promise<void> {
   await db
     .prepare("DELETE FROM idempotency_keys WHERE id IN (SELECT id FROM idempotency_keys WHERE expires_at <= CURRENT_TIMESTAMP ORDER BY expires_at LIMIT 100)")
     .run();
-  await db.prepare("DELETE FROM access_grants WHERE id IN (SELECT id FROM access_grants WHERE expires_at IS NOT NULL AND expires_at <= CURRENT_TIMESTAMP ORDER BY expires_at LIMIT 100)").run();
+  await db.prepare("DELETE FROM access_grants WHERE id IN (SELECT id FROM access_grants WHERE expires_at IS NOT NULL AND unixepoch(expires_at) <= unixepoch() ORDER BY expires_at LIMIT 100)").run();
   await db.prepare("DELETE FROM password_attempts WHERE rowid IN (SELECT rowid FROM password_attempts WHERE window_started_at <= datetime('now', '-30 minutes') ORDER BY window_started_at LIMIT 100)").run();
 }
 
@@ -230,7 +230,7 @@ async function executeOwnerMutation(
     }
     const quota = await env.DB.prepare("SELECT max_tokens FROM owner_quotas WHERE owner_id = ?").bind(ownerId).first<TokenQuota>();
     const active = await env.DB
-      .prepare("SELECT COUNT(*) AS count FROM api_tokens WHERE owner_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)")
+      .prepare("SELECT COUNT(*) AS count FROM api_tokens WHERE owner_id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR unixepoch(expires_at) > unixepoch())")
       .bind(ownerId)
       .first<{ count: number }>();
     if ((active?.count ?? 0) >= (quota?.max_tokens ?? 10)) {
@@ -511,7 +511,7 @@ async function collaborationGrantAllows(env: Env, request: Request, ownerId: str
   if (!match) return false;
   const [, grantId, secret] = match;
   const digest = await digestToken(env.TOKEN_HASH_KEY, grantId, secret);
-  const grant = await env.DB.prepare("SELECT actions_json, version_id FROM collaboration_grants WHERE id = ? AND owner_id = ? AND publication_id = ? AND credential_digest = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)")
+  const grant = await env.DB.prepare("SELECT actions_json, version_id FROM collaboration_grants WHERE id = ? AND owner_id = ? AND publication_id = ? AND credential_digest = ? AND revoked_at IS NULL AND (expires_at IS NULL OR unixepoch(expires_at) > unixepoch())")
     .bind(grantId, ownerId, publicationId, digest).first<{ actions_json: string; version_id: string | null }>();
   if (!grant || (grant.version_id !== null && grant.version_id !== versionId)) return false;
   const grantActions = parseScopes(grant.actions_json);
@@ -633,7 +633,9 @@ async function createUploadSession(request: Request, env: Env, actor: AuthActor,
       sessionId: crypto.randomUUID(),
     },
   }, actor);
-  return Response.json(result.body, { status: result.status });
+  const publishedSlug = typeof result.body.slug === "string" ? result.body.slug : null;
+  const publicUrl = publishedSlug ? new URL(`/p/${encodeURIComponent(publishedSlug)}/`, request.url).toString() : null;
+  return Response.json({ ...result.body, ...(publicUrl ? { publicUrl } : {}) }, { status: result.status });
 }
 
 interface UploadFileRow {
@@ -671,7 +673,8 @@ async function uploadSessionFile(request: Request, env: Env, actor: AuthActor, o
   } catch (cause) {
     return error(/checksum/i.test(String(cause)) ? "upload_file_mismatch" : "upload_write_failed", /checksum/i.test(String(cause)) ? 409 : 502);
   }
-  const mutationRequest = new Request(request.url, { method: request.method, headers: { "Idempotency-Key": request.headers.get("Idempotency-Key") ?? `upload:${sessionId}:${path}:${file.expected_sha256}` } });
+  const fallbackIdempotencyKey = `upload:${await requestFingerprint("PUT", sessionId, ownerId, `${path}\n${file.expected_sha256}`)}`;
+  const mutationRequest = new Request(request.url, { method: request.method, headers: { "Idempotency-Key": request.headers.get("Idempotency-Key") ?? fallbackIdempotencyKey } });
   const fileData = { sessionId, path, bytes: file.expected_bytes, sha256: file.expected_sha256 };
   const result = await invokeOwnerMutation(mutationRequest, env, ownerId, JSON.stringify(fileData), { kind: "publication", operation: "record-file", data: fileData }, actor);
   return Response.json(result.body, { status: result.status });

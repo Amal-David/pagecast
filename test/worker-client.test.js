@@ -217,7 +217,7 @@ test("Worker upload resumes a journaled session with stable file idempotency and
     const checkpoints = [];
     await client.publish({ rootDir: root, title: "Test", operation: { idempotencyKey: "stable-key", workerSessionId: "session", workerPublicationId: "pub", workerVersionId: "ver", uploadedPaths: [] }, checkpoint: async (value) => checkpoints.push(value), beforeActivate: async () => requests.push({ method: "policy" }) });
     assert.equal(requests.at(-1).method, "POST");
-    assert.equal(requests.find((request) => request.method === "PUT").key, "stable-key:index.html");
+    assert.equal(requests.find((request) => request.method === "PUT").key, createHash("sha256").update("stable-key\0index.html").digest("hex"));
     assert.equal(checkpoints[0].workerSessionId, "session");
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
@@ -249,6 +249,32 @@ test("Worker requests retry timed-out uploads and cancel retryable response bodi
   });
   await retrying.listVersions("publication");
   assert.equal(canceled, 1);
+});
+
+test("Worker file idempotency supports spaces, Unicode, and long paths across retries", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-file-identities-"));
+  const names = ["Q3 chart.txt", "résumé.txt", `${"a".repeat(220)}.txt`];
+  const keys = new Map();
+  try {
+    for (const name of names) await fs.writeFile(path.join(root, name), name);
+    const client = createWorkerClient({
+      origin: "https://worker.example", ownerId: "owner", token: "token", retries: 1, sleep: async () => {},
+      fetchImpl: async (url, options) => {
+        if (options.method === "PUT") {
+          await consumeWorkerUpload(options);
+          const name = decodeURIComponent(url.split("/").at(-1));
+          const key = options.headers["Idempotency-Key"];
+          assert.match(key, /^[\x21-\x7e]{1,255}$/, "Worker accepts only bounded visible-ASCII keys");
+          if (!keys.has(name)) { keys.set(name, key); return Response.json({ error: "retry" }, { status: 503 }); }
+          assert.equal(key, keys.get(name), "retry must keep the same file identity");
+        }
+        return Response.json({});
+      }
+    });
+    await client.publish({ rootDir: root, title: "Paths", operation: { workerSessionId: "session", workerPublicationId: "pub", workerVersionId: "ver" } });
+    assert.deepEqual([...keys.keys()].sort(), [...names].sort());
+    assert.equal(new Set(keys.values()).size, names.length, "different files must not share a receipt");
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
 test("slow streamed uploads use their own deadline while control requests remain bounded", async () => {
@@ -390,7 +416,7 @@ test("Worker connect removes only its new credential when config persistence fai
     await store.init({ persist: false });
     await assert.rejects(store.connectWorker({
       origin: "https://worker.example", ownerId: "owner", token: "new-secret",
-      fetchImpl: async () => Response.json({ apiVersion: 2, capabilities: ["publications.upload", "publications.access", "publications.versions"] })
+      fetchImpl: async () => Response.json({ apiVersion: 2, actor: "token", ownerId: "owner", capabilities: ["publications.upload", "publications.access", "publications.versions"] })
     }), /config write failed/);
     assert.deepEqual(await readWorkerCredentials({ dataDir }), {});
   } finally { await fs.rm(dataDir, { recursive: true, force: true }); }

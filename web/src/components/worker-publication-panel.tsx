@@ -43,6 +43,27 @@ function Ready({ value, children }: { value: WorkerOverview["resources"][string]
   return <>{children}</>;
 }
 
+type AccessMode = "public" | "unlisted" | "password" | "allowlist";
+
+function accessMode(value: unknown, fallback: AccessMode): AccessMode {
+  return value === "public" || value === "unlisted" || value === "password" || value === "allowlist" ? value : fallback;
+}
+
+function toDateTimeLocal(value: unknown) {
+  if (typeof value !== "string" || !value) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function toUtcInstant(value: string) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) throw new Error("Choose a valid local date and time.");
+  return date.toISOString();
+}
+
 export function WorkerPublicationPanel({ publication }: { publication: Publication }) {
   const [tab, setTab] = useState<Tab>("versions");
   const selectedTab = tabs.find((item) => item.id === tab)!;
@@ -88,14 +109,43 @@ function Versions({ publication, value, confirm }: { publication: Publication; v
 
 function Access({ publication, access, grants, credential, onCredential, confirm }: { publication: Publication; access: WorkerOverview["resources"][string] | undefined; grants: WorkerOverview["resources"][string] | undefined; credential: string; onCredential: (value: string) => void; confirm: (value: { title: string; description: string; run: () => void }) => void }) {
   const policy = (access?.data && typeof access.data === "object" ? access.data : {}) as Row;
-  const [mode, setMode] = useState(text(policy.mode, publication.accessMode || "unlisted") as "public" | "unlisted" | "password" | "allowlist");
-  const [password, setPassword] = useState(""); const [accessExpiresAt, setAccessExpiresAt] = useState(""); const [grantExpiresAt, setGrantExpiresAt] = useState(""); const [permission, setPermission] = useState<"view" | "comment" | "edit">("view");
-  const update = useWorkerAction(publication.token, () => mode === "password" && !password ? api.workerAccessExpiry(publication.token, accessExpiresAt || null) : api.workerAccess(publication.token, { mode, ...(password ? { password } : {}), expiresAt: accessExpiresAt || null }), "Access policy updated.");
-  const createGrant = useWorkerAction(publication.token, () => api.createWorkerGrant(publication.token, { permission, expiresAt: grantExpiresAt || null }), "Grant created.", { onCredential });
+  const persistedMode = accessMode(policy.mode, accessMode(publication.accessMode, "unlisted"));
+  const persistedExpiry = toDateTimeLocal(policy.expiresAt);
+  const [mode, setMode] = useState<AccessMode>(persistedMode);
+  const [password, setPassword] = useState("");
+  const [accessExpiresAt, setAccessExpiresAt] = useState(persistedExpiry);
+  const [accessExpiryTouched, setAccessExpiryTouched] = useState(false);
+  const [grantExpiresAt, setGrantExpiresAt] = useState("");
+  const [permission, setPermission] = useState<"view" | "comment" | "edit">("view");
+  useEffect(() => {
+    setMode(persistedMode);
+    setPassword("");
+    setAccessExpiresAt(persistedExpiry);
+    setAccessExpiryTouched(false);
+  }, [publication.token, persistedMode, persistedExpiry]);
+  const update = useWorkerAction(publication.token, async () => {
+    const nextExpiry = accessExpiryTouched ? toUtcInstant(accessExpiresAt) : undefined;
+    if (mode === "password" && !password.trim()) {
+      if (persistedMode !== "password") throw new Error("Enter a password of at least 12 characters before enabling password access.");
+      if (nextExpiry === undefined) throw new Error("Change an expiry or enter a replacement password before saving.");
+      return api.workerAccessExpiry(publication.token, nextExpiry);
+    }
+    return api.workerAccess(publication.token, {
+      mode,
+      ...(password ? { password } : {}),
+      ...(nextExpiry === undefined ? {} : { expiresAt: nextExpiry })
+    });
+  }, (result) => {
+    const effective = result.policy && typeof result.policy === "object" ? result.policy as Row : {};
+    return `Access policy updated: ${text(effective.mode, text(result.accessMode, mode))}.`;
+  });
+  const createGrant = useWorkerAction(publication.token, () => api.createWorkerGrant(publication.token, { permission, expiresAt: toUtcInstant(grantExpiresAt) }), "Grant created.", { onCredential });
   const revokeGrantAction = useWorkerAction(publication.token, (grantId: string) => api.revokeWorkerGrant(publication.token, grantId), "Grant revoked.");
   const revokeGrant = { mutate: (grantId: string) => confirm({ title: "Revoke access grant?", description: "This credential will stop working immediately.", run: () => revokeGrantAction.mutate(grantId) }) };
   const list = rows(grants?.data, ["grants", "items"]);
-  return <div className="space-y-4"><Ready value={access}><form onSubmit={(event) => { event.preventDefault(); update.mutate(undefined); }} className="grid gap-3 rounded-md bg-zinc-50 p-3 sm:grid-cols-2"><div><Label htmlFor={`mode-${publication.token}`}>Access mode</Label><Select id={`mode-${publication.token}`} value={mode} onChange={(event) => setMode(event.target.value as typeof mode)}><option value="public">Public</option><option value="unlisted">Unlisted</option><option value="password">Password</option><option value="allowlist">Allowlist</option></Select></div><div><Label htmlFor={`expiry-${publication.token}`}>Expiry (optional)</Label><Input id={`expiry-${publication.token}`} type="datetime-local" value={accessExpiresAt} onChange={(event) => setAccessExpiresAt(event.target.value)} /></div>{mode === "password" ? <div className="sm:col-span-2"><Label htmlFor={`password-${publication.token}`}>New password (only to replace it)</Label><Input id={`password-${publication.token}`} type="password" minLength={12} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Leave this blank to update the expiry without replacing the existing password.</p></div> : null}<div className="sm:col-span-2"><Button size="sm" disabled={update.isPending}>{update.isPending ? "Saving…" : "Save access"}</Button></div></form></Ready><Ready value={grants}><div className="space-y-3"><div className="grid gap-2 rounded-md border p-3 sm:grid-cols-[1fr_1fr_auto]"><Select value={permission} onChange={(event) => setPermission(event.target.value as typeof permission)} aria-label="Grant permission"><option value="view">View</option><option value="comment">Comment</option><option value="edit">Edit</option></Select><Input type="datetime-local" value={grantExpiresAt} onChange={(event) => setGrantExpiresAt(event.target.value)} aria-label="Grant expiry" /><Button size="sm" disabled={createGrant.isPending} onClick={() => createGrant.mutate(undefined)}>Create grant</Button></div>{credential ? <OneTimeCredential value={credential} onDismiss={() => onCredential("")} /> : null}{list.length ? <ul className="divide-y rounded-md border">{list.map((grant) => { const id = text(grant.id, ""); return <li key={id} className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm"><span>{text(grant.permission)} · expires {text(grant.expiresAt, "never")}</span><Button size="sm" variant="outline" onClick={() => revokeGrant.mutate(id)}>Revoke</Button></li>; })}</ul> : <p className="text-sm text-muted-foreground">No active grants.</p>}</div></Ready></div>;
+  const passwordRequired = mode === "password" && persistedMode !== "password" && !password.trim();
+  const unchanged = mode === persistedMode && !password && !accessExpiryTouched;
+  return <div className="space-y-4"><Ready value={access}><form onSubmit={(event) => { event.preventDefault(); update.mutate(undefined); }} className="grid gap-3 rounded-md bg-zinc-50 p-3 sm:grid-cols-2"><p className="sm:col-span-2 text-xs text-muted-foreground">Current effective policy: {persistedMode} · expires {policy.expiresAt ? text(policy.expiresAt) : "never"}</p><div><Label htmlFor={`mode-${publication.token}`}>Access mode</Label><Select id={`mode-${publication.token}`} value={mode} onChange={(event) => setMode(event.target.value as AccessMode)}><option value="public">Public</option><option value="unlisted">Unlisted</option><option value="password">Password</option><option value="allowlist">Restricted (sharing credential)</option></Select></div><div><Label htmlFor={`expiry-${publication.token}`}>Expiry (optional)</Label><Input id={`expiry-${publication.token}`} type="datetime-local" value={accessExpiresAt} onChange={(event) => { setAccessExpiresAt(event.target.value); setAccessExpiryTouched(true); }} /></div>{mode === "password" ? <div className="sm:col-span-2"><Label htmlFor={`password-${publication.token}`}>{persistedMode === "password" ? "New password (only to replace it)" : "Password"}</Label><Input id={`password-${publication.token}`} type="password" minLength={12} autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} aria-describedby={`password-help-${publication.token}`} required={persistedMode !== "password"} /><p id={`password-help-${publication.token}`} className="mt-1 text-xs text-muted-foreground">{persistedMode === "password" ? "Leave this blank only to change the expiry. Enter a new password to replace the existing one." : "A password of at least 12 characters is required before this policy can be enabled."}</p></div> : null}<div className="sm:col-span-2"><Button size="sm" disabled={update.isPending || unchanged || passwordRequired}>{update.isPending ? "Saving…" : "Save access"}</Button></div></form></Ready><Ready value={grants}><div className="space-y-3"><div className="grid gap-2 rounded-md border p-3 sm:grid-cols-[1fr_1fr_auto]"><Select value={permission} onChange={(event) => setPermission(event.target.value as typeof permission)} aria-label="Grant permission"><option value="view">View</option><option value="comment">Comment</option><option value="edit">Edit</option></Select><Input type="datetime-local" value={grantExpiresAt} onChange={(event) => setGrantExpiresAt(event.target.value)} aria-label="Grant expiry" /><Button size="sm" disabled={createGrant.isPending} onClick={() => createGrant.mutate(undefined)}>Create grant</Button></div>{credential ? <OneTimeCredential value={credential} onDismiss={() => onCredential("")} /> : null}{list.length ? <ul className="divide-y rounded-md border">{list.map((grant) => { const id = text(grant.id, ""); return <li key={id} className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm"><span>{text(grant.permission)} · expires {text(grant.expiresAt, "never")}</span><Button size="sm" variant="outline" onClick={() => revokeGrant.mutate(id)}>Revoke</Button></li>; })}</ul> : <p className="text-sm text-muted-foreground">No active grants.</p>}</div></Ready></div>;
 }
 
 function Team({ publication, overview, credential, onCredential, confirm }: { publication: Publication; overview: WorkerOverview; credential: string; onCredential: (value: string) => void; confirm: (value: { title: string; description: string; run: () => void }) => void }) {

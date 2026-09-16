@@ -69,6 +69,7 @@ const UNLISTED_CAPABILITY_HEX_LENGTH = UNLISTED_CAPABILITY_BYTES * 2;
 const MAX_SLUG_LENGTH = 63;
 const MAX_SLUG_PREFIX_LENGTH = MAX_SLUG_LENGTH - UNLISTED_CAPABILITY_HEX_LENGTH - 1;
 const RESERVED_SLUGS = new Set(["", "404", "admin", "health", "index", "p", "v1"]);
+const INTERNAL_MANIFEST_PATH = ".pagecast/manifest.json";
 const textEncoder = new TextEncoder();
 
 export async function sha256(value: string): Promise<string> {
@@ -105,17 +106,28 @@ export function normalizePath(value: string): string | null {
 }
 
 export function createUnlistedSlug(value: string): string | null {
-  const prefix = value
+  const prefix = unlistedPrefix(value);
+  if (!validSlug(prefix)) return null;
+  const bytes = new Uint8Array(UNLISTED_CAPABILITY_BYTES);
+  crypto.getRandomValues(bytes);
+  return `${prefix}-${encodeHex(bytes.buffer)}`;
+}
+
+function unlistedPrefix(value: string): string {
+  return value
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, MAX_SLUG_PREFIX_LENGTH)
     .replace(/-+$/g, "");
-  if (!validSlug(prefix)) return null;
-  const bytes = new Uint8Array(UNLISTED_CAPABILITY_BYTES);
-  crypto.getRandomValues(bytes);
-  return `${prefix}-${encodeHex(bytes.buffer)}`;
+}
+
+function renamedSlug(value: string, linkKind: "public" | "unlisted", currentSlug: string): string | null {
+  if (linkKind === "public") return validSlug(value) ? value : null;
+  const capability = new RegExp(`-([0-9a-f]{${UNLISTED_CAPABILITY_HEX_LENGTH}})$`).exec(currentSlug)?.[1];
+  const prefix = unlistedPrefix(value);
+  return capability && validSlug(prefix) ? `${prefix}-${capability}` : null;
 }
 
 export function r2Key(ownerId: string, publicationId: string, versionId: string, path: string): string {
@@ -325,7 +337,7 @@ async function createSession(db: D1Database, ownerId: string, packet: Publicatio
   }
   statements.push(
     db.prepare("INSERT INTO publication_versions (id, owner_id, publication_id, version_number, manifest_key, content_sha256, byte_size, status, is_complete) VALUES (?, ?, ?, ?, ?, ?, ?, 'staged', 0)")
-      .bind(versionId, ownerId, publicationId, versionNumber, `${r2Key(ownerId, publicationId, versionId, "manifest.json")}`, manifestSha, byteSize),
+      .bind(versionId, ownerId, publicationId, versionNumber, r2Key(ownerId, publicationId, versionId, INTERNAL_MANIFEST_PATH), manifestSha, byteSize),
     db.prepare("INSERT INTO upload_sessions (id, owner_id, publication_id, version_id, mode, manifest_sha256, status, expires_at, operation_id) VALUES (?, ?, ?, ?, ?, ?, 'open', datetime('now', '+24 hours'), ?)")
       .bind(sessionId, ownerId, publicationId, versionId, mode, manifestSha, packet.idempotencyKey),
     ...files.map((file) => db.prepare("INSERT INTO upload_session_files (session_id, normalized_path, r2_key, expected_bytes, expected_sha256, content_type) VALUES (?, ?, ?, ?, ?, ?)")
@@ -401,7 +413,8 @@ async function activate(env: Pick<Env, "DB" | "PUBLICATIONS" | "JOBS">, ownerId:
   if (reviewPolicy?.requires_approval) {
     const review = await db.prepare("SELECT COUNT(*) AS decision_count, SUM(CASE WHEN decision = 'approved' THEN 1 ELSE 0 END) AS approved_count FROM collaboration_review_decisions WHERE owner_id = ? AND publication_id = ? AND version_id = ? AND superseded_at IS NULL")
       .bind(ownerId, publicationId, versionId).first<{ decision_count: number; approved_count: number | null }>();
-    if (!review || review.decision_count === 0 || review.approved_count !== review.decision_count) return terminal(db, ownerId, packet, 409, { error: "approval_required" });
+    // Approval is a mutable prerequisite. Do not persist a negative receipt or a resumed upload will remain stuck after approval.
+    if (!review || review.decision_count === 0 || review.approved_count !== review.decision_count) return success(409, { error: "approval_required" });
   }
   const response = { publicationId, versionId, previousVersionId: publication.active_version_id, state: "published" };
   const outbox = outboxStatement(db, ownerId, "publication.published", { publicationId, versionId, previousVersionId: publication.active_version_id }, `publication.published:${publicationId}:${versionId}`);
@@ -444,21 +457,25 @@ async function deleteVersion(db: D1Database, ownerId: string, packet: Publicatio
 
 async function renamePublication(db: D1Database, ownerId: string, packet: PublicationPacket<"rename">): Promise<Response> {
   const { publicationId, slug } = packet.mutation.data;
-  if (typeof publicationId !== "string" || typeof slug !== "string" || !validSlug(slug)) return terminal(db, ownerId, packet, 400, { error: "invalid_slug" });
-  const publication = await db.prepare("SELECT id, slug FROM publications WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").bind(publicationId, ownerId).first<{ id: string; slug: string }>();
+  if (typeof publicationId !== "string" || typeof slug !== "string") return terminal(db, ownerId, packet, 400, { error: "invalid_slug" });
+  const publication = await db.prepare("SELECT id, slug, link_kind FROM publications WHERE id = ? AND owner_id = ? AND deleted_at IS NULL").bind(publicationId, ownerId).first<{ id: string; slug: string; link_kind: "public" | "unlisted" }>();
   if (!publication) return terminal(db, ownerId, packet, 404, { error: "publication_not_found" });
-  const collision = await db.prepare("SELECT id FROM publications WHERE slug = ? AND id != ?").bind(slug, publicationId).first<{ id: string }>();
+  const nextSlug = renamedSlug(slug, publication.link_kind, publication.slug);
+  if (!nextSlug) return terminal(db, ownerId, packet, 400, { error: "invalid_slug" });
+  const collision = await db.prepare("SELECT id FROM publications WHERE slug = ? AND id != ?").bind(nextSlug, publicationId).first<{ id: string }>();
   if (collision) return terminal(db, ownerId, packet, 409, { error: "slug_taken" });
-  const response = { publicationId, slug, redirectFrom: publication.slug };
+  const aliasCollision = await db.prepare("SELECT publication_id FROM redirects WHERE source_path = ? AND publication_id != ? LIMIT 1").bind(nextSlug, publicationId).first<{ publication_id: string }>();
+  if (aliasCollision) return terminal(db, ownerId, packet, 409, { error: "slug_taken" });
+  const response = { publicationId, slug: nextSlug, redirectFrom: publication.slug };
   try {
     await db.batch([
-      db.prepare("UPDATE publications SET slug = ?, generation = generation + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_id = ?").bind(slug, publicationId, ownerId),
-      db.prepare("INSERT OR REPLACE INTO redirects (id, owner_id, publication_id, source_path, destination_path, status_code) VALUES (?, ?, ?, ?, ?, 308)").bind(crypto.randomUUID(), ownerId, publicationId, publication.slug, slug),
+      db.prepare("UPDATE publications SET slug = ?, generation = generation + 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_id = ?").bind(nextSlug, publicationId, ownerId),
+      db.prepare("INSERT OR REPLACE INTO redirects (id, owner_id, publication_id, source_path, destination_path, status_code) VALUES (?, ?, ?, ?, ?, 308)").bind(crypto.randomUUID(), ownerId, publicationId, publication.slug, nextSlug),
       auditStatement(db, { ownerId, actorId: packet.actorId, action: "publication.renamed", resourceType: "publication", resourceId: publicationId }),
       receiptStatement(db, ownerId, packet, 200, response),
     ]);
   } catch {
-    if (await db.prepare("SELECT id FROM publications WHERE slug = ? AND id != ?").bind(slug, publicationId).first<{ id: string }>()) {
+    if (await db.prepare("SELECT id FROM publications WHERE slug = ? AND id != ?").bind(nextSlug, publicationId).first<{ id: string }>()) {
       return terminal(db, ownerId, packet, 409, { error: "slug_taken" });
     }
     return failure();

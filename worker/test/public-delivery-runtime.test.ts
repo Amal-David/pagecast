@@ -23,10 +23,19 @@ function publicRequest(path: string, init: RequestInit = {}) {
   return worker.fetch!(new Request(`https://pagecast.test${path}`, init) as never, workerEnv, {} as ExecutionContext);
 }
 
+function isolatedRequest(publicationId: string, path: string, init: RequestInit = {}) {
+  return worker.fetch!(new Request(`https://${publicationId}.content.pagecast.test${path}`, init) as never, {
+    ...workerEnv,
+    CONTENT_ORIGIN: "https://content.pagecast.test",
+  }, {} as ExecutionContext);
+}
+
 async function publishedFixture(options: { mode?: string; expiresAt?: string | null; approval?: string } = {}) {
   const files = [
     ["index.html", "<h1>Protected report</h1>", "text/html"],
     ["assets/app.js", "console.log('protected')", "application/javascript"],
+    ["assets/module.mjs", "export const ready = true;", "text/javascript"],
+    ["assets/Q3 chart.png", "chart", "image/png"],
     ["assets/app.js.map", "{\"sources\":[\"private.ts\"]}", "application/json"],
     ["index.md", "# Protected report", "text/markdown"],
   ] as const;
@@ -49,7 +58,7 @@ async function publishedFixture(options: { mode?: string; expiresAt?: string | n
       headers: { "content-type": contentType, "X-Content-SHA256": await sha256(body) },
       body,
     });
-    expect(put.status).toBe(200);
+    expect(put.status, `${path}: ${await put.text()}`).toBe(200);
   }
   expect((await control(`/v1/owners/${ownerId}/upload-sessions/${publication.sessionId}/complete`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
   expect((await control(`/v1/owners/${ownerId}/publications/${publication.publicationId}/versions/${publication.versionId}/activate`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
@@ -122,6 +131,9 @@ describe("policy-enforced public delivery", () => {
     expect((await publicRequest(`/p/${publication.slug}/assets/app.js`, { headers: { "If-None-Match": first.headers.get("ETag")! } })).status).toBe(304);
     expect((await publicRequest(`/p/${publication.slug}/versions/${publication.versionId}/index.html`)).status).toBe(404);
     expect((await publicRequest(`/p/${publication.slug}/assets/app.js.map`)).status).toBe(404);
+    expect((await publicRequest(`/p/${publication.slug}/assets/Q3%20chart.png`)).status).toBe(200);
+    expect((await publicRequest(`/p/${publication.slug}/assets/%252e%252e%252findex.html`)).status).toBe(404);
+    expect((await publicRequest(`/p/${publication.slug}/assets/module.mjs`)).headers.get("Content-Type")).toBe("text/javascript");
     const html = await publicRequest(`/p/${publication.slug}/`);
     expect(html.headers.get("Content-Security-Policy")).toContain("'unsafe-inline'");
     expect(html.headers.get("X-Robots-Tag")).toBe("index, follow");
@@ -135,28 +147,40 @@ describe("policy-enforced public delivery", () => {
   it("checks policy before every asset read and invalidates old password sessions", async () => {
     const publication = await publishedFixture({ mode: "password" });
     const asset = `/p/${publication.slug}/assets/app.js`;
-    expect((await publicRequest(asset)).status).toBe(401);
-    const login = await publicRequest(`/p/${publication.slug}/_auth/password`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "password=correct+horse+battery+staple" });
-    expect(login.status).toBe(204);
+    expect((await publicRequest(asset)).status).toBe(503);
+    expect((await isolatedRequest(publication.publicationId, asset)).status).toBe(401);
+    const entry = await isolatedRequest(publication.publicationId, `/p/${publication.slug}/`);
+    expect(entry.status).toBe(302);
+    expect(entry.headers.get("Location")).toBe(`https://${publication.publicationId}.content.pagecast.test/p/${publication.slug}/_auth/password`);
+    const form = await isolatedRequest(publication.publicationId, `/p/${publication.slug}/_auth/password`);
+    expect(form.status).toBe(200);
+    expect(await form.text()).toContain('type="password"');
+    const login = await isolatedRequest(publication.publicationId, `/p/${publication.slug}/_auth/password`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "password=correct+horse+battery+staple" });
+    expect(login.status).toBe(303);
+    expect(login.headers.get("Set-Cookie")).toContain("__Host-pc_session=");
+    expect(login.headers.get("Set-Cookie")).toContain("Path=/; HttpOnly; Secure");
     const cookie = login.headers.get("Set-Cookie")!.split(";")[0];
-    expect((await publicRequest(asset, { headers: { Cookie: cookie } })).status).toBe(200);
+    expect((await isolatedRequest(publication.publicationId, asset, { headers: { Cookie: cookie } })).status).toBe(200);
     expect((await control(`/v1/owners/${ownerId}/publications/${publication.publicationId}/access-policy`, { method: "PUT", headers: { "content-type": "application/json", "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ mode: "password", password: "new password" }) })).status).toBe(200);
-    expect((await publicRequest(asset, { headers: { Cookie: cookie } })).status).toBe(401);
-    const currentLogin = await publicRequest(`/p/${publication.slug}/_auth/password`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "password=new+password" });
+    expect((await isolatedRequest(publication.publicationId, asset, { headers: { Cookie: cookie } })).status).toBe(401);
+    const currentLogin = await isolatedRequest(publication.publicationId, `/p/${publication.slug}/_auth/password`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "password=new+password" });
     const currentCookie = currentLogin.headers.get("Set-Cookie")!.split(";")[0];
-    const failures = await Promise.all(Array.from({ length: 5 }, () => publicRequest(`/p/${publication.slug}/_auth/password`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "CF-Connecting-IP": "203.0.113.10" }, body: "password=incorrect-password" })));
+    const failures = await Promise.all(Array.from({ length: 5 }, () => isolatedRequest(publication.publicationId, `/p/${publication.slug}/_auth/password`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "CF-Connecting-IP": "203.0.113.10" }, body: "password=incorrect-password" })));
     expect(failures.every((response) => response.status === 401)).toBe(true);
-    expect((await publicRequest(`/p/${publication.slug}/_auth/password`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "CF-Connecting-IP": "203.0.113.10" }, body: "password=incorrect-password" })).status).toBe(429);
+    expect((await isolatedRequest(publication.publicationId, `/p/${publication.slug}/_auth/password`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "CF-Connecting-IP": "203.0.113.10" }, body: "password=incorrect-password" })).status).toBe(429);
     expect((await control(`/v1/owners/${ownerId}/publications/${publication.publicationId}/revoke`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
-    expect((await publicRequest(asset, { headers: { Cookie: currentCookie } })).status).toBe(404);
+    expect((await isolatedRequest(publication.publicationId, asset, { headers: { Cookie: currentCookie } })).status).toBe(404);
     expect((await control(`/v1/owners/${ownerId}/publications/${publication.publicationId}/restore`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
-    expect((await publicRequest(asset, { headers: { Cookie: currentCookie } })).status).toBe(401);
+    expect((await isolatedRequest(publication.publicationId, asset, { headers: { Cookie: currentCookie } })).status).toBe(401);
   });
 
   it("keeps expiry, grants, negotiation, and edge social routes under the same policy", async () => {
     const publication = await publishedFixture({ mode: "allowlist", approval: "pending" });
     const path = `/p/${publication.slug}/`;
-    expect((await publicRequest(path)).status).toBe(401);
+    expect((await publicRequest(path)).status).toBe(503);
+    const entry = await isolatedRequest(publication.publicationId, path);
+    expect(entry.status).toBe(302);
+    expect(entry.headers.get("Location")).toBe(`https://${publication.publicationId}.content.pagecast.test/p/${publication.slug}/_auth/grant`);
     const policyKey = crypto.randomUUID();
     const expiresAt = new Date(Date.now() + 60_000).toISOString();
     const policyRequest = () => control(`/v1/owners/${ownerId}/publications/${publication.publicationId}/access-policy`, { method: "PUT", headers: { "content-type": "application/json", "Idempotency-Key": policyKey }, body: JSON.stringify({ mode: "allowlist", approvalState: "approved", expiresAt }) });
@@ -170,12 +194,51 @@ describe("policy-enforced public delivery", () => {
     const grantBody = await grant.json() as { id: string; credential: string };
     expect(await (await grantRequest()).json()).toEqual(grantBody);
     const credential = grantBody.credential;
-    expect((await publicRequest(path, { headers: { Authorization: `Bearer ${credential}`, Accept: "text/markdown" } })).status).toBe(200);
-    expect((await publicRequest(path, { headers: { Authorization: `Bearer ${credential}`, Accept: "application/json" } })).status).toBe(200);
-    expect((await publicRequest(`/p/${publication.slug}/_social/card.svg`, { headers: { Authorization: `Bearer ${credential}` } })).status).toBe(200);
+    expect((await isolatedRequest(publication.publicationId, path, { headers: { Authorization: `Bearer ${credential}`, Accept: "text/markdown" } })).status).toBe(200);
+    expect((await isolatedRequest(publication.publicationId, path, { headers: { Authorization: `Bearer ${credential}`, Accept: "application/json" } })).status).toBe(200);
+    expect((await isolatedRequest(publication.publicationId, `/p/${publication.slug}/_social/card.svg`, { headers: { Authorization: `Bearer ${credential}` } })).status).toBe(200);
+    const redemption = await isolatedRequest(publication.publicationId, `/p/${publication.slug}/_auth/grant`);
+    const redemptionForm = await redemption.text();
+    expect(redemptionForm).toContain("location.hash.slice(1)");
+    expect(redemptionForm).toContain("pagecast-auth");
+    const redeemed = await isolatedRequest(publication.publicationId, `/p/${publication.slug}/_auth/grant`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: `credential=${encodeURIComponent(credential)}` });
+    expect(redeemed.status).toBe(303);
+    const grantCookie = redeemed.headers.get("Set-Cookie")!.split(";")[0];
+    expect((await isolatedRequest(publication.publicationId, path, { headers: { Cookie: grantCookie } })).status).toBe(200);
     expect((await control(`/v1/owners/${ownerId}/publications/${publication.publicationId}/grants/${grantBody.id}`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
-    expect((await publicRequest(path, { headers: { Authorization: `Bearer ${credential}` } })).status).toBe(401);
+    expect((await isolatedRequest(publication.publicationId, `/p/${publication.slug}/assets/app.js`, { headers: { Authorization: `Bearer ${credential}` } })).status).toBe(401);
     await env.DB.prepare("UPDATE publications SET expires_at = datetime('now', '-1 second') WHERE id = ?").bind(publication.publicationId).run();
-    expect((await publicRequest(path, { headers: { Authorization: `Bearer ${credential}` } })).status).toBe(404);
+    expect((await isolatedRequest(publication.publicationId, path, { headers: { Authorization: `Bearer ${credential}` } })).status).toBe(404);
+  });
+
+  it("uses a stable per-publication host and rejects expired grants by instant", async () => {
+    const first = await publishedFixture({ mode: "allowlist" });
+    const second = await publishedFixture();
+    const firstPath = `/p/${first.slug}/`;
+    const secondPath = `/p/${second.slug}/`;
+    const wrongHost = await isolatedRequest(first.publicationId, `${secondPath}?view=chart`);
+    expect(wrongHost.status).toBe(308);
+    expect(wrongHost.headers.get("Location")).toBe(`https://${second.publicationId}.content.pagecast.test${secondPath}?view=chart`);
+    const sharedHost = await worker.fetch!(new Request(`https://pagecast.test${firstPath}`) as never, {
+      ...workerEnv,
+      CONTENT_ORIGIN: "https://content.pagecast.test",
+    }, {} as ExecutionContext);
+    expect(sharedHost.status).toBe(308);
+    expect(sharedHost.headers.get("Location")).toBe(`https://${first.publicationId}.content.pagecast.test${firstPath}`);
+    const insecureHost = await worker.fetch!(new Request(`http://${first.publicationId}.content.pagecast.test${firstPath}`) as never, {
+      ...workerEnv,
+      CONTENT_ORIGIN: "https://content.pagecast.test",
+    }, {} as ExecutionContext);
+    expect(insecureHost.status).toBe(308);
+    expect(insecureHost.headers.get("Location")).toBe(`https://${first.publicationId}.content.pagecast.test${firstPath}`);
+
+    const grant = await control(`/v1/owners/${ownerId}/publications/${first.publicationId}/grants`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ permission: "view", expiresAt: new Date(Date.now() + 60_000).toISOString() }),
+    });
+    const { id, credential } = await grant.json() as { id: string; credential: string };
+    await env.DB.prepare("UPDATE access_grants SET expires_at = ? WHERE id = ?").bind(new Date(Date.now() - 1_000).toISOString(), id).run();
+    expect((await isolatedRequest(first.publicationId, `/p/${first.slug}/assets/app.js`, { headers: { Authorization: `Bearer ${credential}` } })).status).toBe(401);
   });
 });

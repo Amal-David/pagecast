@@ -83,3 +83,23 @@ test("Worker health failures refresh the persisted safe status instead of leavin
   const hooks = await source("web/src/hooks/use-worker-publication.ts");
   assert.match(hooks, /useWorkerHealthAction[\s\S]*onSettled:[\s\S]*invalidateQueries\(\{ queryKey: workerKeys\.profile \}\)/);
 });
+
+test("Worker access form preserves the existing policy until a user changes it deliberately", async () => {
+  const panel = await source("web/src/components/worker-publication-panel.tsx");
+  const server = await source("src/server.js");
+  assert.match(panel, /const persistedExpiry = toDateTimeLocal\(policy\.expiresAt\)/);
+  assert.match(panel, /const \[accessExpiryTouched, setAccessExpiryTouched\] = useState\(false\)/);
+  assert.match(panel, /mode === "password" && !password\.trim\(\)/);
+  assert.match(panel, /Enter a password of at least 12 characters before enabling password access/);
+  assert.match(panel, /new Date\(value\)[\s\S]*return date\.toISOString\(\)/);
+  assert.match(server, /body\.mode === "password" && \(typeof body\.password !== "string" \|\| body\.password\.trim\(\)\.length < 12\)/);
+  assert.match(server, /const policy = await client\.accessPolicy\(publicationId\)/);
+  assert.match(server, /return \{ token, accessMode: policy\.mode, policy \}/);
+});
+
+test("Worker connection card exposes in-place credential rotation", async () => {
+  const connection = await source("web/src/components/worker-connection-card.tsx");
+  assert.match(connection, /Rotate credential/);
+  assert.match(connection, /Replace the local credential for this exact Worker owner and origin/);
+  assert.match(connection, /Existing publications keep using this profile/);
+});

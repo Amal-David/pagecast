@@ -7,13 +7,24 @@ import type { Env } from "../src/types";
 
 const ownerId = "owner-publication-lifecycle";
 const auth = { Authorization: "Bearer bootstrap-secret-that-must-never-appear-in-a-response" };
-const workerEnv = { ...env, ADMIN_TOKEN: "bootstrap-secret-that-must-never-appear-in-a-response", TOKEN_HASH_KEY: "token-hash-key" } as Env;
+const workerEnv = { ...env, ADMIN_TOKEN: "bootstrap-secret-that-must-never-appear-in-a-response", TOKEN_HASH_KEY: "token-hash-key", MCP_ALLOWED_HOSTNAMES: "pagecast.test", MCP_ALLOWED_ORIGIN_HOSTNAMES: "pagecast.test" } as Env;
 
 function request(path: string, init: RequestInit = {}, runtime: Env = workerEnv) {
   return worker.fetch!(new Request(`https://pagecast.test${path}`, {
     ...init,
     headers: { ...auth, ...(init.headers ?? {}) },
   }) as unknown as never, runtime, {} as ExecutionContext);
+}
+
+async function mcpCall(token: string, name: string, args: Record<string, unknown>) {
+  const response = await worker.fetch!(new Request("https://pagecast.test/mcp", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, Host: "pagecast.test", Accept: "application/json, text/event-stream", "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tools/call", params: { name, arguments: args } }),
+  }) as unknown as never, workerEnv, {} as ExecutionContext);
+  const text = await response.text();
+  const payload = JSON.parse(text.split("\n").find((line) => line.startsWith("data: "))?.slice(6) ?? text) as { result: { structuredContent?: { status: number; result: unknown } } };
+  return { status: response.status, result: payload.result.structuredContent };
 }
 
 async function createSession(overrides: Record<string, unknown> = {}) {
@@ -102,6 +113,29 @@ describe("manifest-driven publication lifecycle", () => {
     expect(contextCreated.slug).toMatch(/^context-report-[0-9a-f]{32}$/);
   });
 
+  it("keeps application manifest.json separate from Pagecast's immutable metadata", async () => {
+    const appManifest = "{\"name\":\"Example app\"}";
+    const created = await createSession({
+      slug: "manifest-app",
+      linkKind: "public",
+      manifest: [
+        { path: "index.html", bytes: 21, sha256: await sha256("<h1>manifest app</h1>"), contentType: "text/html" },
+        { path: "manifest.json", bytes: appManifest.length, sha256: await sha256(appManifest), contentType: "application/manifest+json" },
+      ],
+    });
+    const html = "<h1>manifest app</h1>";
+    for (const [path, content, contentType] of [["index.html", html, "text/html"], ["manifest.json", appManifest, "application/manifest+json"]] as const) {
+      expect((await request(`/v1/owners/${ownerId}/upload-sessions/${created.sessionId}/files/${path}`, {
+        method: "PUT", headers: { "content-type": contentType, "X-Content-SHA256": await sha256(content) }, body: content,
+      })).status).toBe(200);
+    }
+    expect((await request(`/v1/owners/${ownerId}/upload-sessions/${created.sessionId}/complete`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
+    const version = await env.DB.prepare("SELECT manifest_key FROM publication_versions WHERE id = ?").bind(created.versionId).first<{ manifest_key: string }>();
+    expect(version?.manifest_key).toContain("/.pagecast/manifest.json");
+    expect(version?.manifest_key).not.toContain("/versions/" + created.versionId + "/manifest.json");
+    expect(await (await env.PUBLICATIONS.get(r2Key(ownerId, created.publicationId, created.versionId, "manifest.json")))?.text()).toBe(appManifest);
+  });
+
   it("enqueues the committed publication outbox event without waiting for Cron", async () => {
     const created = await createSession();
     const bytes = new TextEncoder().encode(created.html);
@@ -172,6 +206,31 @@ describe("manifest-driven publication lifecycle", () => {
     expect(file?.r2_key).toMatch(new RegExp(`^owners/${ownerId}/publications/[^/]+/versions/[^/]+/index\\.html$`));
     expect(file?.received_bytes).toBe(html.length);
     expect(await env.PUBLICATIONS.get(file!.r2_key)).not.toBeNull();
+  });
+
+  it("publishes a public page through real MCP create, upload, complete, activate, and delivery handlers", async () => {
+    const tokenId = crypto.randomUUID();
+    const tokenSecret = "m".repeat(32);
+    const token = `pcv2_${tokenId}_${tokenSecret}`;
+    await env.DB.prepare("INSERT INTO api_tokens (id, owner_id, token_hash, label, scopes_json, expires_at) VALUES (?, ?, ?, 'MCP publisher', ?, ?)")
+      .bind(tokenId, ownerId, await digestToken("token-hash-key", tokenId, tokenSecret), JSON.stringify(["publications:read", "publications:write"]), "2099-01-01T00:00:00.000Z").run();
+    const html = "<h1>MCP publication</h1>";
+    const created = await mcpCall(token, "publication_create_upload_session", {
+      mode: "create", title: "MCP publication", slug: "mcp-publication", linkKind: "public",
+      manifest: [{ path: "index.html", bytes: html.length, sha256: await sha256(html), contentType: "text/html" }], idempotencyKey: "mcp-create",
+    });
+    expect(created.status).toBe(200);
+    const session = created.result?.result as { sessionId: string; publicationId: string; versionId: string; slug: string; publicUrl: string };
+    expect(session.slug).toBe("mcp-publication");
+    expect(session.publicUrl).toBe("https://pagecast.test/p/mcp-publication/");
+    expect((await mcpCall(token, "publication_upload_file", {
+      sessionId: session.sessionId, path: "index.html", contentType: "text/html", sha256: await sha256(html), contentBase64: btoa(html), idempotencyKey: "mcp-upload",
+    })).result).toMatchObject({ status: 200, result: { uploaded: true } });
+    expect((await mcpCall(token, "publication_complete_upload_session", { sessionId: session.sessionId, idempotencyKey: "mcp-complete" })).result).toMatchObject({ status: 200, result: { status: "complete" } });
+    expect((await mcpCall(token, "publication_activate_version", { publicationId: session.publicationId, versionId: session.versionId, idempotencyKey: "mcp-activate" })).result).toMatchObject({ status: 200, result: { state: "published" } });
+    const delivered = await worker.fetch!(new Request("https://pagecast.test/p/mcp-publication/", { headers: { Accept: "text/html" } }) as unknown as never, workerEnv, {} as ExecutionContext);
+    expect(delivered.status).toBe(200);
+    await expect(delivered.text()).resolves.toBe(html);
   });
 
   it("lets R2 reject a streamed body whose checksum does not match the manifest", async () => {
@@ -364,13 +423,22 @@ describe("manifest-driven publication lifecycle", () => {
     expect(publication?.active_version_id).not.toBe(staged.versionId);
   });
 
-  it("renames with a redirect and retains versions until their retention period has elapsed", async () => {
+  it("renames unlisted display prefixes without weakening the capability and retains historical aliases", async () => {
     const first = await createSession();
-    const mutation = request(`/v1/owners/${ownerId}/publications/${first.publicationId}/rename`, {
+    const firstRename = await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/rename`, {
       method: "POST", headers: { "content-type": "application/json", "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ slug: "renamed-report" }),
     });
-    expect((await mutation).status).toBe(200);
-    expect(await env.DB.prepare("SELECT destination_path FROM redirects WHERE publication_id = ?").bind(first.publicationId).first()).toMatchObject({ destination_path: "renamed-report" });
+    expect(firstRename.status).toBe(200);
+    const firstBody = await firstRename.json<{ slug: string }>();
+    expect(firstBody.slug).toMatch(/^renamed-report-[0-9a-f]{32}$/);
+    expect(firstBody.slug.slice(-32)).toBe(first.slug.slice(-32));
+    const secondRename = await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/rename`, {
+      method: "POST", headers: { "content-type": "application/json", "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ slug: "final-report" }),
+    });
+    expect(secondRename.status).toBe(200);
+    const redirects = await env.DB.prepare("SELECT source_path, publication_id FROM redirects WHERE publication_id = ? ORDER BY source_path").bind(first.publicationId).all<{ source_path: string; publication_id: string }>();
+    expect(redirects.results.map((redirect) => redirect.source_path).sort()).toEqual([first.slug, firstBody.slug].sort());
+    expect(redirects.results.every((redirect) => redirect.publication_id === first.publicationId)).toBe(true);
     await env.DB.prepare("UPDATE publication_versions SET retention_until = datetime('now', '+1 day') WHERE id = ?").bind(first.versionId).run();
     expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${first.versionId}`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(409);
   });
@@ -411,12 +479,14 @@ describe("manifest-driven publication lifecycle", () => {
     await env.DB.prepare("INSERT INTO collaboration_review_decisions (id, owner_id, publication_id, version_id, actor_id, decision) VALUES (?, ?, ?, ?, ?, 'approved')")
       .bind("review-first", ownerId, first.publicationId, first.versionId, "approver-a").run();
 
-    expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${candidate.versionId}/activate`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(409);
+    const activationKey = crypto.randomUUID();
+    expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${candidate.versionId}/activate`, { method: "POST", headers: { "Idempotency-Key": activationKey } })).status).toBe(409);
     expect(await env.DB.prepare("SELECT active_version_id FROM publications WHERE id = ?").bind(first.publicationId).first()).toMatchObject({ active_version_id: first.versionId });
+    expect(await env.DB.prepare("SELECT id FROM idempotency_keys WHERE owner_id = ? AND idempotency_key = ?").bind(ownerId, activationKey).first()).toBeNull();
 
     await env.DB.prepare("INSERT INTO collaboration_review_decisions (id, owner_id, publication_id, version_id, actor_id, decision) VALUES (?, ?, ?, ?, ?, 'approved')")
       .bind("review-candidate", ownerId, first.publicationId, candidate.versionId, "approver-a").run();
-    expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${candidate.versionId}/activate`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } })).status).toBe(200);
+    expect((await request(`/v1/owners/${ownerId}/publications/${first.publicationId}/versions/${candidate.versionId}/activate`, { method: "POST", headers: { "Idempotency-Key": activationKey } })).status).toBe(200);
     expect(await env.DB.prepare("SELECT active_version_id FROM publications WHERE id = ?").bind(first.publicationId).first()).toMatchObject({ active_version_id: candidate.versionId });
   });
 });

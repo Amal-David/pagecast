@@ -110,13 +110,30 @@ const id = z.string().refine(isPagecastId, "invalid Pagecast ID");
 const uuid = z.string().uuid();
 const idempotency = z.string().regex(/^[\x21-\x7e]{1,255}$/);
 const payload = z.record(z.string(), z.unknown());
+const manifest = z.array(z.object({
+  path: z.string().min(1).max(256),
+  bytes: z.number().int().min(0).max(16 * 1024 * 1024),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  contentType: z.string().regex(/^[^\s/]+\/[^\s;]+(?:;[^\r\n]*)?$/),
+})).min(1).max(25);
 
 function hasScope(actor: AuthActor, scope: string): boolean {
   return actor.kind === "token" && (actor.scopes.includes("*") || actor.scopes.includes(scope));
 }
 
-function toolResult(status: number, value: unknown, isError = status >= 400, revealCredential = false) {
-  const safe = redact(value, revealCredential);
+interface RedactionOptions { revealCredential?: boolean; revealShare?: boolean; }
+
+const CREDENTIAL_KEYS = new Set(["token", "secret", "credential", "invitation"]);
+const ALWAYS_REDACTED_KEYS = new Set([
+  "password", "password_hash", "passwordhash", "hash", "token_hash", "tokenhash",
+  "credential_hash", "credentialhash", "credential_digest", "credentialdigest",
+  "invite_digest", "invitedigest", "visitor", "address_hmac", "addresshmac",
+  "r2_key", "r2key", "artifact_key", "artifactkey", "manifest_key", "manifestkey",
+  "storage", "storage_key", "storagekey", "auth", "authorization", "cookie",
+]);
+
+function toolResult(status: number, value: unknown, isError = status >= 400, options: RedactionOptions = {}) {
+  const safe = redact(value, options);
   const result = {
     ok: !isError,
     status,
@@ -135,14 +152,22 @@ function recoveryFor(status: number, value: unknown): string {
   return "Keep returned IDs and idempotency keys to inspect or safely retry this operation.";
 }
 
-function redact(value: unknown, revealCredential = false): unknown {
-  if (Array.isArray(value)) return value.map((child) => redact(child, revealCredential));
-  if (!value || typeof value !== "object") return typeof value === "string" && (!revealCredential && /^(?:pcv2|pcg2?|pcm2|pcwh)_/.test(value) || /-[a-f0-9]{32}$/i.test(value) || /\/p\/[^/?#]+-[a-f0-9]{32}(?:[/?#]|$)/i.test(value)) ? "[redacted]" : value;
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([key, child]) => (
-    ["token", "secret", "credential", "invitation", "password", "visitor", "address_hmac", "r2_key", "r2key", "artifact_key", "artifactkey", "manifest_key", "manifestkey", "authorization", "cookie"].includes(key.toLowerCase()) && !revealCredential
-      ? []
-      : [[key, redact(child, revealCredential)]]
-  )));
+function redact(value: unknown, options: RedactionOptions = {}, revealCredentialValue = false): unknown {
+  if (Array.isArray(value)) return value.map((child) => redact(child, options, revealCredentialValue));
+  if (!value || typeof value !== "object") {
+    if (typeof value !== "string") return value;
+    const isShare = /-[a-f0-9]{32}$/i.test(value) || /\/p\/[^/?#]+-[a-f0-9]{32}(?:[/?#]|$)/i.test(value);
+    if (isShare && !options.revealShare) return "[redacted]";
+    return /^(?:pcv2|pcg2?|pcm2|pcwh)_/.test(value) && !revealCredentialValue ? "[redacted]" : value;
+  }
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([key, child]) => {
+    const normalizedKey = key.toLowerCase();
+    if (ALWAYS_REDACTED_KEYS.has(normalizedKey)) return [];
+    if (CREDENTIAL_KEYS.has(normalizedKey)) {
+      return options.revealCredential ? [[key, redact(child, options, true)]] : [];
+    }
+    return [[key, redact(child, options)]];
+  }));
 }
 
 function rejected(message: string) {
@@ -160,12 +185,12 @@ function mcpRequest(request: Request, pathname: string, method: string, body: un
   return new Request(new URL(pathname, request.url), { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
 }
 
-async function invokeControl(request: Request, env: Env, dispatchControl: ControlDispatcher, pathname: string, method: string, body?: unknown, idempotencyKey?: string, revealCredential = false) {
+async function invokeControl(request: Request, env: Env, dispatchControl: ControlDispatcher, pathname: string, method: string, body?: unknown, idempotencyKey?: string, options: RedactionOptions = {}) {
   const synthetic = mcpRequest(request, pathname, method, body, idempotencyKey);
   const response = await dispatchControl(synthetic, env, new URL(synthetic.url));
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) return toolResult(response.status, { artifact: true, contentType: contentType || null }, !response.ok);
-  return toolResult(response.status, await response.json<unknown>(), !response.ok, revealCredential);
+  return toolResult(response.status, await response.json<unknown>(), !response.ok, options);
 }
 
 function registerControlTool(
@@ -182,6 +207,7 @@ function registerControlTool(
     write?: boolean;
     destructive?: boolean;
     revealCredential?: boolean;
+    revealShare?: boolean;
     route: (input: Record<string, unknown>) => { pathname: string; method: string; body?: unknown };
   },
 ): void {
@@ -194,7 +220,7 @@ function registerControlTool(
     const value = input as Record<string, unknown>;
     if (spec.destructive && value.confirm !== true) return rejected("confirmation_required");
     const route = spec.route(value);
-    return invokeControl(request, env, dispatchControl, route.pathname, route.method, route.body, typeof value.idempotencyKey === "string" ? value.idempotencyKey : undefined, spec.revealCredential);
+    return invokeControl(request, env, dispatchControl, route.pathname, route.method, route.body, typeof value.idempotencyKey === "string" ? value.idempotencyKey : undefined, { revealCredential: spec.revealCredential, revealShare: spec.revealShare });
   });
 }
 
@@ -219,7 +245,7 @@ async function buildServer(actor: AuthActor, request: Request, env: Env, dispatc
   registerControlTool(server, actor, request, env, dispatchControl, { name: "publication_list", description: "List publications owned by this token.", scope: "publications:read", route: () => ({ pathname: ownerRoute(actor, "publications"), method: "GET" }) });
   registerControlTool(server, actor, request, env, dispatchControl, { name: "publication_get", description: "Read safe publication metadata.", scope: "publications:read", inputSchema: z.object({ publicationId: id }), route: (v) => ({ pathname: ownerRoute(actor, `publications/${v.publicationId}?include=publication`), method: "GET" }) });
   registerControlTool(server, actor, request, env, dispatchControl, { name: "publication_list_versions", description: "List immutable versions for one publication.", scope: "publications:read", inputSchema: z.object({ publicationId: id, before: z.number().int().positive().optional() }), route: (v) => ({ pathname: ownerRoute(actor, `publications/${v.publicationId}${v.before ? `?before=${v.before}` : ""}`), method: "GET" }) });
-  registerControlTool(server, actor, request, env, dispatchControl, { name: "publication_create_upload_session", description: "Create an upload session from a validated publication manifest. The returned IDs are safe to use in later tools.", scope: "publications:write", write: true, inputSchema: z.object({ mode: z.enum(["create", "context-upsert", "new-link", "explicit-update"]), title: z.string().min(1).max(255), slug: z.string().min(1).max(128).optional(), linkKind: z.enum(["public", "unlisted"]), contextKey: z.string().min(1).max(255).optional(), publicationId: id.optional(), manifest: payload }), route: (v) => ({ pathname: ownerRoute(actor, "upload-sessions"), method: "POST", body: { mode: v.mode, title: v.title, slug: v.slug, linkKind: v.linkKind, contextKey: v.contextKey, publicationId: v.publicationId, manifest: v.manifest } }) });
+  registerControlTool(server, actor, request, env, dispatchControl, { name: "publication_create_upload_session", description: "Create an upload session from a validated publication manifest. The returned IDs and unlisted share link are safe to return to the requesting user.", scope: "publications:write", write: true, revealShare: true, inputSchema: z.object({ mode: z.enum(["create", "context-upsert", "new-link", "explicit-update"]), title: z.string().min(1).max(300), slug: z.string().min(1).max(63), linkKind: z.enum(["public", "unlisted"]), contextKey: z.string().min(1).max(128).optional(), publicationId: id.optional(), manifest }), route: (v) => ({ pathname: ownerRoute(actor, "upload-sessions"), method: "POST", body: { mode: v.mode, title: v.title, slug: v.slug, linkKind: v.linkKind, contextKey: v.contextKey, publicationId: v.publicationId, manifest: v.manifest } }) });
   if (hasScope(actor, "publications:write")) {
     server.registerTool("publication_upload_file", {
       description: "Upload one manifest-declared file up to 1 MiB from base64 content. It never reads a local path or URL; use the streaming HTTP upload-session file endpoint for larger assets.",

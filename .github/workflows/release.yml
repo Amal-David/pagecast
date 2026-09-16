@@ -79,6 +79,13 @@ jobs:
           pnpm -C web exec tsc --noEmit
           npm test
           git diff --exit-code -- public
+      - name: Verify Worker runtime and deployment
+        run: |
+          npm --prefix worker ci --ignore-scripts
+          npm --prefix worker run check
+          npm --prefix worker run db:migrate:local
+          npm --prefix worker run deploy:dry-run
+          node scripts/verify-worker-publishing.mjs
       - name: Pack, install, and smoke-test the shipped package
         shell: bash
         run: |

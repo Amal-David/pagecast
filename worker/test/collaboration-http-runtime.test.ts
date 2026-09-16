@@ -77,6 +77,31 @@ describe("actor-bound collaboration token and invitation flow", () => {
     expect(comment.status).toBe(201);
   });
 
+  it("rejects a collaboration grant that expired earlier on the same UTC day", async () => {
+    expect((await request(`/v1/owners/${ownerId}/actors`, bootstrap, {
+      method: "POST", headers: { "content-type": "application/json", "Idempotency-Key": "expired-grant-actor" }, body: JSON.stringify({ actorId: "expired-grant-actor", displayName: "Expired grant actor" }),
+    })).status).toBe(201);
+    const tokenResponse = await request(`/v1/owners/${ownerId}/tokens`, bootstrap, {
+      method: "POST", headers: { "content-type": "application/json", "Idempotency-Key": "expired-grant-token" }, body: JSON.stringify({ label: "expired grant reader", actorId: "expired-grant-actor", scopes: ["collaboration:read", "collaboration:write", "collaboration:admin"] }),
+    });
+    const { token } = await tokenResponse.json<{ token: string }>();
+    const invitationResponse = await request(`/v1/owners/${ownerId}/memberships`, bootstrap, {
+      method: "POST", headers: { "content-type": "application/json", "Idempotency-Key": "expired-grant-invite" }, body: JSON.stringify({ actorId: "expired-grant-actor", role: "commenter" }),
+    });
+    const invitation = await invitationResponse.json<{ id: string; invitation: string }>();
+    expect((await request(`/v1/owners/${ownerId}/memberships/${invitation.id}/accept`, token, {
+      method: "POST", headers: { "Idempotency-Key": "expired-grant-accept", "X-Pagecast-Invitation": invitation.invitation },
+    })).status).toBe(200);
+    const created = await request(`/v1/owners/${ownerId}/collaboration-grants`, bootstrap, {
+      method: "POST", headers: { "content-type": "application/json", "Idempotency-Key": "expired-grant-create" }, body: JSON.stringify({ publicationId: "publication-http", actions: ["publication:comment"], expiresAt: new Date(Date.now() + 60_000).toISOString() }),
+    });
+    const grant = await created.json<{ id: string; credential: string }>();
+    await env.DB.prepare("UPDATE collaboration_grants SET expires_at = ? WHERE id = ?").bind(new Date(Date.now() - 60_000).toISOString(), grant.id).run();
+    expect((await request(`/v1/owners/${ownerId}/publications/publication-http/granted-comments`, token, {
+      headers: { "X-Pagecast-Grant": grant.credential },
+    })).status).toBe(403);
+  });
+
   it("uses a stable keyset cursor for collaboration lists", async () => {
     for (let number = 0; number < 51; number += 1) {
       await env.DB.prepare("INSERT INTO collaboration_actors (id, owner_id, display_name) VALUES (?, ?, ?)").bind(`actor-page-${String(number).padStart(2, "0")}`, ownerId, `Actor ${number}`).run();
