@@ -164,7 +164,13 @@ test("daemon-routed Worker publishes preserve attachToReportId", async () => {
   const workerFetch = async (url, options = {}) => {
     if (url.endsWith("/v1/status")) return Response.json({ apiVersion: 2, capabilities: ["publications.upload", "publications.access", "publications.versions"] });
     if (options.method === "POST" && url.includes("upload-sessions") && !url.includes("complete")) return Response.json({ sessionId: "session", publicationId: "worker-publication", versionId: "version-1", slug: "worker-report" });
-    if (options.method === "PUT") return Response.json({ uploaded: true });
+    if (options.method === "PUT" && url.includes("/files/")) {
+      let bytes = 0;
+      for await (const chunk of options.body) bytes += chunk.length;
+      assert.equal(bytes, Number(options.headers["Content-Length"]));
+      return Response.json({ uploaded: true });
+    }
+    if (options.method === "PUT" && url.endsWith("/access-policy")) return Response.json({ updated: true });
     if (options.method === "POST" && url.endsWith("/complete")) return Response.json({ status: "complete" });
     if (options.method === "POST" && url.endsWith("/activate")) return Response.json({ publicationId: "worker-publication", versionId: "version-1", state: "published" });
     throw new Error(`Unexpected Worker request: ${options.method || "GET"} ${url}`);
