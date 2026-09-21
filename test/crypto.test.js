@@ -116,6 +116,35 @@ test("middleware passes through unprotected paths without auth", async () => {
   });
   assert.equal(nexted, true);
   assert.equal(res.status, 200);
+  assert.equal(res.headers.get("X-Robots-Tag"), "noindex, nofollow");
+  assert.equal(await res.text(), "OTHER");
+});
+
+test("middleware excludes assets, redirects, and expired reports across hostnames from search", async () => {
+  const { onRequest } = await loadMiddleware([{ slug: "expired", expiresAt: 1 }]);
+  for (const host of ["reports.pages.dev", "snapshot.reports.pages.dev", "reports.example.com"]) {
+    for (const name of ["index.html", "report.pdf", "image.png"]) {
+      const response = await onRequest({
+        request: new Request(`https://${host}/p/open/${name}`),
+        next: async () => new Response("asset", { headers: { "X-Robots-Tag": "index, follow" } })
+      });
+      assert.equal(response.headers.get("X-Robots-Tag"), "noindex, nofollow");
+      assert.equal(await response.text(), "asset");
+    }
+    const redirect = await onRequest({
+      request: new Request(`https://${host}/p/open`),
+      next: async () => Response.redirect(`https://${host}/p/open/`, 301)
+    });
+    assert.equal(redirect.status, 301);
+    assert.equal(redirect.headers.get("Location"), `https://${host}/p/open/`);
+    assert.equal(redirect.headers.get("X-Robots-Tag"), "noindex, nofollow");
+    const expired = await onRequest({
+      request: new Request(`https://${host}/p/expired/`),
+      next: async () => { throw new Error("Expired content must not be served"); }
+    });
+    assert.equal(expired.status, 410);
+    assert.equal(expired.headers.get("X-Robots-Tag"), "noindex, nofollow");
+  }
 });
 
 test("middleware blocks a protected path without a password (401 + WWW-Authenticate)", async () => {
@@ -133,6 +162,7 @@ test("middleware blocks a protected path without a password (401 + WWW-Authentic
   });
   assert.equal(nexted, false);
   assert.equal(res.status, 401);
+  assert.equal(res.headers.get("X-Robots-Tag"), "noindex, nofollow");
   assert.match(res.headers.get("WWW-Authenticate") || "", /^Basic realm=/);
 });
 
@@ -162,6 +192,7 @@ test("middleware rejects a wrong password and accepts the right one (with Set-Co
   });
   assert.equal(served, true);
   assert.equal(ok.status, 200);
+  assert.equal(ok.headers.get("X-Robots-Tag"), "noindex, nofollow");
   assert.match(ok.headers.get("Set-Cookie") || "", /^pc_demo=.*HttpOnly/);
 });
 
