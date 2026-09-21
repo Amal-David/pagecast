@@ -128,8 +128,10 @@ test("public config is an allowlist and never exposes nested feedback or interna
     "feedback",
     "local",
     "pages",
-    "telemetryConsent"
+    "telemetryConsent",
+    "workers"
   ]);
+  assert.deepEqual(publicConfig.workers, { activeProfileId: null, profiles: [] });
   assert.deepEqual(publicConfig.feedback, {
     url: "https://pagecast-feedback.example.workers.dev",
     workerName: "pagecast-feedback",

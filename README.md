@@ -1,20 +1,25 @@
 # Pagecast
 
 Preview local HTML reports, Markdown docs, and static mini apps, then publish
-them to shareable Cloudflare Pages URLs — from the terminal or your coding agent.
+them through Cloudflare Pages or your own Pagecast Worker — from the dashboard,
+terminal, or a coding agent.
 
 **Site:** <https://pagecasthq.pages.dev/> ·
 **Agent skill:** [`publish-report` on Skills.sh](https://www.skills.sh/amal-david/pagecast/publish-report) ·
 **Architecture:** [ARCHITECTURE.md](ARCHITECTURE.md)
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Amal-David/pagecast/tree/main/worker)
 
 <p align="center">
   <img src="media/admin.png" alt="Pagecast admin UI: published reports with per-page password protection" width="900">
 </p>
 
 Pagecast is a local-first publishing tool for agent-generated reports and small
-static web projects: preview files, publish, re-sync, rename links,
-password-protect pages, and revoke URLs — from a local admin UI or headless
-`pagecast` commands. Good fits: HTML reports and dashboards, Markdown docs and
+static web projects. Cloudflare Pages remains the default and keeps the simple
+snapshot workflow. The optional Worker backend adds immutable versions,
+rollback, public/unlisted/password/allowlist access, grants, teams, comments,
+approvals, privacy-preserving analytics, audit, webhooks, background jobs, and a
+remote MCP endpoint. Good fits: HTML reports and dashboards, Markdown docs and
 plans, static mini apps from `dist`/`build`/`out`. Not a fit: server-rendered
 apps that need a running backend (export static assets first).
 
@@ -61,6 +66,31 @@ npx pagecast pages setup --project your-pagecast-home
 # automation? export CLOUDFLARE_API_TOKEN (scoped Pages:Edit) + CLOUDFLARE_ACCOUNT_ID
 ```
 
+## Pages or Workers
+
+| | Cloudflare Pages | Pagecast Worker |
+| --- | --- | --- |
+| Default | Yes | Explicit opt-in |
+| Storage | Whole-site Pages deployments | Immutable files in R2 with D1 metadata |
+| History | Pages deployment snapshots | Per-publication versions and rollback |
+| Access | Unlisted links, password, expiry | Public, unlisted, password, allowlist, grants, expiry |
+| Collaboration | Local operator workflow | Organizations, members, comments, approvals, presence |
+| Operations | Optional Activity Worker | Analytics, redacted audit, webhooks, Queue/Cron jobs |
+| Agents | Local stdio MCP | Local stdio MCP plus authenticated remote HTTP MCP |
+
+Existing Pages links do not move automatically. Deploy the Worker, create a
+scoped Worker token, connect it in **Settings → Pagecast Worker**, then choose
+Worker delivery for a new link or migrate one Pages publication. Migration
+adds a Worker publication to the same report and leaves the Pages URL live for
+recovery.
+
+The deploy button targets the standalone `worker/` template. The person
+deploying it must provide five independent secrets and review the generated D1,
+R2, Durable Object, Queue, Cron, and static-assets resources. See
+[worker/README.md](worker/README.md) for the complete operator procedure. A
+custom domain, Cloudflare Access policy, optional Browser binding, and any Pages
+cutover remain separate operator actions.
+
 **Upgrading from 0.5:** stop the old process (`npx pagecast@0.5.0 background stop`),
 reinstall the macOS login service if you use it (`npx pagecast@0.7.0 background
 service install`), and reload the unpacked Chrome extension from the matching
@@ -71,7 +101,7 @@ projects remain legacy targets until you explicitly attach or move them.
 ## Publish From The Terminal
 
 ```sh
-# An HTML or Markdown file → a memorable /p/<slug>/ link (source folder included)
+# An HTML or Markdown file → a memorable /p/<slug>/ link (Pages is the default)
 npx pagecast publish "/absolute/path/report.html" --json
 
 # Set an expiry — 7d, 12h, or never (default 30d)
@@ -84,14 +114,23 @@ npx pagecast publish "/absolute/path/report.html" --update <url-or-token> --json
 # A built static project → publish its entry file
 npm run build && npx pagecast publish ./dist/index.html --json
 
+# Publish through a connected Worker instead of the default Pages backend
+npx pagecast publish ./dist/index.html --backend workers --json
+
+# Inspect versions, roll back, or add Worker delivery beside an existing Pages link
+npx pagecast workers versions <publication-token> --json
+npx pagecast workers rollback <publication-token> <version-id> --json
+npx pagecast workers migrate <pages-publication-token> --json
+
 # A whole folder → replace a named Pages project directly (--branch defaults to main)
 npx pagecast pages deploy ./dist --project my-static-site --json
 ```
 
 Things to know:
 
-- `publish` copies every non-hidden, non-symlink file under the source folder,
-  referenced or not — publish from a clean folder and keep secrets elsewhere.
+- The default Pages `publish` copies every non-hidden, non-symlink file under
+  the source folder, referenced or not. Publish from a clean folder and keep
+  secrets elsewhere. Worker file publishing isolates the selected file.
 - New links are **unlisted**: a memorable label plus a 128-bit suffix. Anyone
   with the URL can view it — unlisted is not private. The admin UI's **Short
   public link** toggle (or renaming to a vanity slug) makes a guessable public
@@ -105,6 +144,13 @@ Things to know:
   use a separate project unless replacing the managed site is intentional.
 - `statusCode 401` → authentication required (interactive runs start Wrangler
   auth automatically); `statusCode 409` → conflict, follow the returned message.
+- A Worker file publish stages only the selected file and normalizes its entry
+  to `index.html`. A Worker folder publish includes its selected public tree,
+  with a maximum of 25 files, 16 MiB per file, and 256 MiB total.
+- Worker uploads use four concurrent streams, durable client checkpoints, and
+  idempotency keys. Access policy is applied before a completed version becomes
+  active. Retrying a journaled operation resumes uploaded files instead of
+  creating an unrelated publication.
 
 ## Activity Analytics
 
@@ -131,6 +177,13 @@ being reachable. Crypto and security model:
 [PASSWORD-PROTECTION.md](PASSWORD-PROTECTION.md).
 
 ## Deploy History
+
+Published reports send `X-Robots-Tag: noindex, nofollow` on static files and
+Function responses. This asks supporting search engines to exclude reports;
+it does not make links private. Use password protection for confidential content.
+Re-publish existing sites to apply these headers. Older deployment snapshots
+retain their original headers and must be pruned separately when needed.
+Do not block crawling with `robots.txt` if crawlers need to see `noindex`.
 
 Every publish or re-sync creates an immutable whole-site Cloudflare deployment
 with its own `<hash>.pages.dev` URL. Manage them from the admin UI
@@ -170,8 +223,8 @@ More detail in [plugin/README.md](plugin/README.md).
 ## Use Through MCP
 
 Pagecast can run as a Model Context Protocol server, so MCP-capable agents can
-publish, inspect, and revoke through a bounded tool surface. Configure the stdio
-server:
+publish, inspect, and revoke through a bounded tool surface. Configure the local
+stdio server:
 
 ```json
 {
@@ -196,12 +249,13 @@ intentionally isolated MCP profile.
 | `publish_file` | Publish a local `.html`/`.htm`/`.md`/`.markdown` file. | Isolates the entry file; sibling assets require `includeAssets: true` **and** `confirmAssets: true`. |
 | `revoke_publication` | Take a published token offline and redeploy. | Requires `confirm: true` because it changes a live URL. |
 
-The MCP server is separate from the admin API, which stays loopback-only — do
-not expose the admin port to a VPN or shared network. This release supports
-local stdio MCP only; an org-hosted HTTP endpoint would need its own auth,
-audit, and threat model, and a VPN would gate who can invoke Pagecast, not who
-can reach the published URL. Use password protection or your organization's
-access layer for restricted recipients.
+The local MCP server is separate from the admin API, which stays loopback-only.
+Do not expose the admin port to a VPN or shared network. A Pagecast Worker also
+serves stateless Streamable HTTP MCP at `/mcp`. It requires an expiring scoped
+Worker token, strict Host/Origin policy, and explicit confirmation for
+destructive tools. Remote MCP never receives local file paths or runs local
+build commands. Configure its hostname allowlists and token as described in
+[worker/README.md](worker/README.md).
 
 ## Run with Docker
 
@@ -262,6 +316,9 @@ via `chrome://extensions` → **Developer mode** → **Load unpacked**, then ena
   touching the original source file.
 - Review interrupted managed operations and retry safe recovery steps.
 - View deploy history and remove old snapshots, with one-click "keep newest N" cleanup.
+- Connect an optional Pagecast Worker and manage versions, access, grants,
+  collaboration, analytics, redacted audit events, webhooks, jobs, and migration
+  status without changing the Pages default.
 
 ## Security Model
 
@@ -274,9 +331,16 @@ via `chrome://extensions` → **Developer mode** → **Load unpacked**, then ena
 - Production access is through active `/p/<slug>/` links; revoked links 404
   after the replacement deploy. Older immutable deployment URLs retain their
   snapshot until pruned.
-- Public routes reject directory traversal and hidden files. CLI path publishing
-  exposes every regular file under the report's source folder — keep secrets out.
+- Public routes reject directory traversal and hidden files. Default Pages path
+  publishing exposes every regular file under the report's source folder; a
+  Worker file publish stages only the selected entry.
 - The Pages root publishes no report listing.
+- Worker control requests use scoped tokens and owner checks. The bootstrap
+  secret is only for initial token administration and must not be entered into
+  the local Pagecast connection form.
+- Worker content is immutable by version in R2. D1 controls the active version,
+  access policy, collaboration, jobs, audit, and analytics state. Public
+  delivery never exposes R2 object keys.
 
 ## Telemetry
 
@@ -303,7 +367,8 @@ UI work requires pnpm 10: `pnpm -C web install --frozen-lockfile --ignore-script
 then `pnpm -C web run dev` (proxied to the server on 4173). The root CLI/server
 has no runtime npm dependencies. Layout: `src/` (CLI, server, publisher),
 `public/` (built UI), `web/` (React source), `plugin/` + `.codex/skills/`
-(agent skills), `test/` (Node tests). Source-folder build commands run through
+(agent skills), `worker/` (standalone Cloudflare Worker), `test/` (Node tests).
+Source-folder build commands run through
 the platform's native shell (`sh -lc` / `%ComSpec%`) — author portable commands.
 
 ## Contributing

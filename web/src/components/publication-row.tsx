@@ -34,6 +34,7 @@ import {
 } from "@/hooks/use-pagecast";
 import type { Publication } from "@/lib/types";
 import { PublicationActivitySummary } from "@/components/activity-panel";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 
 interface PublicationRowProps {
   publication: Publication;
@@ -49,6 +50,7 @@ export function PublicationRow({ publication, analyticsEnabled = false }: Public
 
   const [editing, setEditing] = useState(false);
   const [slugDraft, setSlugDraft] = useState(publication.slug);
+  const [confirmAdoption, setConfirmAdoption] = useState(false);
 
   useEffect(() => {
     if (!editing) setSlugDraft(publication.slug);
@@ -56,6 +58,8 @@ export function PublicationRow({ publication, analyticsEnabled = false }: Public
 
   const url = publication.publicUrl || publication.localUrl || "";
   const isSnapshot = publication.kind === "snapshot";
+  const isWorker = publication.backend === "workers";
+  const isPagesSnapshot = !isWorker && isSnapshot;
 
   const handleCopy = async () => {
     if (!url) return;
@@ -144,7 +148,10 @@ export function PublicationRow({ publication, analyticsEnabled = false }: Public
             >
               {publication.expired ? "expired" : "published"}
             </Badge>
-            {isSnapshot ? (
+            <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px]">
+              {publication.backend === "workers" ? "Worker" : "Pages"}
+            </Badge>
+            {isPagesSnapshot ? (
               <Button
                 size="icon"
                 variant="ghost"
@@ -160,20 +167,12 @@ export function PublicationRow({ publication, analyticsEnabled = false }: Public
         )}
         {!editing ? (
           <><div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            {!publication.targetAttributed ? (
+            {!isWorker && !publication.targetAttributed ? (
               <button
                 type="button"
                 className="font-medium text-amber-700 underline-offset-2 hover:underline"
                 disabled={adoptTarget.isPending}
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      "Attach this legacy link to the currently selected Cloudflare account and project?"
-                    )
-                  ) {
-                    adoptTarget.mutate(publication.token);
-                  }
-                }}
+                onClick={() => setConfirmAdoption(true)}
               >
                 {adoptTarget.isPending ? "Attaching…" : "Attach selected project"}
               </button>
@@ -181,7 +180,7 @@ export function PublicationRow({ publication, analyticsEnabled = false }: Public
             <span className="truncate">
               Last synced {relativeTime(publication.updatedAt)}
             </span>
-            {isSnapshot ? (
+            {isPagesSnapshot ? (
               <>
                 <span aria-hidden="true">·</span>
                 <Select
@@ -216,7 +215,7 @@ export function PublicationRow({ publication, analyticsEnabled = false }: Public
                 </Select>
               </>
             ) : null}
-          </div><PublicationActivitySummary publicationId={publication.token} enabled={analyticsEnabled} /></>
+          </div>{!isWorker ? <PublicationActivitySummary publicationId={publication.token} enabled={analyticsEnabled} /> : null}</>
         ) : null}
       </div>
 
@@ -231,7 +230,7 @@ export function PublicationRow({ publication, analyticsEnabled = false }: Public
         >
           <Copy className="h-3.5 w-3.5" />
         </Button>
-        {isSnapshot ? (
+        {isPagesSnapshot ? (
           <Button
             size="icon"
             variant="ghost"
@@ -245,7 +244,7 @@ export function PublicationRow({ publication, analyticsEnabled = false }: Public
             />
           </Button>
         ) : null}
-        <Button
+        {!isWorker ? <Button
           size="icon"
           variant="ghost"
           className="h-7 w-7 text-muted-foreground hover:text-destructive"
@@ -258,8 +257,8 @@ export function PublicationRow({ publication, analyticsEnabled = false }: Public
           ) : (
             <X className="h-3.5 w-3.5" />
           )}
-        </Button>
-      </div>
+        </Button> : null}
+      </div>{!isWorker ? <AlertDialog open={confirmAdoption} onOpenChange={setConfirmAdoption}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Attach selected project?</AlertDialogTitle><AlertDialogDescription>This legacy link will be attached to the currently selected Cloudflare account and project.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => adoptTarget.mutate(publication.token)}>Attach project</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog> : null}
     </div>
   );
 }

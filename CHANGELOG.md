@@ -5,6 +5,50 @@ All notable changes to Pagecast are documented here. This project follows
 
 ## Unreleased
 
+### Added
+
+- **Hybrid Pagecast Worker backend** — Cloudflare Pages remains the default,
+  while each publication can opt into a separately deployed Worker backed by
+  D1, R2, a Durable Object, Queue, Cron, and static assets.
+- **Immutable publication versions** — resumable bounded uploads, canonical R2
+  manifests, context-aware upsert, activation, rollback, rename, revoke,
+  restore, expiry, and durable idempotency receipts.
+- **Worker access and collaboration** — public, unlisted, password, and
+  allowlist policies; one-time grants; organizations, actors, memberships,
+  invitations, comments, review decisions, approval gates, and live presence.
+- **Worker operations** — privacy-preserving analytics, redacted audit reads,
+  signed webhooks, delivery retries and dead letters, scheduled repair, link and
+  index inspection, and optional screenshot, PDF, and accessibility artifacts.
+- **Remote MCP** — authenticated stateless Streamable HTTP MCP at `/mcp`, with
+  expiring scoped tokens, strict Host/Origin policy, 56 explicit tools, and
+  confirmation on destructive operations.
+- **Hybrid dashboard and CLI** — Worker deploy/connect/status, backend labels,
+  versions, access, team review, analytics, audit, webhooks, jobs, recovery, and
+  Pages-to-Worker migration that preserves the existing Pages URL.
+- **Deploy to Cloudflare template** — the standalone `worker/` package includes
+  deploy-button metadata, operator documentation, local/remote migration
+  commands, secret guidance, and a Wrangler dry-run check.
+
+### Security
+
+- Worker credentials use a separate private file and never enter browser query
+  state. Dashboard responses redact bootstrap secrets, bearer credentials,
+  password hashes, token digests, R2 object keys, local capabilities, and raw
+  visitor identifiers.
+- Pages-only report operations exclude Worker publications, so reports that
+  keep both backends cannot send Worker rows through legacy Pages deploy paths.
+- Webhook destinations reject SSRF-prone targets. Worker mutation coordination,
+  upload recovery, Queue leases, and global slug conflicts fail with durable,
+  retryable state instead of ambiguous side effects.
+
+### Compatibility
+
+- Existing Pages publications and commands keep their behavior and remain the
+  default. Migration creates a second Worker publication on the same report; it
+  does not revoke, replace, or cut over the Pages URL.
+- Live Worker deployment, custom-domain routing, Cloudflare Access policies,
+  optional paid Browser bindings, and any Pages cutover remain operator actions.
+
 ## 0.7.0 — 2026-08-02
 
 ### Added

@@ -42,7 +42,13 @@ test("CI covers the supported OS and Node matrix plus artifact proofs", () => {
     workflow.match(
       /- name: Checkout\r?\n\s+uses: actions\/checkout@[^\r\n]+\r?\n\s+with:\r?\n\s+persist-credentials: false/g
     ) || [];
-  assert.equal(hardenedCheckouts.length, 2, "every CI checkout must avoid persisting credentials");
+  assert.equal(hardenedCheckouts.length, 3, "every CI checkout must avoid persisting credentials");
+  for (const file of [".github/workflows/ci.yml", ".github/workflows/release.yml"]) {
+    const source = read(file);
+    for (const command of ["ci --ignore-scripts", "run check", "run db:migrate:local", "run deploy:dry-run"]) {
+      assert.ok(source.includes(`npm --prefix worker ${command}`), `${file} must verify Worker ${command}`);
+    }
+  }
   assert.match(workflow, /os:\s*\[ubuntu-latest, windows-latest\]/);
   assert.match(workflow, /node:\s*\["20\.19\.0", 22\]/);
   assert.match(workflow, /pnpm -C web run build/);

@@ -60,6 +60,9 @@ import { PublicationRow } from "@/components/publication-row";
 import { OperationJournal } from "@/components/operation-journal";
 import { PreviewDialog } from "@/components/preview-dialog";
 import { EditorSheet } from "@/components/editor/editor-sheet";
+import { WorkerConnectionCard } from "@/components/worker-connection-card";
+import { WorkerPublicationPanel } from "@/components/worker-publication-panel";
+import { DeliveryPicker } from "@/components/delivery-picker";
 import {
   useAutoSync,
   useBuildReport,
@@ -519,6 +522,7 @@ export function App() {
                     onToggleCloudflareSync={(enabled) =>
                       setCloudflareSyncEnabled.mutate(enabled)
                     }
+                    workers={status.data?.config.workers}
                   />
                 </motion.div>
               ) : (
@@ -567,6 +571,8 @@ export function App() {
                     onRequestDelete={setPendingDelete}
                     onRequestRevokeAll={setPendingRevoke}
                   />}
+                  {selectedReport ? <DeliveryPicker report={selectedReport} workers={status.data?.config.workers} /> : null}
+                  {selectedReport?.publications.filter((publication) => publication.backend === "workers").map((publication) => <WorkerPublicationPanel key={publication.token} publication={publication} />)}
                 </motion.div>
               )}
           </main>
@@ -2021,7 +2027,8 @@ function SettingsView({
   defaultExpiry,
   cloudflareSyncEnabled,
   cloudflareSyncPending,
-  onToggleCloudflareSync
+  onToggleCloudflareSync,
+  workers
 }: {
   reports: Report[];
   cloudflare: CloudflareStatus | undefined;
@@ -2032,6 +2039,7 @@ function SettingsView({
   cloudflareSyncEnabled: boolean;
   cloudflareSyncPending: boolean;
   onToggleCloudflareSync: (enabled: boolean) => void;
+  workers: import("@/lib/types").AppConfig["workers"];
 }) {
   return (
     <div className="h-full overflow-y-auto scroll-smooth bg-background">
@@ -2053,6 +2061,7 @@ function SettingsView({
             autoSyncPending={cloudflareSyncPending}
             onToggleAutoSync={onToggleCloudflareSync}
           />
+          <div className="mt-4"><WorkerConnectionCard workers={workers} /></div>
         </section>
         <section
           id={settingsSectionId("deploy-history")}

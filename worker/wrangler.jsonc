@@ -1,0 +1,61 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "pagecast",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "ENVIRONMENT": "development"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "PUBLICATIONS"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PUBLICATION_OWNER",
+        "class_name": "PublicationOwner"
+      }
+    ]
+  },
+  "exports": {
+    "PublicationOwner": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOBS",
+        "queue": "pagecast-jobs"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "pagecast-jobs",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "dead_letter_queue": "pagecast-jobs-dead-letter"
+      }
+    ]
+  },
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  }
+}

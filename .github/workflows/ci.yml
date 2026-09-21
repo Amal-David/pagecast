@@ -9,6 +9,26 @@ permissions:
   contents: read
 
 jobs:
+  worker:
+    name: Worker runtime, migrations, and deploy proof
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: 22
+      - name: Verify Worker
+        run: |
+          npm --prefix worker ci --ignore-scripts
+          npm --prefix worker run check
+          npm --prefix worker run db:migrate:local
+          npm --prefix worker run deploy:dry-run
+          node scripts/verify-worker-publishing.mjs
+
   test:
     name: Node ${{ matrix.node }} / ${{ matrix.os }}
     strategy:

@@ -1218,6 +1218,7 @@ test("snapshot publications deploy to Cloudflare Pages and revoke from the stage
     await assert.rejects(() => fs.stat(path.join(committedSite, "index.html")), /ENOENT/);
     assert.match(await fs.readFile(path.join(committedSite, "404.html"), "utf8"), /Not found/);
     assert.match(await fs.readFile(path.join(committedSite, "_headers"), "utf8"), /no-store/);
+    assert.match(await fs.readFile(path.join(committedSite, "_headers"), "utf8"), /X-Robots-Tag: noindex, nofollow/);
     assert.match(await fs.readFile(path.join(stagedDir, "index.html"), "utf8"), /Snapshot/);
     assert.equal(await fs.readFile(path.join(stagedDir, "style.css"), "utf8"), "body { color: blue; }");
     assert.equal(await fs.readFile(path.join(stagedDir, "assets", "data.json"), "utf8"), "{}");
