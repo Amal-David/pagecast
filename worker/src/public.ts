@@ -36,6 +36,14 @@ interface FileRow {
 interface RedirectRow { publication_id: string; status_code: number; }
 
 export async function handlePublicDelivery(request: Request, env: Env, url: URL, ctx?: Pick<ExecutionContext, "waitUntil">): Promise<Response | null> {
+  const original = await resolvePublicDelivery(request, env, url, ctx);
+  if (!original) return null;
+  const response = new Response(original.body, original);
+  response.headers.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
+  return response;
+}
+
+async function resolvePublicDelivery(request: Request, env: Env, url: URL, ctx?: Pick<ExecutionContext, "waitUntil">): Promise<Response | null> {
   const route = /^\/p\/([^/]+)(?:\/(.*))?$/.exec(url.pathname);
   if (!route) return null;
   if (!['GET', 'HEAD', 'POST', 'OPTIONS'].includes(request.method)) return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD, POST, OPTIONS' } });
@@ -381,7 +389,6 @@ function publicHeaders(access: PublicationAccessRow): Record<string, string> {
     'Referrer-Policy': 'no-referrer',
     'Permissions-Policy': 'camera=(), geolocation=(), microphone=()',
     'Content-Security-Policy': "default-src 'self' https: data: blob:; script-src 'self' https: blob: 'unsafe-inline' 'unsafe-eval'; style-src 'self' https: 'unsafe-inline'; connect-src 'self' https: wss:; base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
-    'X-Robots-Tag': privateResource ? 'noindex, nofollow, noarchive' : 'index, follow',
     'Cache-Control': privateResource ? 'private, no-store' : 'public, max-age=0, must-revalidate',
   };
 }

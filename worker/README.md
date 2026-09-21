@@ -5,6 +5,13 @@ remains the default. Deploy this Worker when you need immutable versions,
 rollback, allowlists and grants, team review, private analytics, audit,
 webhooks, background jobs, or remote MCP.
 
+All publication responses send `X-Robots-Tag: noindex, nofollow, noarchive`,
+including public links, assets, redirects, and authentication responses on
+the Worker and content origins. Search exclusion is advisory; use password
+or allowlist access for confidential content. Deploy the updated Worker to
+apply this policy to existing publications. Search results may persist until
+crawlers revisit them; do not block that crawl with `robots.txt`.
+
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Amal-David/pagecast/tree/main/worker)
 
 Cloudflare documents the button and supported resources in

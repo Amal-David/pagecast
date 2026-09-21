@@ -19,15 +19,19 @@ function control(path: string, init: RequestInit = {}) {
   }) as never, workerEnv, {} as ExecutionContext);
 }
 
-function publicRequest(path: string, init: RequestInit = {}) {
-  return worker.fetch!(new Request(`https://pagecast.test${path}`, init) as never, workerEnv, {} as ExecutionContext);
+async function publicRequest(path: string, init: RequestInit = {}) {
+  const response = await worker.fetch!(new Request(`https://pagecast.test${path}`, init) as never, workerEnv, {} as ExecutionContext);
+  expect(response.headers.get("X-Robots-Tag")).toBe("noindex, nofollow, noarchive");
+  return response;
 }
 
-function isolatedRequest(publicationId: string, path: string, init: RequestInit = {}) {
-  return worker.fetch!(new Request(`https://${publicationId}.content.pagecast.test${path}`, init) as never, {
+async function isolatedRequest(publicationId: string, path: string, init: RequestInit = {}) {
+  const response = await worker.fetch!(new Request(`https://${publicationId}.content.pagecast.test${path}`, init) as never, {
     ...workerEnv,
     CONTENT_ORIGIN: "https://content.pagecast.test",
   }, {} as ExecutionContext);
+  expect(response.headers.get("X-Robots-Tag")).toBe("noindex, nofollow, noarchive");
+  return response;
 }
 
 async function publishedFixture(options: { mode?: string; expiresAt?: string | null; approval?: string } = {}) {
@@ -136,7 +140,6 @@ describe("policy-enforced public delivery", () => {
     expect((await publicRequest(`/p/${publication.slug}/assets/module.mjs`)).headers.get("Content-Type")).toBe("text/javascript");
     const html = await publicRequest(`/p/${publication.slug}/`);
     expect(html.headers.get("Content-Security-Policy")).toContain("'unsafe-inline'");
-    expect(html.headers.get("X-Robots-Tag")).toBe("index, follow");
     expect(await html.text()).toBe("<h1>Protected report</h1>");
     const socialPreview = await publicRequest(`/p/${publication.slug}/`, { headers: { "User-Agent": "Twitterbot/1.0" } });
     expect(await socialPreview.text()).toContain(`property="og:image" content="https://pagecast.test/p/${publication.slug}/_social/card.svg"`);
