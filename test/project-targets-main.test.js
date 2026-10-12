@@ -165,6 +165,110 @@ test("workspace sources are rejected without changing saved publications", async
   assert.equal(fake.captures.length, 1, "rejected workspaces must not reach the deploy subprocess");
 });
 
+for (const markerKind of ["directory", "file"]) {
+  test(`root .git ${markerKind} rejects a workspace without other manifests`, async (t) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-git-source-"));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const fake = captureDeploys();
+    const publisher = createCloudflarePagesPublisher({ dataDir: path.join(root, "data"), spawnImpl: fake.spawnImpl });
+    const pagesConfig = { accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", projectName: "git-source", baseUrl: "https://git-source.pages.dev", adoptExisting: true };
+    const report = await makeReport(root, "report", "<h1>saved</h1>");
+    const publication = { token: "alpha", slug: "alpha" };
+    await publisher.publish({ report, publication, pagesConfig });
+    const saved = await fs.readFile(path.join(publisher.publicationDir("alpha", pagesConfig), "index.html"));
+    const marker = path.join(report.rootDir, ".git");
+    if (markerKind === "directory") await fs.mkdir(marker);
+    else await fs.writeFile(marker, "gitdir: /other/checkout");
+    await assert.rejects(publisher.syncPublication({ report, publication, pagesConfig }), /development workspace/i);
+    assert.deepEqual(await fs.readFile(path.join(publisher.publicationDir("alpha", pagesConfig), "index.html")), saved);
+    assert.equal(fake.captures.length, 1);
+  });
+}
+
+for (const swapStage of ["before descent", "before file read"]) {
+  test(`source directory swapped to a link ${swapStage} cannot publish outside bytes`, async (t) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-source-directory-swap-"));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const fake = captureDeploys();
+    const publisher = createCloudflarePagesPublisher({ dataDir: path.join(root, "data"), spawnImpl: fake.spawnImpl });
+    const pagesConfig = { accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", projectName: "directory-swap", baseUrl: "https://directory-swap.pages.dev", adoptExisting: true };
+    const report = await makeReport(root, "report", "<h1>source</h1>");
+    const assets = path.join(report.rootDir, "assets");
+    const outside = path.join(root, "outside");
+    await fs.mkdir(assets);
+    await fs.mkdir(outside);
+    await fs.writeFile(path.join(assets, "payload.txt"), "source asset");
+    await fs.writeFile(path.join(outside, "payload.txt"), "outside private bytes");
+    const readdir = fs.readdir.bind(fs);
+    let listings = 0;
+    t.mock.method(fs, "readdir", async (directory, ...args) => {
+      const entries = await readdir(directory, ...args);
+      const trigger = swapStage === "before descent" ? report.rootDir : assets;
+      if (directory === trigger && ++listings === 2) {
+        await fs.rename(assets, path.join(root, "original-assets"));
+        await fs.symlink(outside, assets, "junction");
+      }
+      return entries;
+    });
+    await assert.rejects(publisher.publish({ report, publication: { token: "alpha", slug: "alpha" }, pagesConfig }), /source directory/i);
+    assert.equal(fake.captures.length, 0, "a changed directory must not reach deployment");
+    assert.equal(await fs.readFile(path.join(outside, "payload.txt"), "utf8"), "outside private bytes");
+  });
+}
+
+for (const swapStage of ["before target descent", "before operation removal"]) {
+  test(`staging target swapped to a link ${swapStage} preserves deployed bytes`, async (t) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-staging-directory-swap-"));
+    const dataDir = path.join(root, "data");
+    const lease = new WorkspaceLease(dataDir);
+    await lease.acquire({ capability: "test-directory-swap" });
+    t.after(async () => {
+      await lease.release();
+      await fs.rm(root, { recursive: true, force: true });
+    });
+    const publisher = createCloudflarePagesPublisher({ dataDir });
+    const operations = path.join(dataDir, "targets", ".operations");
+    const group = path.join(operations, "target");
+    const abandoned = path.join(group, "deploy-abandoned");
+    const protectedRoot = path.join(dataDir, "targets", "saved", "last-deployed", "p");
+    const protectedDir = path.join(protectedRoot, "deploy-abandoned");
+    const protectedFile = path.join(protectedDir, "index.html");
+    await fs.mkdir(abandoned, { recursive: true });
+    await fs.mkdir(protectedDir, { recursive: true });
+    await fs.writeFile(protectedFile, "saved deployment");
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await fs.utimes(abandoned, old, old);
+    await fs.utimes(protectedDir, old, old);
+    if (swapStage === "before target descent") {
+      const readdir = fs.readdir.bind(fs);
+      t.mock.method(fs, "readdir", async (directory, ...args) => {
+        const entries = await readdir(directory, ...args);
+        if (directory === operations) {
+          await fs.rename(group, path.join(root, "original-staging"));
+          await fs.symlink(protectedRoot, group, "junction");
+        }
+        return entries;
+      });
+    } else {
+      const readFile = fs.readFile.bind(fs);
+      t.mock.method(fs, "readFile", async (file, ...args) => {
+        try {
+          return await readFile(file, ...args);
+        } finally {
+          if (file === path.join(abandoned, ".operation-owner.json")) {
+            await fs.rename(group, path.join(root, "original-staging"));
+            await fs.symlink(protectedRoot, group, "junction");
+          }
+        }
+      });
+    }
+    let failure;
+    try { await publisher.recoverAbandonedStaging(); } catch (error) { failure = error; }
+    assert.equal(await fs.readFile(protectedFile, "utf8"), "saved deployment");
+    assert.match(failure?.message || "", /real operations directory|staging boundary/i);
+  });
+}
+
 test("oversized source files are rejected before copying their bytes", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-source-budget-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

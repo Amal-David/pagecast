@@ -838,20 +838,29 @@ async function copyPublicTree(
   let copiedBytes = 0;
   let copiedFiles = 0;
   const copyBuffer = publicationSource ? Buffer.alloc(64 * 1024) : null;
+  const realSourceRoot = publicationSource ? await fs.realpath(sourceRoot) : null;
+
+  async function requireSourceDirectory(directory) {
+    if (!(await fs.lstat(directory)).isDirectory() ||
+      !isPathInside(realSourceRoot, await fs.realpath(directory))) {
+      throw appError("Publication source directory changed or is outside the selected source root.", 400);
+    }
+  }
 
   if (publicationSource) {
     let sourceBytes = 0;
     let sourceFiles = 0;
     async function validateSource(directory, relative = "") {
+      await requireSourceDirectory(directory);
       for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
         const sourcePath = path.join(directory, entry.name);
-        if (blockedRoots.some((root) => isPathInside(root, sourcePath)) || entry.isSymbolicLink()) {
+        if (blockedRoots.some((root) => isPathInside(root, sourcePath))) {
           continue;
         }
         const name = entry.name.toLowerCase();
         if (
           (entry.isDirectory() && developmentDirectories.has(name)) ||
-          (relative && name === ".git") ||
+          name === ".git" ||
           (!relative && entry.isFile() && developmentManifests.has(name))
         ) {
           throw appError(
@@ -859,7 +868,7 @@ async function copyPublicTree(
             400
           );
         }
-        if (entry.name.startsWith(".")) continue;
+        if (entry.isSymbolicLink() || entry.name.startsWith(".")) continue;
         if (entry.isDirectory()) {
           await validateSource(sourcePath, path.join(relative, entry.name));
         } else if (entry.isFile()) {
@@ -876,12 +885,9 @@ async function copyPublicTree(
   await fs.mkdir(destinationRoot, { recursive: true });
 
   async function copyDirectory(currentSource, currentRelative = "") {
+    if (publicationSource) await requireSourceDirectory(currentSource);
     const entries = await fs.readdir(currentSource, { withFileTypes: true });
     for (const entry of entries) {
-      if (entry.name.startsWith(".")) {
-        continue;
-      }
-
       const sourcePath = path.join(currentSource, entry.name);
       if (blockedRoots.some((blockedRoot) => isPathInside(blockedRoot, sourcePath))) {
         continue;
@@ -890,13 +896,14 @@ async function copyPublicTree(
       const destinationPath = path.join(destinationRoot, relativePath);
 
       if (publicationSource && (
+        entry.name.toLowerCase() === ".git" ||
         (entry.isDirectory() && developmentDirectories.has(entry.name.toLowerCase())) ||
         (!currentRelative && entry.isFile() && developmentManifests.has(entry.name.toLowerCase()))
       )) {
         throw appError("Publication source became a development workspace. Select a built static output folder.", 400);
       }
 
-      if (entry.isSymbolicLink()) {
+      if (entry.isSymbolicLink() || entry.name.startsWith(".")) {
         continue;
       }
 
@@ -916,6 +923,7 @@ async function copyPublicTree(
       }
       copiedFiles += 1;
       if (copiedFiles > maxFiles) throw sourceLimitError();
+      await requireSourceDirectory(currentSource);
       const input = await fs.open(sourcePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
       try {
         const stat = await input.stat();

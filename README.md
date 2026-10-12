@@ -94,7 +94,7 @@ Things to know:
   referenced or not — publish from a clean folder and keep secrets elsewhere.
   New source copies are limited to **512 MiB and 10,000 files**, including files
   that grow while copying. Development roots (such as folders containing a
-  package/build manifest, dependencies, nested repositories, or worktrees) are
+  package/build manifest, dependencies, Git repositories, or worktrees) are
   rejected before copying. Publish the finished `dist`/`build`/`out` folder or
   put a standalone report and its assets in a dedicated folder.
 - New links are **unlisted**: a memorable label plus a 128-bit suffix. Anyone

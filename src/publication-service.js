@@ -143,11 +143,18 @@ export function createPublicationService(options = {}, dependencies = {}) {
       throw appError("Staging recovery requires the current workspace lease.", 409);
     }
     const operationsRoot = path.join(targetsRoot, ".operations");
+    let realOperationsRoot;
+    async function requireOperationDirectory(directory) {
+      const stat = await fs.lstat(directory);
+      if (!stat.isDirectory() || !isPathInside(realOperationsRoot, await fs.realpath(directory))) {
+        throw appError("Staging recovery requires a real operations directory within the staging boundary.", 409);
+      }
+      return stat;
+    }
     let targets;
     try {
-      if (!(await fs.lstat(operationsRoot)).isDirectory()) {
-        throw appError("Staging recovery requires a real operations directory.", 409);
-      }
+      realOperationsRoot = await fs.realpath(operationsRoot);
+      await requireOperationDirectory(operationsRoot);
       targets = await fs.readdir(operationsRoot, { withFileTypes: true });
     } catch (error) {
       if (error.code === "ENOENT") return;
@@ -156,11 +163,11 @@ export function createPublicationService(options = {}, dependencies = {}) {
     for (const target of targets) {
       if (!target.isDirectory()) continue;
       const targetOperations = path.join(operationsRoot, target.name);
+      await requireOperationDirectory(targetOperations);
       for (const entry of await fs.readdir(targetOperations, { withFileTypes: true })) {
         if (!entry.isDirectory() || !/^deploy-[a-z0-9]+$/i.test(entry.name)) continue;
         const operationRoot = path.join(targetOperations, entry.name);
-        const stat = await fs.lstat(operationRoot);
-        if (!stat.isDirectory()) continue;
+        const stat = await requireOperationDirectory(operationRoot);
         let owner;
         try {
           owner = JSON.parse(await fs.readFile(path.join(operationRoot, ".operation-owner.json"), "utf8"));
@@ -180,6 +187,9 @@ export function createPublicationService(options = {}, dependencies = {}) {
           if (Date.now() - stat.mtimeMs < 24 * 60 * 60 * 1000) continue;
           if (owner && isProcessAlive(owner.pid) && (!owner.leaseId || owner.leaseId === lease.leaseId)) continue;
         }
+        await requireOperationDirectory(operationsRoot);
+        await requireOperationDirectory(targetOperations);
+        await requireOperationDirectory(operationRoot);
         await fs.rm(operationRoot, operationRemovalOptions);
       }
     }
