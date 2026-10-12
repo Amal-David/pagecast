@@ -4358,6 +4358,91 @@ test("isLoopbackHostHeader allows loopback and rejects rebound foreign hosts", (
   assert.equal(isLoopbackHostHeader("attacker.example:4173", "127.0.0.1", ["attacker.example"]), false);
 });
 
+for (const failure of ["locked staging", "invalid owner record"]) {
+  test(`startServers keeps read-only access when recovery fails with ${failure}`, async (t) => {
+    const tempDir = await makeTempDir();
+    const dataDir = path.join(tempDir, "data");
+    const reportDir = path.join(tempDir, "report");
+    await fs.mkdir(reportDir);
+    const reportPath = path.join(reportDir, "index.html");
+    await fs.writeFile(reportPath, "<h1>Saved publication</h1>");
+    const { fakeDeploy, state } = makeInstrumentedDeploy();
+    const options = { dataDir, adminPort: 0, publicPort: 0, pagesDeploySpawnImpl: fakeDeploy };
+    let runtime;
+    let removal;
+    try {
+      runtime = await startServers(options);
+      await configurePages(runtime.adminUrl);
+      const report = await addPathReport(runtime.adminUrl, reportPath);
+      const publication = await publishSnapshot(runtime.adminUrl, report.id);
+      const snapshotFile = path.join(managedSnapshotRoot(dataDir, publication.token), "index.html");
+      const deployedFile = path.join(managedSiteRoot(dataDir), "p", publication.slug, "index.html");
+      const savedSnapshot = await fs.readFile(snapshotFile);
+      const savedDeployment = await fs.readFile(deployedFile);
+      const legacy = runtime.store.draftPublication(report.id, { label: "Legacy publication" }).publication;
+      Object.assign(legacy, {
+        pagesProjectName: "team-reports",
+        pagesAccountId: TEST_PAGES_ACCOUNT_ID,
+        pagesBaseUrl: "https://team-reports.pages.dev",
+        publicUrl: `https://team-reports.pages.dev/p/${legacy.slug}/`
+      });
+      await runtime.store.commitPublication(report.id, legacy);
+      const legacyFile = path.join(dataDir, "pages-site", "p", legacy.slug, "index.html");
+      await fs.mkdir(path.dirname(legacyFile), { recursive: true });
+      await fs.writeFile(legacyFile, "<h1>Legacy publication</h1>");
+      await runtime.close();
+      runtime = null;
+
+      const group = path.join(dataDir, "targets", ".operations", `${TEST_PAGES_ACCOUNT_ID}--team-reports`);
+      const abandoned = path.join(group, "deploy-abandoned");
+      await fs.mkdir(abandoned);
+      const ownerFile = path.join(abandoned, ".operation-owner.json");
+      await fs.writeFile(ownerFile, failure === "invalid owner record" ? "null" : JSON.stringify({
+        pid: process.pid, leaseId: null, cleanupPending: true
+      }));
+      if (failure === "locked staging") {
+        const rm = fs.rm.bind(fs);
+        removal = t.mock.method(fs, "rm", async (file, options) => {
+          if (String(file) === abandoned) throw Object.assign(new Error("staging file is locked"), { code: "EBUSY" });
+          return rm(file, options);
+        });
+      }
+      const warnings = t.mock.method(console, "warn", () => {});
+      runtime = await startServers(options);
+      assert.ok(warnings.mock.calls.some(({ arguments: args }) => /staging recovery failed at startup/i.test(args[0])));
+      assert.equal((await fetch(runtime.adminUrl)).status, 200);
+      const reports = await (await fetch(`${runtime.adminUrl}/api/reports`)).json();
+      assert.equal(reports.reports[0].publications.length, 2);
+      assert.equal((await fetch(`${runtime.publicUrl}/preview/${report.id}/`)).status, 200);
+      const blocked = await fetch(`${runtime.adminUrl}/api/reports/${report.id}/publish-snapshot`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}"
+      });
+      assert.equal(blocked.status, failure === "invalid owner record" ? 409 : 500);
+      assert.match((await blocked.json()).error.message, failure === "invalid owner record" ? /invalid staging owner/i : /internal server error/i);
+      assert.equal(state.deployCount, 1);
+      assert.deepEqual(await fs.readdir(group), ["deploy-abandoned"]);
+      assert.deepEqual(await fs.readFile(snapshotFile), savedSnapshot);
+      assert.deepEqual(await fs.readFile(deployedFile), savedDeployment);
+      assert.equal(await fs.readFile(legacyFile, "utf8"), "<h1>Legacy publication</h1>");
+
+      removal?.mock.restore();
+      await fs.rm(abandoned, { recursive: true, force: true });
+      await runtime.close();
+      runtime = null;
+      runtime = await startServers(options);
+      assert.equal(await fs.readFile(path.join(managedSnapshotRoot(dataDir, legacy.token), "index.html"), "utf8"), "<h1>Legacy publication</h1>");
+      await publishSnapshot(runtime.adminUrl, report.id);
+      assert.equal(state.deployCount, 2, "publication staging resumes after the recovery failure is cleared");
+      assert.deepEqual(await fs.readdir(group), []);
+      assert.deepEqual(await fs.readFile(snapshotFile), savedSnapshot);
+    } finally {
+      removal?.mock.restore();
+      if (runtime) await runtime.close();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+}
+
 test("startServers falls back from an occupied persisted port and saves the working pair", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-local-ports-"));
   const blocker = createHttpServer((req, res) => {

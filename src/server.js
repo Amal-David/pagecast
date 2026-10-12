@@ -7238,11 +7238,16 @@ export async function startServers({
     isTargetManaged: (projectRef) => configStore.isTargetManaged(projectRef),
     claimTargetManaged: (projectRef) => configStore.claimManagedTarget(projectRef)
   });
-  await pagesPublisher.recoverAbandonedStaging();
-  await pagesPublisher.migrateLegacyStaging({
-    publications: store.listPublications(),
-    redirects: store.listRedirects()
-  });
+  try {
+    await pagesPublisher.recoverAbandonedStaging();
+    await pagesPublisher.migrateLegacyStaging({
+      publications: store.listPublications(),
+      redirects: store.listRedirects()
+    });
+  } catch (error) {
+    // Publication preparation retries recovery before creating any staging.
+    console.warn(`Pagecast staging recovery failed at startup: ${error?.message || error}`);
+  }
   const deployQueue = createDeployQueue();
   const mutationQueue = createDeployQueue();
   activeDeployQueue = deployQueue;

@@ -156,8 +156,11 @@ While holding its workspace lease, Pagecast recovers abandoned staging at
 startup and before preparing another publication. It retains active owners and
 fresh interrupted operations for a 24-hour grace period. Cleanup failures are
 reported, recorded for retry, and block additional staging until removal
-succeeds. Saved publication snapshots and last-deployed copies are retained;
-failed source copies or direct-site deployments keep the last committed copy.
+succeeds. If recovery fails at startup, Pagecast warns and keeps the admin UI
+and read-only views available; legacy staging migration waits for successful
+recovery on a later startup. Saved publication snapshots and last-deployed
+copies are retained; failed source copies or direct-site deployments keep the
+last committed copy.
 
 ## Use From Coding Agents
 
