@@ -92,6 +92,11 @@ Things to know:
 
 - `publish` copies every non-hidden, non-symlink file under the source folder,
   referenced or not — publish from a clean folder and keep secrets elsewhere.
+  New source copies are limited to **512 MiB and 10,000 files**, including files
+  that grow while copying. Development roots (such as folders containing a
+  package/build manifest, dependencies, nested repositories, or worktrees) are
+  rejected before copying. Publish the finished `dist`/`build`/`out` folder or
+  put a standalone report and its assets in a dedicated folder.
 - New links are **unlisted**: a memorable label plus a 128-bit suffix. Anyone
   with the URL can view it — unlisted is not private. The admin UI's **Short
   public link** toggle (or renaming to a vanity slug) makes a guessable public
@@ -145,6 +150,14 @@ npx pagecast pages deployments prune --keep 5 --yes --json
 Removing a snapshot never affects your live site or pages. But expiry, password
 changes, and revoke apply only to the replacement deployment — prune history
 when old snapshot URLs must stop working.
+
+Local temporary deployment directories are separate from this cloud history.
+While holding its workspace lease, Pagecast recovers abandoned staging at
+startup and before preparing another publication. It retains active owners and
+fresh interrupted operations for a 24-hour grace period. Cleanup failures are
+reported, recorded for retry, and block additional staging until removal
+succeeds. Saved publication snapshots and last-deployed copies are retained;
+failed source copies or direct-site deployments keep the last committed copy.
 
 ## Use From Coding Agents
 

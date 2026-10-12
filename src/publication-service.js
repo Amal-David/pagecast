@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { isProcessAlive, WORKSPACE_LEASE_FILENAME } from "./state-coordinator.js";
 
 // Internal managed-publication service. The compatibility factory in server.js
 // supplies platform and policy dependencies so this module stays acyclic and
@@ -103,6 +104,86 @@ export function createPublicationService(options = {}, dependencies = {}) {
   let markerSecret = "";
   let fallbackOwnerPromise = null;
   let markerSecretPromise = null;
+  const pendingOperationCleanup = new Set();
+  const operationRemovalOptions = { recursive: true, force: true, maxRetries: 3, retryDelay: 100 };
+
+  async function readWorkspaceLease() {
+    try {
+      return JSON.parse(await fs.readFile(path.join(dataDir, WORKSPACE_LEASE_FILENAME), "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  async function cleanupOperation(operationRoot) {
+    try {
+      await fs.rm(operationRoot, operationRemovalOptions);
+      pendingOperationCleanup.delete(operationRoot);
+    } catch (error) {
+      pendingOperationCleanup.add(operationRoot);
+      try {
+        await fs.mkdir(operationRoot, { recursive: true });
+        const lease = await readWorkspaceLease();
+        await atomicWriteJson(path.join(operationRoot, ".operation-owner.json"), {
+          pid: process.pid,
+          leaseId: lease?.pid === process.pid ? lease.leaseId : null,
+          cleanupPending: true
+        });
+      } catch (markerError) {
+        console.warn(`Pagecast could not record pending staging cleanup: ${markerError.message}`);
+      }
+      console.warn(`Pagecast staging cleanup failed for ${operationRoot}: ${error.message}`);
+    }
+  }
+
+  async function recoverAbandonedStaging() {
+    const lease = await readWorkspaceLease();
+    if (lease?.pid !== process.pid || !lease.leaseId) {
+      throw appError("Staging recovery requires the current workspace lease.", 409);
+    }
+    const operationsRoot = path.join(targetsRoot, ".operations");
+    let targets;
+    try {
+      if (!(await fs.lstat(operationsRoot)).isDirectory()) {
+        throw appError("Staging recovery requires a real operations directory.", 409);
+      }
+      targets = await fs.readdir(operationsRoot, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === "ENOENT") return;
+      throw error;
+    }
+    for (const target of targets) {
+      if (!target.isDirectory()) continue;
+      const targetOperations = path.join(operationsRoot, target.name);
+      for (const entry of await fs.readdir(targetOperations, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^deploy-[a-z0-9]+$/i.test(entry.name)) continue;
+        const operationRoot = path.join(targetOperations, entry.name);
+        const stat = await fs.lstat(operationRoot);
+        if (!stat.isDirectory()) continue;
+        let owner;
+        try {
+          owner = JSON.parse(await fs.readFile(path.join(operationRoot, ".operation-owner.json"), "utf8"));
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+        if (owner !== undefined && (
+          !owner || typeof owner !== "object" || Array.isArray(owner) ||
+          !Number.isInteger(owner.pid) || owner.pid <= 0 ||
+          typeof owner.cleanupPending !== "boolean" ||
+          (owner.leaseId !== null && typeof owner.leaseId !== "string")
+        )) {
+          throw appError(`Invalid staging owner record in ${operationRoot}.`, 409);
+        }
+        if (!owner?.cleanupPending) {
+          // A stale lease can leave its upload child running briefly after a crash.
+          if (Date.now() - stat.mtimeMs < 24 * 60 * 60 * 1000) continue;
+          if (owner && isProcessAlive(owner.pid) && (!owner.leaseId || owner.leaseId === lease.leaseId)) continue;
+        }
+        await fs.rm(operationRoot, operationRemovalOptions);
+      }
+    }
+  }
 
   function explicitProjectRef(value) {
     try {
@@ -340,7 +421,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
     );
     const contentRoot = path.join(preparedRoot, "content");
     const sourceRoot = publishSourceFor(report);
-    await copyPublicTree(sourceRoot, contentRoot, { excludedRoots: [dataDir] });
+    await copyPublicTree(sourceRoot, contentRoot, { excludedRoots: [dataDir], publicationSource: true });
 
     const indexPath = path.join(contentRoot, "index.html");
     let html;
@@ -463,8 +544,8 @@ export function createPublicationService(options = {}, dependencies = {}) {
     return generationRoot;
   }
 
-  async function commitTargetGeneration(generationRoot, pagesConfig) {
-    const { targetRoot } = targetPaths(pagesConfig);
+  async function commitGeneration(generationRoot, targetRoot) {
+    await recoverDirectorySwap(targetRoot);
     const previous = `${targetRoot}.previous`;
     await fs.mkdir(path.dirname(targetRoot), { recursive: true });
     await fs.rm(previous, { recursive: true, force: true });
@@ -484,7 +565,9 @@ export function createPublicationService(options = {}, dependencies = {}) {
     }
     // The switch is committed once generationRoot owns targetRoot. Failure to
     // remove the old generation is recoverable cleanup, not a failed publish.
-    await fs.rm(previous, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(previous, operationRemovalOptions).catch((error) => {
+      console.warn(`Pagecast previous generation cleanup failed for ${previous}: ${error.message}`);
+    });
   }
 
   async function commitSnapshot(snapshot, pagesConfig, operationRoot) {
@@ -497,10 +580,10 @@ export function createPublicationService(options = {}, dependencies = {}) {
         resolvedOperationRoot,
         { candidateSnapshots: [snapshot] }
       );
-      await commitTargetGeneration(generationRoot, pagesConfig);
+      await commitGeneration(generationRoot, targetPaths(pagesConfig).targetRoot);
     } finally {
       if (ownsOperation) {
-        await fs.rm(resolvedOperationRoot, { recursive: true, force: true }).catch(() => {});
+        await cleanupOperation(resolvedOperationRoot);
       }
     }
   }
@@ -763,9 +846,37 @@ export function createPublicationService(options = {}, dependencies = {}) {
   }
 
   async function createOperationRoot(pagesConfig) {
+    for (const operationRoot of pendingOperationCleanup) {
+      try {
+        await fs.rm(operationRoot, operationRemovalOptions);
+      } catch (error) {
+        throw appError(`Cannot prepare another publication until previous staging is cleaned up: ${error.message}`, 500);
+      }
+      pendingOperationCleanup.delete(operationRoot);
+    }
+    const lease = await readWorkspaceLease();
+    if (lease?.pid === process.pid) await recoverAbandonedStaging();
     const { operationsRoot } = targetPaths(pagesConfig);
+    await fs.mkdir(path.dirname(operationsRoot), { recursive: true });
+    if (!(await fs.lstat(path.dirname(operationsRoot))).isDirectory()) {
+      throw appError("Publication staging requires a real operations directory.", 409);
+    }
     await fs.mkdir(operationsRoot, { recursive: true });
-    return fs.mkdtemp(path.join(operationsRoot, "deploy-"));
+    if (!(await fs.lstat(operationsRoot)).isDirectory()) {
+      throw appError("Publication staging requires real operations directories.", 409);
+    }
+    const operationRoot = await fs.mkdtemp(path.join(operationsRoot, "deploy-"));
+    try {
+      await atomicWriteJson(path.join(operationRoot, ".operation-owner.json"), {
+        pid: process.pid,
+        leaseId: lease?.pid === process.pid ? lease.leaseId : null,
+        cleanupPending: false
+      });
+      return operationRoot;
+    } catch (error) {
+      await cleanupOperation(operationRoot);
+      throw error;
+    }
   }
 
   async function materializeDesiredSite(
@@ -800,7 +911,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
       await ensureSiteRoot(desiredRoot, pagesConfig, { includedSlugs: seenSlugs });
       return { operationRoot, desiredRoot };
     } catch (error) {
-      await fs.rm(operationRoot, { recursive: true, force: true }).catch(() => {});
+      await cleanupOperation(operationRoot);
       throw error;
     }
   }
@@ -816,7 +927,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
       candidateSnapshots,
       excludeTokens
     });
-    let cleanupOperation = true;
+    let shouldCleanupOperation = true;
     try {
       // Build the complete next local generation before touching Cloudflare.
       // Once the remote deploy succeeds, the local commit is one root swap.
@@ -828,14 +939,14 @@ export function createPublicationService(options = {}, dependencies = {}) {
       const result = await runPagesDeploy(desiredRoot, targetConfig, DEFAULT_PAGES_BRANCH);
       const commit = async () => {
         try {
-          await commitTargetGeneration(generationRoot, targetConfig);
+          await commitGeneration(generationRoot, targetPaths(targetConfig).targetRoot);
           lastPagesConfig = targetConfig;
         } finally {
-          await fs.rm(operationRoot, { recursive: true, force: true }).catch(() => {});
+          await cleanupOperation(operationRoot);
         }
       };
       if (deferCommit) {
-        cleanupOperation = false;
+        shouldCleanupOperation = false;
         let settled = false;
         return {
           ...result,
@@ -860,7 +971,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
           async discard() {
             if (!settled) {
               settled = true;
-              await fs.rm(operationRoot, { recursive: true, force: true }).catch(() => {});
+              await cleanupOperation(operationRoot);
             }
           }
         };
@@ -877,11 +988,11 @@ export function createPublicationService(options = {}, dependencies = {}) {
         }
         throw error;
       }
-      cleanupOperation = false;
+      shouldCleanupOperation = false;
       return result;
     } finally {
-      if (cleanupOperation) {
-        await fs.rm(operationRoot, { recursive: true, force: true }).catch(() => {});
+      if (shouldCleanupOperation) {
+        await cleanupOperation(operationRoot);
       }
     }
   }
@@ -954,26 +1065,33 @@ export function createPublicationService(options = {}, dependencies = {}) {
       projectRefFilesystemKey(projectRef),
       encodeURIComponent(normalizePagesBranch(branch))
     );
-    await copyPublicTree(normalizedSourceDir, stagingRoot, { excludedRoots: [dataDir] });
-    const markerPath = path.join(stagingRoot, PAGECAST_PROJECT_MARKER_FILE);
-    await fs.mkdir(path.dirname(markerPath), { recursive: true });
-    await fs.writeFile(
-      markerPath,
-      encodeProjectOwnershipMarker({
-        ownerId: await targetOwnerId(projectRef, "direct"),
-        mode: "direct",
-        projectRef
-      }),
-      "utf8"
-    );
-    const result = await runPagesDeploy(stagingRoot, pagesConfig, branch);
-    return {
-      ...result,
-      sourceDir: normalizedSourceDir,
-      stagingRoot,
-      projectName,
-      branch: normalizePagesBranch(branch)
-    };
+    const operationRoot = await createOperationRoot(projectRef);
+    try {
+      const candidateRoot = path.join(operationRoot, "direct");
+      await copyPublicTree(normalizedSourceDir, candidateRoot, { excludedRoots: [dataDir], publicationSource: true });
+      const markerPath = path.join(candidateRoot, PAGECAST_PROJECT_MARKER_FILE);
+      await fs.mkdir(path.dirname(markerPath), { recursive: true });
+      await fs.writeFile(
+        markerPath,
+        encodeProjectOwnershipMarker({
+          ownerId: await targetOwnerId(projectRef, "direct"),
+          mode: "direct",
+          projectRef
+        }),
+        "utf8"
+      );
+      const result = await runPagesDeploy(candidateRoot, pagesConfig, branch);
+      await commitGeneration(candidateRoot, stagingRoot);
+      return {
+        ...result,
+        sourceDir: normalizedSourceDir,
+        stagingRoot,
+        projectName,
+        branch: normalizePagesBranch(branch)
+      };
+    } finally {
+      await cleanupOperation(operationRoot);
+    }
   }
 
   async function publishPublications({ report, publications, pagesConfig }) {
@@ -1031,7 +1149,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
       }
       return firstResult.baseUrl;
     } finally {
-      await fs.rm(preparationRoot, { recursive: true, force: true }).catch(() => {});
+      await cleanupOperation(preparationRoot);
     }
   }
 
@@ -1198,7 +1316,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
           );
           await commitSnapshot(snapshot, projectRef, operationRoot);
         } finally {
-          await fs.rm(operationRoot, { recursive: true, force: true }).catch(() => {});
+          await cleanupOperation(operationRoot);
         }
       }
       migrated.push(publication);
@@ -1374,6 +1492,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
     discoverPublishedPages,
     buildSyncManifest,
     migrateLegacyStaging,
+    recoverAbandonedStaging,
     targetPaths
   };
 }

@@ -1799,6 +1799,11 @@ test("Headless Pages site deploy wraps Wrangler with project, branch, and accoun
   assert.equal(result.projectName, "pagecasthq");
   assert.equal(result.accountId, accountId);
   assert.equal(result.branch, "main");
+  const deploymentRoot = deployCommands[0].cwd;
+  assert.equal(path.dirname(path.dirname(deploymentRoot)), path.join(dataDir, "targets", ".operations", `${accountId}--pagecasthq`));
+  assert.match(path.basename(path.dirname(deploymentRoot)), /^deploy-[a-z0-9]+$/i);
+  assert.equal(path.basename(deploymentRoot), "direct");
+  await assert.rejects(fs.stat(deploymentRoot), /ENOENT/);
   assert.deepEqual(deployCommands, [
     {
       command: "npx",
@@ -1813,7 +1818,7 @@ test("Headless Pages site deploy wraps Wrangler with project, branch, and accoun
         "--branch",
         "main"
       ],
-      cwd: stagingRoot,
+      cwd: deploymentRoot,
       accountId
     }
   ]);

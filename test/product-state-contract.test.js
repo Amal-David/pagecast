@@ -329,7 +329,17 @@ test("direct deploy is stateless for managed publishing and isolates account/pro
     `${ACCOUNT_A}--other-project`,
     "main"
   );
-  assert.deepEqual(roots, [expectedA, expectedB, expectedC]);
+  assert.equal(new Set(roots).size, 3);
+  for (const [index, key] of [
+    `${ACCOUNT_A}--shared-project`,
+    `${ACCOUNT_B}--shared-project`,
+    `${ACCOUNT_A}--other-project`
+  ].entries()) {
+    assert.equal(path.dirname(path.dirname(roots[index])), path.join(dataDir, "targets", ".operations", key));
+    assert.match(path.basename(path.dirname(roots[index])), /^deploy-[a-z0-9]+$/i);
+    assert.equal(path.basename(roots[index]), "direct");
+    await assert.rejects(fs.stat(roots[index]), /ENOENT/, "temporary uploads must be cleaned after committing their saved copy");
+  }
   assert.equal(await fs.readFile(path.join(expectedA, "index.html"), "utf8"), "<h1>Account A</h1>");
   assert.equal(await fs.readFile(path.join(expectedB, "index.html"), "utf8"), "<h1>Account B</h1>");
   assert.equal(await fs.readFile(path.join(expectedC, "index.html"), "utf8"), "<h1>Other project</h1>");

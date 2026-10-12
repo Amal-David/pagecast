@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { createReadStream, existsSync, watch as fsWatch } from "node:fs";
+import { constants as fsConstants, createReadStream, existsSync, watch as fsWatch } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -821,8 +821,57 @@ function normalizeConfig(config = {}) {
   };
 }
 
-async function copyPublicTree(sourceRoot, destinationRoot, { excludedRoots = [] } = {}) {
+async function copyPublicTree(
+  sourceRoot,
+  destinationRoot,
+  { excludedRoots = [], publicationSource = false } = {}
+) {
   const blockedRoots = [destinationRoot, ...excludedRoots].map((entry) => path.resolve(entry));
+  const maxBytes = 512 * 1024 * 1024;
+  const maxFiles = 10000;
+  const developmentDirectories = new Set(["node_modules", "_wt", ".worktrees", ".venv", "venv"]);
+  const developmentManifests = new Set(["package.json", "cargo.toml", "package.swift", "pyproject.toml", "go.mod"]);
+  const sourceLimitError = () => appError(
+    "Publication source exceeds the 512 MiB / 10,000-file limit. Select a smaller built static output folder.",
+    413
+  );
+  let copiedBytes = 0;
+  let copiedFiles = 0;
+  const copyBuffer = publicationSource ? Buffer.alloc(64 * 1024) : null;
+
+  if (publicationSource) {
+    let sourceBytes = 0;
+    let sourceFiles = 0;
+    async function validateSource(directory, relative = "") {
+      for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+        const sourcePath = path.join(directory, entry.name);
+        if (blockedRoots.some((root) => isPathInside(root, sourcePath)) || entry.isSymbolicLink()) {
+          continue;
+        }
+        const name = entry.name.toLowerCase();
+        if (
+          (entry.isDirectory() && developmentDirectories.has(name)) ||
+          (relative && name === ".git") ||
+          (!relative && entry.isFile() && developmentManifests.has(name))
+        ) {
+          throw appError(
+            `This is a development workspace (${path.join(relative, entry.name)}). Select a built static output folder containing only the publication and its assets.`,
+            400
+          );
+        }
+        if (entry.name.startsWith(".")) continue;
+        if (entry.isDirectory()) {
+          await validateSource(sourcePath, path.join(relative, entry.name));
+        } else if (entry.isFile()) {
+          sourceBytes += (await fs.stat(sourcePath)).size;
+          sourceFiles += 1;
+          if (sourceBytes > maxBytes || sourceFiles > maxFiles) throw sourceLimitError();
+        }
+      }
+    }
+    // Validate before replacing any existing destination or copying source bytes.
+    await validateSource(sourceRoot);
+  }
   await fs.rm(destinationRoot, { recursive: true, force: true });
   await fs.mkdir(destinationRoot, { recursive: true });
 
@@ -840,6 +889,13 @@ async function copyPublicTree(sourceRoot, destinationRoot, { excludedRoots = [] 
       const relativePath = path.join(currentRelative, entry.name);
       const destinationPath = path.join(destinationRoot, relativePath);
 
+      if (publicationSource && (
+        (entry.isDirectory() && developmentDirectories.has(entry.name.toLowerCase())) ||
+        (!currentRelative && entry.isFile() && developmentManifests.has(entry.name.toLowerCase()))
+      )) {
+        throw appError("Publication source became a development workspace. Select a built static output folder.", 400);
+      }
+
       if (entry.isSymbolicLink()) {
         continue;
       }
@@ -854,7 +910,36 @@ async function copyPublicTree(sourceRoot, destinationRoot, { excludedRoots = [] 
       }
 
       await fs.mkdir(path.dirname(destinationPath), { recursive: true });
-      await fs.copyFile(sourcePath, destinationPath);
+      if (!publicationSource) {
+        await fs.copyFile(sourcePath, destinationPath);
+        continue;
+      }
+      copiedFiles += 1;
+      if (copiedFiles > maxFiles) throw sourceLimitError();
+      const input = await fs.open(sourcePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
+      try {
+        const stat = await input.stat();
+        if (!stat.isFile() || copiedBytes + stat.size > maxBytes) throw sourceLimitError();
+        const output = await fs.open(destinationPath, "w", stat.mode);
+        try {
+          while (true) {
+            const { bytesRead } = await input.read(copyBuffer, 0, copyBuffer.length, null);
+            if (!bytesRead) break;
+            copiedBytes += bytesRead;
+            if (copiedBytes > maxBytes) throw sourceLimitError();
+            let offset = 0;
+            while (offset < bytesRead) {
+              const { bytesWritten } = await output.write(copyBuffer, offset, bytesRead - offset);
+              if (!bytesWritten) throw appError("Publication source copy made no progress.", 500);
+              offset += bytesWritten;
+            }
+          }
+        } finally {
+          await output.close();
+        }
+      } finally {
+        await input.close();
+      }
     }
   }
 
@@ -3879,7 +3964,7 @@ export function createReportStore({
     const sourceRoot = reportSourceRoot(report);
     await fs.rm(workingDir, { recursive: true, force: true });
     try {
-      await copyPublicTree(sourceRoot, workingDir);
+      await copyPublicTree(sourceRoot, workingDir, { publicationSource: true });
       await fs.copyFile(
         path.join(sourceRoot, report.entryFile),
         path.join(workingDir, workingEntry)
@@ -7153,6 +7238,7 @@ export async function startServers({
     isTargetManaged: (projectRef) => configStore.isTargetManaged(projectRef),
     claimTargetManaged: (projectRef) => configStore.claimManagedTarget(projectRef)
   });
+  await pagesPublisher.recoverAbandonedStaging();
   await pagesPublisher.migrateLegacyStaging({
     publications: store.listPublications(),
     redirects: store.listRedirects()
