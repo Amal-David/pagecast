@@ -421,15 +421,16 @@ export function createPublicationService(options = {}, dependencies = {}) {
     );
     const contentRoot = path.join(preparedRoot, "content");
     const sourceRoot = publishSourceFor(report);
-    await copyPublicTree(sourceRoot, contentRoot, { excludedRoots: [dataDir], publicationSource: true });
+    const excludedRoots = isPathInside(sourceRoot, dataDir) ? [dataDir] : [];
+    await copyPublicTree(sourceRoot, contentRoot, { excludedRoots, publicationSource: true });
 
     const indexPath = path.join(contentRoot, "index.html");
     let html;
     if (isMarkdownFileName(report.entryFile)) {
-      const markdown = await fs.readFile(path.join(sourceRoot, report.entryFile), "utf8");
+      const markdown = await fs.readFile(path.join(contentRoot, report.entryFile), "utf8");
       html = markdownToHtml(markdown, { title: report.name });
     } else {
-      html = await fs.readFile(path.join(sourceRoot, report.entryFile), "utf8");
+      html = await fs.readFile(path.join(contentRoot, report.entryFile), "utf8");
     }
 
     const feedback = getFeedback();

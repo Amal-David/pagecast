@@ -3965,10 +3965,9 @@ export function createReportStore({
     await fs.rm(workingDir, { recursive: true, force: true });
     try {
       await copyPublicTree(sourceRoot, workingDir, { publicationSource: true });
-      await fs.copyFile(
-        path.join(sourceRoot, report.entryFile),
-        path.join(workingDir, workingEntry)
-      );
+      if (report.entryFile !== workingEntry) {
+        await fs.rename(path.join(workingDir, report.entryFile), path.join(workingDir, workingEntry));
+      }
       report.workingDir = workingDir;
       report.entryFile = workingEntry;
       report.sourceMode = "edited-in-pagecast";

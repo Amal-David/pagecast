@@ -3281,6 +3281,45 @@ test("custom slug rename rollback restores redirect-chain rewrites", async () =>
 
 // --- 1f: working copy editor ----------------------------------------------
 
+for (const entryFile of ["report.html", "index.html", "notes.md"]) {
+  test(`working-copy normalization uses the bounded ${entryFile} after source growth`, async (t) => {
+    const tempDir = await makeTempDir();
+    t.after(() => fs.rm(tempDir, { recursive: true, force: true }));
+    const reportDir = path.join(tempDir, "report");
+    await fs.mkdir(reportDir);
+    const source = path.join(reportDir, entryFile);
+    const original = entryFile.endsWith(".md") ? "# Bounded entry" : "<h1>Bounded entry</h1>";
+    await fs.writeFile(source, original);
+    await fs.writeFile(path.join(reportDir, "style.css"), "body { color: red; }");
+    const store = createReportStore({ dataDir: path.join(tempDir, "data") });
+    await store.init();
+    const report = await store.addPath(source);
+    const open = fs.open.bind(fs);
+    t.mock.method(fs, "open", async (file, ...args) => {
+      const handle = await open(file, ...args);
+      if (file === source) {
+        const close = handle.close.bind(handle);
+        t.mock.method(handle, "close", async () => {
+          await close();
+          await fs.truncate(source, 512 * 1024 * 1024 + 1);
+        });
+      }
+      return handle;
+    });
+    const copyFile = fs.copyFile.bind(fs);
+    t.mock.method(fs, "copyFile", async (file, ...args) => {
+      if (file === source) throw new Error("Unbounded entry recopy bypassed the source budget");
+      return copyFile(file, ...args);
+    });
+
+    const detached = await store.detachToWorkingCopy(report.id);
+    assert.equal((await fs.stat(source)).size, 512 * 1024 * 1024 + 1);
+    assert.equal(await fs.readFile(path.join(detached.workingDir, detached.entryFile), "utf8"), original);
+    assert.deepEqual((await fs.readdir(detached.workingDir)).sort(), [entryFile.endsWith(".md") ? "index.md" : "index.html", "style.css"]);
+    assert.equal(await fs.readFile(path.join(detached.workingDir, "style.css"), "utf8"), "body { color: red; }");
+  });
+}
+
 test("editing a path report writes a working copy and leaves the source untouched", async () => {
   const tempDir = await makeTempDir();
   const dataDir = path.join(tempDir, "data");

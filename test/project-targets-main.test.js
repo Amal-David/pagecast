@@ -366,6 +366,43 @@ test("source byte limits also stop files that grow after preflight", async (t) =
   assert.equal(fake.captures.length, 0);
 });
 
+for (const entryFile of ["report.html", "notes.md"]) {
+  test(`snapshot rendering uses the bounded ${entryFile} after source growth`, async (t) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-snapshot-entry-growth-"));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const fake = captureDeploys();
+    const publisher = createCloudflarePagesPublisher({ dataDir: path.join(root, "data"), spawnImpl: fake.spawnImpl });
+    const report = await makeReport(root, "report", "unused");
+    await fs.rename(path.join(report.rootDir, "index.html"), path.join(report.rootDir, entryFile));
+    report.entryFile = entryFile;
+    const source = path.join(report.rootDir, entryFile);
+    await fs.writeFile(source, entryFile.endsWith(".md") ? "# Bounded entry" : "<h1>Bounded entry</h1>");
+    const open = fs.open.bind(fs);
+    t.mock.method(fs, "open", async (file, ...args) => {
+      const handle = await open(file, ...args);
+      if (file === source) {
+        const close = handle.close.bind(handle);
+        t.mock.method(handle, "close", async () => {
+          await close();
+          await fs.truncate(source, 512 * 1024 * 1024 + 1);
+        });
+      }
+      return handle;
+    });
+    const readFile = fs.readFile.bind(fs);
+    t.mock.method(fs, "readFile", async (file, ...args) => {
+      if (file === source) throw new Error("Entry reread bypassed the source budget");
+      return readFile(file, ...args);
+    });
+    const pagesConfig = { accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", projectName: "entry-growth", baseUrl: "https://entry-growth.pages.dev", adoptExisting: true };
+    await publisher.publish({ report, publication: { token: "alpha", slug: "alpha" }, pagesConfig });
+    assert.equal((await fs.stat(source)).size, 512 * 1024 * 1024 + 1);
+    const saved = await fs.readFile(path.join(publisher.publicationDir("alpha", pagesConfig), "index.html"), "utf8");
+    assert.match(saved, /<h1>Bounded entry<\/h1>/);
+    assert.equal(fake.captures.length, 1);
+  });
+}
+
 test("staging recovery refuses unleased callers and symbolic operations roots", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-recovery-boundary-"));
   const dataDir = path.join(root, "data");
