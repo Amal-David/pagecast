@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Expected package version (for example 0.7.0 or v0.7.0)
+        description: Expected package version (for example 0.7.1 or v0.7.1)
         required: true
         type: string
 

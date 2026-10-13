@@ -62,11 +62,16 @@ npx pagecast pages setup --project your-pagecast-home
 ```
 
 **Upgrading from 0.5:** stop the old process (`npx pagecast@0.5.0 background stop`),
-reinstall the macOS login service if you use it (`npx pagecast@0.7.0 background
+reinstall the macOS login service if you use it (`npx pagecast@0.7.1 background
 service install`), and reload the unpacked Chrome extension from the matching
 release. The first 0.6 launch creates `~/.pagecast/home/` and imports compatible
 workspace publications without changing URLs; publications on other Cloudflare
 projects remain legacy targets until you explicitly attach or move them.
+
+After updating to 0.7.1, restart running Pagecast processes so they load the
+bundled staging cleanup helper. Saved publications and deployed copies are
+retained. Source checkouts must build the helper before starting Pagecast; see
+[Development](#development).
 
 ## Publish From The Terminal
 
