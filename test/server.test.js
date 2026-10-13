@@ -4442,7 +4442,9 @@ for (const failure of ["locked staging", "invalid owner record"]) {
       if (failure === "locked staging") {
         const rm = fs.rm.bind(fs);
         removal = t.mock.method(fs, "rm", async (file, options) => {
-          if (String(file) === abandoned) throw Object.assign(new Error("staging file is locked"), { code: "EBUSY" });
+          if (path.basename(String(file)) === path.basename(abandoned) && String(file).startsWith(path.dirname(group))) {
+            throw Object.assign(new Error("staging file is locked"), { code: "EBUSY" });
+          }
           return rm(file, options);
         });
       }

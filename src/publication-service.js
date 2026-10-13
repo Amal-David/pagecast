@@ -143,29 +143,56 @@ export function createPublicationService(options = {}, dependencies = {}) {
       throw appError("Staging recovery requires the current workspace lease.", 409);
     }
     const operationsRoot = path.join(targetsRoot, ".operations");
+    const cleanupRoot = `${operationsRoot}.cleanup`;
+    const cleanupRecordName = ".cleanup-owner.json";
+    try {
+      if (!(await fs.lstat(cleanupRoot)).isDirectory()) {
+        throw appError("Interrupted staging cleanup requires a real operations directory.", 409);
+      }
+      await fs.rename(cleanupRoot, operationsRoot);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
     let realOperationsRoot;
     async function requireOperationDirectory(directory) {
-      const stat = await fs.lstat(directory);
+      const stat = await fs.lstat(directory, { bigint: true });
       if (!stat.isDirectory() || !isPathInside(realOperationsRoot, await fs.realpath(directory))) {
         throw appError("Staging recovery requires a real operations directory within the staging boundary.", 409);
       }
       return stat;
     }
     let targets;
+    let rootStat;
     try {
       realOperationsRoot = await fs.realpath(operationsRoot);
-      await requireOperationDirectory(operationsRoot);
+      rootStat = await requireOperationDirectory(operationsRoot);
       targets = await fs.readdir(operationsRoot, { withFileTypes: true });
     } catch (error) {
       if (error.code === "ENOENT") return;
       throw error;
     }
+    let retired = false;
+    try {
+      const record = JSON.parse(await fs.readFile(path.join(operationsRoot, cleanupRecordName), "utf8"));
+      if (!record || record.cleanupPending !== true || record.dev !== String(rootStat.dev) || record.ino !== String(rootStat.ino)) {
+        throw appError("Invalid staging cleanup owner record.", 409);
+      }
+      retired = true;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    const cleanupTemps = new Set(targets
+      .filter((entry) => entry.isFile() && /^\.\.cleanup-owner\.json\.\d+\.[a-f0-9]{16}\.tmp$/.test(entry.name))
+      .map((entry) => entry.name));
+    const eligible = [];
+    let retained = false;
     for (const target of targets) {
-      if (!target.isDirectory()) continue;
+      if ((retired && target.name === cleanupRecordName) || cleanupTemps.has(target.name)) continue;
+      if (!target.isDirectory()) { retained = true; continue; }
       const targetOperations = path.join(operationsRoot, target.name);
       await requireOperationDirectory(targetOperations);
       for (const entry of await fs.readdir(targetOperations, { withFileTypes: true })) {
-        if (!entry.isDirectory() || !/^deploy-[a-z0-9]+$/i.test(entry.name)) continue;
+        if (!entry.isDirectory() || !/^deploy-[a-z0-9]+$/i.test(entry.name)) { retained = true; continue; }
         const operationRoot = path.join(targetOperations, entry.name);
         const stat = await requireOperationDirectory(operationRoot);
         let owner;
@@ -184,15 +211,60 @@ export function createPublicationService(options = {}, dependencies = {}) {
         }
         if (!owner?.cleanupPending) {
           // A stale lease can leave its upload child running briefly after a crash.
-          if (Date.now() - stat.mtimeMs < 24 * 60 * 60 * 1000) continue;
-          if (owner && isProcessAlive(owner.pid) && (!owner.leaseId || owner.leaseId === lease.leaseId)) continue;
+          if ((!retired && Date.now() - Number(stat.mtimeMs) < 24 * 60 * 60 * 1000) ||
+            (owner && isProcessAlive(owner.pid) && (!owner.leaseId || owner.leaseId === lease.leaseId))) {
+            retained = true;
+            continue;
+          }
         }
-        await requireOperationDirectory(operationsRoot);
-        await requireOperationDirectory(targetOperations);
-        await requireOperationDirectory(operationRoot);
-        await fs.rm(operationRoot, operationRemovalOptions);
+        eligible.push({ target: target.name, name: entry.name, dev: stat.dev, ino: stat.ino });
       }
     }
+    if (retained) {
+      if (retired) throw appError("Retired staging changed before cleanup could finish.", 409);
+      return;
+    }
+    if (!eligible.length && !cleanupTemps.size) {
+      if (retired) await fs.rm(path.join(operationsRoot, cleanupRecordName), { force: true });
+      return;
+    }
+    await requireOperationDirectory(operationsRoot);
+    await fs.rename(operationsRoot, cleanupRoot);
+    let cleanupError;
+    try {
+      const claimed = await fs.lstat(cleanupRoot, { bigint: true });
+      if (!claimed.isDirectory() || claimed.dev !== rootStat.dev || claimed.ino !== rootStat.ino) {
+        throw appError("Staging directory changed before cleanup claimed it.", 409);
+      }
+      realOperationsRoot = await fs.realpath(cleanupRoot);
+      await atomicWriteJson(path.join(cleanupRoot, cleanupRecordName), {
+        dev: String(rootStat.dev), ino: String(rootStat.ino), cleanupPending: true
+      });
+      for (const operation of eligible) {
+        const targetOperations = path.join(cleanupRoot, operation.target);
+        const operationRoot = path.join(targetOperations, operation.name);
+        await requireOperationDirectory(cleanupRoot);
+        await requireOperationDirectory(targetOperations);
+        const stat = await requireOperationDirectory(operationRoot);
+        if (stat.dev !== operation.dev || stat.ino !== operation.ino) {
+          throw appError("Staging directory changed before cleanup removed it.", 409);
+        }
+        await fs.rm(operationRoot, operationRemovalOptions);
+      }
+      for (const temporary of cleanupTemps) await fs.rm(path.join(cleanupRoot, temporary), { force: true });
+      await fs.rm(path.join(cleanupRoot, cleanupRecordName), { force: true });
+    } catch (error) {
+      cleanupError = error;
+    }
+    try {
+      await fs.rename(cleanupRoot, operationsRoot);
+    } catch (error) {
+      if (cleanupError) {
+        throw new AggregateError([cleanupError, error], `Staging cleanup failed: ${cleanupError.message}. Its tree could not be restored: ${error.message}.`);
+      }
+      throw appError(`Staging cleanup could not restore its tree: ${error.message}`, 409);
+    }
+    if (cleanupError) throw cleanupError;
   }
 
   function explicitProjectRef(value) {

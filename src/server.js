@@ -839,6 +839,7 @@ async function copyPublicTree(
   let copiedFiles = 0;
   const copyBuffer = publicationSource ? Buffer.alloc(64 * 1024) : null;
   const realSourceRoot = publicationSource ? await fs.realpath(sourceRoot) : null;
+  const validatedFiles = new Map();
 
   async function requireSourceDirectory(directory) {
     if (!(await fs.lstat(directory)).isDirectory() ||
@@ -872,7 +873,10 @@ async function copyPublicTree(
         if (entry.isDirectory()) {
           await validateSource(sourcePath, path.join(relative, entry.name));
         } else if (entry.isFile()) {
-          sourceBytes += (await fs.stat(sourcePath)).size;
+          const stat = await fs.lstat(sourcePath, { bigint: true });
+          if (!stat.isFile()) throw appError("Publication source changed during validation.", 400);
+          validatedFiles.set(path.join(relative, entry.name), { dev: stat.dev, ino: stat.ino });
+          sourceBytes += Number(stat.size);
           sourceFiles += 1;
           if (sourceBytes > maxBytes || sourceFiles > maxFiles) throw sourceLimitError();
         }
@@ -926,9 +930,13 @@ async function copyPublicTree(
       await requireSourceDirectory(currentSource);
       const input = await fs.open(sourcePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
       try {
-        const stat = await input.stat();
-        if (!stat.isFile() || copiedBytes + stat.size > maxBytes) throw sourceLimitError();
-        const output = await fs.open(destinationPath, "w", stat.mode);
+        const stat = await input.stat({ bigint: true });
+        const validated = validatedFiles.get(relativePath);
+        if (!stat.isFile() || !validated || stat.dev !== validated.dev || stat.ino !== validated.ino) {
+          throw appError("Publication source changed after validation. Retry from a finished static output folder.", 400);
+        }
+        if (copiedBytes + Number(stat.size) > maxBytes) throw sourceLimitError();
+        const output = await fs.open(destinationPath, "w", Number(stat.mode));
         try {
           while (true) {
             const { bytesRead } = await input.read(copyBuffer, 0, copyBuffer.length, null);

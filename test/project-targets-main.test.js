@@ -269,6 +269,116 @@ for (const swapStage of ["before target descent", "before operation removal"]) {
   });
 }
 
+test("a source swap at file open cannot copy an unvalidated file", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-source-open-swap-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const fake = captureDeploys();
+  const publisher = createCloudflarePagesPublisher({ dataDir: path.join(root, "data"), spawnImpl: fake.spawnImpl });
+  const report = await makeReport(root, "report", "<h1>source</h1>");
+  const assets = path.join(report.rootDir, "assets");
+  const outside = path.join(root, "outside");
+  await fs.mkdir(assets);
+  await fs.mkdir(outside);
+  await fs.writeFile(path.join(assets, "payload.txt"), "source asset");
+  await fs.writeFile(path.join(outside, "payload.txt"), "outside private bytes");
+  const open = fs.open.bind(fs);
+  t.mock.method(fs, "open", async (file, ...args) => {
+    if (file === path.join(assets, "payload.txt")) {
+      await fs.rename(assets, path.join(root, "original-assets"));
+      await fs.symlink(outside, assets, "junction");
+    }
+    return open(file, ...args);
+  });
+  const pagesConfig = { accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", projectName: "open-swap", baseUrl: "https://open-swap.pages.dev", adoptExisting: true };
+  await assert.rejects(publisher.publish({ report, publication: { token: "alpha", slug: "alpha" }, pagesConfig }), /source.*changed|source directory/i);
+  assert.equal(fake.captures.length, 0);
+  assert.equal(await fs.readFile(path.join(outside, "payload.txt"), "utf8"), "outside private bytes");
+});
+
+test("a live staging ancestor swap at removal preserves deployed bytes and can recover", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-staging-remove-swap-"));
+  const dataDir = path.join(root, "data");
+  const lease = new WorkspaceLease(dataDir);
+  await lease.acquire({ capability: "test-remove-swap" });
+  t.after(async () => { await lease.release(); await fs.rm(root, { recursive: true, force: true }); });
+  const publisher = createCloudflarePagesPublisher({ dataDir });
+  const operations = path.join(dataDir, "targets", ".operations");
+  const group = path.join(operations, "target");
+  const abandoned = path.join(group, "deploy-abandoned");
+  const protectedRoot = path.join(dataDir, "targets", "saved", "last-deployed", "p");
+  const protectedDir = path.join(protectedRoot, "deploy-abandoned");
+  const protectedFile = path.join(protectedDir, "index.html");
+  await fs.mkdir(abandoned, { recursive: true });
+  await fs.mkdir(protectedDir, { recursive: true });
+  await fs.writeFile(protectedFile, "saved deployment");
+  const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  await fs.utimes(abandoned, old, old);
+  await fs.utimes(protectedDir, old, old);
+  const rm = fs.rm.bind(fs);
+  const removal = t.mock.method(fs, "rm", async (file, options) => {
+    if (path.basename(String(file)) === "deploy-abandoned") {
+      if (await exists(group)) await fs.rename(group, path.join(root, "original-staging"));
+      else await fs.mkdir(path.dirname(group), { recursive: true });
+      await fs.symlink(protectedRoot, group, "junction");
+    }
+    return rm(file, options);
+  });
+  await assert.rejects(publisher.recoverAbandonedStaging(), /staging cleanup could not restore/i);
+  assert.equal(await fs.readFile(protectedFile, "utf8"), "saved deployment");
+  removal.mock.restore();
+  await fs.rm(operations, { recursive: true, force: true });
+  await publisher.recoverAbandonedStaging();
+  assert.equal(await exists(`${operations}.cleanup`), false);
+  assert.equal(await fs.readFile(protectedFile, "utf8"), "saved deployment");
+});
+
+test("interrupted staging claims are restored and cleaned on the next recovery", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-staging-claim-recovery-"));
+  const dataDir = path.join(root, "data");
+  const lease = new WorkspaceLease(dataDir);
+  await lease.acquire({ capability: "test-claim-recovery" });
+  t.after(async () => { await lease.release(); await fs.rm(root, { recursive: true, force: true }); });
+  const operations = path.join(dataDir, "targets", ".operations");
+  const abandoned = path.join(`${operations}.cleanup`, "target", "deploy-abandoned");
+  await fs.mkdir(abandoned, { recursive: true });
+  await fs.writeFile(path.join(abandoned, "payload"), "retired staging bytes");
+  const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  await fs.utimes(abandoned, old, old);
+  const publisher = createCloudflarePagesPublisher({ dataDir });
+  await fs.writeFile(path.join(`${operations}.cleanup`, "..cleanup-owner.json.123.0123456789abcdef.tmp"), '{"cleanupPending":');
+  await publisher.recoverAbandonedStaging();
+  assert.equal(await exists(`${operations}.cleanup`), false);
+  assert.deepEqual(await fs.readdir(path.join(operations, "target")), []);
+});
+
+test("a partially removed retired operation remains eligible after recovery restarts", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-retired-retry-"));
+  const dataDir = path.join(root, "data");
+  const lease = new WorkspaceLease(dataDir);
+  await lease.acquire({ capability: "test-retired-retry" });
+  t.after(async () => { await lease.release(); await fs.rm(root, { recursive: true, force: true }); });
+  const operations = path.join(dataDir, "targets", ".operations");
+  const abandoned = path.join(operations, "target", "deploy-abandoned");
+  await fs.mkdir(abandoned, { recursive: true });
+  await fs.writeFile(path.join(abandoned, "payload"), "retired bytes");
+  await fs.writeFile(path.join(abandoned, ".operation-owner.json"), JSON.stringify({ pid: process.pid, leaseId: lease.leaseId, cleanupPending: true }));
+  const rm = fs.rm.bind(fs);
+  const removal = t.mock.method(fs, "rm", async (file, options) => {
+    if (path.basename(String(file)) === "deploy-abandoned") {
+      await rm(path.join(file, ".operation-owner.json"), { force: true });
+      await fs.utimes(file, new Date(), new Date());
+      throw new Error("interrupted removal");
+    }
+    return rm(file, options);
+  });
+  const publisher = createCloudflarePagesPublisher({ dataDir });
+  await assert.rejects(publisher.recoverAbandonedStaging(), /interrupted removal/);
+  removal.mock.restore();
+  const restarted = createCloudflarePagesPublisher({ dataDir });
+  await restarted.recoverAbandonedStaging();
+  assert.equal(await exists(path.join(abandoned, "payload")), false);
+});
+
 test("oversized source files are rejected before copying their bytes", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-source-budget-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -321,7 +431,7 @@ test("leased staging recovery preserves active operations and canonical publicat
   await fs.utimes(abandoned, old, old);
   await fs.utimes(active, old, old);
   await publisher.recoverAbandonedStaging();
-  assert.equal(await exists(abandoned), false);
+  assert.equal(await exists(abandoned), true, "retired staging waits while the tree still contains active or fresh operations");
   assert.equal(await exists(active), true);
   assert.equal(await exists(fresh), true);
   assert.deepEqual(await fs.readFile(path.join(committed, "index.html")), saved);
@@ -332,6 +442,13 @@ test("leased staging recovery preserves active operations and canonical publicat
     await assert.rejects(publisher.recoverAbandonedStaging(), /invalid staging owner/i);
     assert.equal(await exists(active), true, "corrupt owner metadata must never authorize deletion");
   }
+  for (const operation of [active, fresh]) {
+    await fs.writeFile(path.join(operation, ".operation-owner.json"), JSON.stringify({ pid: process.pid, leaseId: lease.leaseId, cleanupPending: true }));
+  }
+  await publisher.recoverAbandonedStaging();
+  assert.deepEqual(await fs.readdir(operationRoot), []);
+  assert.deepEqual(await fs.readFile(path.join(committed, "index.html")), saved);
+  assert.deepEqual(await fs.readFile(deployed), savedDeployed);
 });
 
 test("static assets and previously saved publication assets survive subsequent publishes", async (t) => {
