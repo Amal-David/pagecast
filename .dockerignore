@@ -6,6 +6,7 @@
 .gitignore
 node_modules
 **/node_modules
+native/bin
 
 # Local pagecast state and Cloudflare/wrangler caches.
 .pagecast

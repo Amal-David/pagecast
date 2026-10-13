@@ -9,6 +9,12 @@
 #
 # Base is Node 22 (current LTS). Native Pagecast and the pinned Wrangler support
 # Node >=20.19.0; the container stays on the newer LTS for its production runtime.
+FROM golang:1.27.2 AS cleanup-build
+ARG TARGETARCH
+WORKDIR /build
+COPY native/staging-remove/ ./
+RUN mkdir -p /out/linux-${TARGETARCH} && CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/linux-${TARGETARCH}/staging-remove .
+
 FROM node:22-slim
 
 # wrangler is the Cloudflare CLI that pagecast shells out to for publishing and
@@ -32,6 +38,7 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --chown=node:node src/ ./src/
 COPY --chown=node:node public/ ./public/
 COPY --chown=node:node assets/ ./assets/
+COPY --chown=node:node --from=cleanup-build /out/ /app/native/bin/
 COPY --chown=node:node feedback/ ./feedback/
 
 # Pre-create the state dir and hand /app to `node` so the unprivileged process

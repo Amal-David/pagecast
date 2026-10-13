@@ -228,6 +228,11 @@ If the user does not specify a branch, omit `--branch`; Pagecast deploys to
 ## Notes
 
 - Always pass an **absolute** path (resolve relative paths against the cwd first).
+- Publish from a dedicated artifact folder or finished `dist`/`build`/`out` export.
+  Pagecast rejects development workspaces and limits new source copies to
+  512 MiB / 10,000 files. For a standalone report saved in a repository root,
+  stage only the report and its required assets in a separate folder; never
+  copy the whole workspace to work around a source-validation error.
 - The first interactive publish starts Wrangler login, creates the Home, and
   resumes automatically.
 - Use `npx pagecast publish site` or `npx pagecast pages deploy` for direct

@@ -52,6 +52,7 @@ import {
 
 import { markdownToHtml, renderMarkdownBody } from "../src/markdown.js";
 import { PAGECAST_EXTENSION_ID } from "../src/admin-security.js";
+import { removeStagingEntry } from "../src/staging-remove.js";
 
 // Integration requests use the same private workspace capability as real
 // no-Origin CLI/MCP clients. Security-boundary tests exercise missing/stale
@@ -1799,6 +1800,11 @@ test("Headless Pages site deploy wraps Wrangler with project, branch, and accoun
   assert.equal(result.projectName, "pagecasthq");
   assert.equal(result.accountId, accountId);
   assert.equal(result.branch, "main");
+  const deploymentRoot = deployCommands[0].cwd;
+  assert.equal(path.dirname(path.dirname(deploymentRoot)), path.join(dataDir, "targets", ".operations", `${accountId}--pagecasthq`));
+  assert.match(path.basename(path.dirname(deploymentRoot)), /^deploy-[a-z0-9]+$/i);
+  assert.equal(path.basename(deploymentRoot), "direct");
+  await assert.rejects(fs.stat(deploymentRoot), /ENOENT/);
   assert.deepEqual(deployCommands, [
     {
       command: "npx",
@@ -1813,7 +1819,7 @@ test("Headless Pages site deploy wraps Wrangler with project, branch, and accoun
         "--branch",
         "main"
       ],
-      cwd: stagingRoot,
+      cwd: deploymentRoot,
       accountId
     }
   ]);
@@ -3276,6 +3282,45 @@ test("custom slug rename rollback restores redirect-chain rewrites", async () =>
 
 // --- 1f: working copy editor ----------------------------------------------
 
+for (const entryFile of ["report.html", "index.html", "notes.md"]) {
+  test(`working-copy normalization uses the bounded ${entryFile} after source growth`, async (t) => {
+    const tempDir = await makeTempDir();
+    t.after(() => fs.rm(tempDir, { recursive: true, force: true }));
+    const reportDir = path.join(tempDir, "report");
+    await fs.mkdir(reportDir);
+    const source = path.join(reportDir, entryFile);
+    const original = entryFile.endsWith(".md") ? "# Bounded entry" : "<h1>Bounded entry</h1>";
+    await fs.writeFile(source, original);
+    await fs.writeFile(path.join(reportDir, "style.css"), "body { color: red; }");
+    const store = createReportStore({ dataDir: path.join(tempDir, "data") });
+    await store.init();
+    const report = await store.addPath(source);
+    const open = fs.open.bind(fs);
+    t.mock.method(fs, "open", async (file, ...args) => {
+      const handle = await open(file, ...args);
+      if (file === source) {
+        const close = handle.close.bind(handle);
+        t.mock.method(handle, "close", async () => {
+          await close();
+          await fs.truncate(source, 512 * 1024 * 1024 + 1);
+        });
+      }
+      return handle;
+    });
+    const copyFile = fs.copyFile.bind(fs);
+    t.mock.method(fs, "copyFile", async (file, ...args) => {
+      if (file === source) throw new Error("Unbounded entry recopy bypassed the source budget");
+      return copyFile(file, ...args);
+    });
+
+    const detached = await store.detachToWorkingCopy(report.id);
+    assert.equal((await fs.stat(source)).size, 512 * 1024 * 1024 + 1);
+    assert.equal(await fs.readFile(path.join(detached.workingDir, detached.entryFile), "utf8"), original);
+    assert.deepEqual((await fs.readdir(detached.workingDir)).sort(), [entryFile.endsWith(".md") ? "index.md" : "index.html", "style.css"]);
+    assert.equal(await fs.readFile(path.join(detached.workingDir, "style.css"), "utf8"), "body { color: red; }");
+  });
+}
+
 test("editing a path report writes a working copy and leaves the source untouched", async () => {
   const tempDir = await makeTempDir();
   const dataDir = path.join(tempDir, "data");
@@ -4352,6 +4397,92 @@ test("isLoopbackHostHeader allows loopback and rejects rebound foreign hosts", (
   );
   assert.equal(isLoopbackHostHeader("attacker.example:4173", "127.0.0.1", ["attacker.example"]), false);
 });
+
+for (const failure of ["locked staging", "invalid owner record"]) {
+  test(`startServers keeps read-only access when recovery fails with ${failure}`, async (t) => {
+    const tempDir = await makeTempDir();
+    const dataDir = path.join(tempDir, "data");
+    const reportDir = path.join(tempDir, "report");
+    await fs.mkdir(reportDir);
+    const reportPath = path.join(reportDir, "index.html");
+    await fs.writeFile(reportPath, "<h1>Saved publication</h1>");
+    const { fakeDeploy, state } = makeInstrumentedDeploy();
+    let locked = false;
+    const options = {
+      dataDir, adminPort: 0, publicPort: 0, pagesDeploySpawnImpl: fakeDeploy,
+      pagesStagingRemoveImpl: async (root, relative, identity) => {
+        if (locked && path.basename(relative) === "deploy-abandoned") {
+          throw Object.assign(new Error("staging file is locked"), { code: "EBUSY" });
+        }
+        return removeStagingEntry(root, relative, identity);
+      }
+    };
+    let runtime;
+    try {
+      runtime = await startServers(options);
+      await configurePages(runtime.adminUrl);
+      const report = await addPathReport(runtime.adminUrl, reportPath);
+      const publication = await publishSnapshot(runtime.adminUrl, report.id);
+      const snapshotFile = path.join(managedSnapshotRoot(dataDir, publication.token), "index.html");
+      const deployedFile = path.join(managedSiteRoot(dataDir), "p", publication.slug, "index.html");
+      const savedSnapshot = await fs.readFile(snapshotFile);
+      const savedDeployment = await fs.readFile(deployedFile);
+      const legacy = runtime.store.draftPublication(report.id, { label: "Legacy publication" }).publication;
+      Object.assign(legacy, {
+        pagesProjectName: "team-reports",
+        pagesAccountId: TEST_PAGES_ACCOUNT_ID,
+        pagesBaseUrl: "https://team-reports.pages.dev",
+        publicUrl: `https://team-reports.pages.dev/p/${legacy.slug}/`
+      });
+      await runtime.store.commitPublication(report.id, legacy);
+      const legacyFile = path.join(dataDir, "pages-site", "p", legacy.slug, "index.html");
+      await fs.mkdir(path.dirname(legacyFile), { recursive: true });
+      await fs.writeFile(legacyFile, "<h1>Legacy publication</h1>");
+      await runtime.close();
+      runtime = null;
+
+      const group = path.join(dataDir, "targets", ".operations", `${TEST_PAGES_ACCOUNT_ID}--team-reports`);
+      const abandoned = path.join(group, "deploy-abandoned");
+      await fs.mkdir(abandoned);
+      const ownerFile = path.join(abandoned, ".operation-owner.json");
+      await fs.writeFile(ownerFile, failure === "invalid owner record" ? "null" : JSON.stringify({
+        pid: process.pid, leaseId: null, cleanupPending: true
+      }));
+      locked = failure === "locked staging";
+      const warnings = t.mock.method(console, "warn", () => {});
+      runtime = await startServers(options);
+      assert.ok(warnings.mock.calls.some(({ arguments: args }) => /staging recovery failed at startup/i.test(args[0])));
+      assert.equal((await fetch(runtime.adminUrl)).status, 200);
+      const reports = await (await fetch(`${runtime.adminUrl}/api/reports`)).json();
+      assert.equal(reports.reports[0].publications.length, 2);
+      assert.equal((await fetch(`${runtime.publicUrl}/preview/${report.id}/`)).status, 200);
+      const blocked = await fetch(`${runtime.adminUrl}/api/reports/${report.id}/publish-snapshot`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}"
+      });
+      assert.equal(blocked.status, failure === "invalid owner record" ? 409 : 500);
+      assert.match((await blocked.json()).error.message, failure === "invalid owner record" ? /invalid staging owner/i : /internal server error/i);
+      assert.equal(state.deployCount, 1);
+      assert.deepEqual(await fs.readdir(group), ["deploy-abandoned"]);
+      assert.deepEqual(await fs.readFile(snapshotFile), savedSnapshot);
+      assert.deepEqual(await fs.readFile(deployedFile), savedDeployment);
+      assert.equal(await fs.readFile(legacyFile, "utf8"), "<h1>Legacy publication</h1>");
+
+      locked = false;
+      await fs.rm(abandoned, { recursive: true, force: true });
+      await runtime.close();
+      runtime = null;
+      runtime = await startServers(options);
+      assert.equal(await fs.readFile(path.join(managedSnapshotRoot(dataDir, legacy.token), "index.html"), "utf8"), "<h1>Legacy publication</h1>");
+      await publishSnapshot(runtime.adminUrl, report.id);
+      assert.equal(state.deployCount, 2, "publication staging resumes after the recovery failure is cleared");
+      assert.deepEqual(await fs.readdir(group), []);
+      assert.deepEqual(await fs.readFile(snapshotFile), savedSnapshot);
+    } finally {
+      if (runtime) await runtime.close();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+}
 
 test("startServers falls back from an occupied persisted port and saves the working pair", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-local-ports-"));

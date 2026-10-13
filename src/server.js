@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { createReadStream, existsSync, watch as fsWatch } from "node:fs";
+import { constants as fsConstants, createReadStream, existsSync, watch as fsWatch } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -821,18 +821,77 @@ function normalizeConfig(config = {}) {
   };
 }
 
-async function copyPublicTree(sourceRoot, destinationRoot, { excludedRoots = [] } = {}) {
+async function copyPublicTree(
+  sourceRoot,
+  destinationRoot,
+  { excludedRoots = [], publicationSource = false } = {}
+) {
   const blockedRoots = [destinationRoot, ...excludedRoots].map((entry) => path.resolve(entry));
+  const maxBytes = 512 * 1024 * 1024;
+  const maxFiles = 10000;
+  const developmentDirectories = new Set(["node_modules", "_wt", ".worktrees", ".venv", "venv"]);
+  const developmentManifests = new Set(["package.json", "cargo.toml", "package.swift", "pyproject.toml", "go.mod"]);
+  const sourceLimitError = () => appError(
+    "Publication source exceeds the 512 MiB / 10,000-file limit. Select a smaller built static output folder.",
+    413
+  );
+  let copiedBytes = 0;
+  let copiedFiles = 0;
+  const copyBuffer = publicationSource ? Buffer.alloc(64 * 1024) : null;
+  const realSourceRoot = publicationSource ? await fs.realpath(sourceRoot) : null;
+  const validatedFiles = new Map();
+
+  async function requireSourceDirectory(directory) {
+    if (!(await fs.lstat(directory)).isDirectory() ||
+      !isPathInside(realSourceRoot, await fs.realpath(directory))) {
+      throw appError("Publication source directory changed or is outside the selected source root.", 400);
+    }
+  }
+
+  if (publicationSource) {
+    let sourceBytes = 0;
+    let sourceFiles = 0;
+    async function validateSource(directory, relative = "") {
+      await requireSourceDirectory(directory);
+      for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+        const sourcePath = path.join(directory, entry.name);
+        if (blockedRoots.some((root) => isPathInside(root, sourcePath))) {
+          continue;
+        }
+        const name = entry.name.toLowerCase();
+        if (
+          (entry.isDirectory() && developmentDirectories.has(name)) ||
+          name === ".git" ||
+          (!relative && entry.isFile() && developmentManifests.has(name))
+        ) {
+          throw appError(
+            `This is a development workspace (${path.join(relative, entry.name)}). Select a built static output folder containing only the publication and its assets.`,
+            400
+          );
+        }
+        if (entry.isSymbolicLink() || entry.name.startsWith(".")) continue;
+        if (entry.isDirectory()) {
+          await validateSource(sourcePath, path.join(relative, entry.name));
+        } else if (entry.isFile()) {
+          const stat = await fs.lstat(sourcePath, { bigint: true });
+          if (!stat.isFile()) throw appError("Publication source changed during validation.", 400);
+          validatedFiles.set(path.join(relative, entry.name), { dev: stat.dev, ino: stat.ino });
+          sourceBytes += Number(stat.size);
+          sourceFiles += 1;
+          if (sourceBytes > maxBytes || sourceFiles > maxFiles) throw sourceLimitError();
+        }
+      }
+    }
+    // Validate before replacing any existing destination or copying source bytes.
+    await validateSource(sourceRoot);
+  }
   await fs.rm(destinationRoot, { recursive: true, force: true });
   await fs.mkdir(destinationRoot, { recursive: true });
 
   async function copyDirectory(currentSource, currentRelative = "") {
+    if (publicationSource) await requireSourceDirectory(currentSource);
     const entries = await fs.readdir(currentSource, { withFileTypes: true });
     for (const entry of entries) {
-      if (entry.name.startsWith(".")) {
-        continue;
-      }
-
       const sourcePath = path.join(currentSource, entry.name);
       if (blockedRoots.some((blockedRoot) => isPathInside(blockedRoot, sourcePath))) {
         continue;
@@ -840,7 +899,15 @@ async function copyPublicTree(sourceRoot, destinationRoot, { excludedRoots = [] 
       const relativePath = path.join(currentRelative, entry.name);
       const destinationPath = path.join(destinationRoot, relativePath);
 
-      if (entry.isSymbolicLink()) {
+      if (publicationSource && (
+        entry.name.toLowerCase() === ".git" ||
+        (entry.isDirectory() && developmentDirectories.has(entry.name.toLowerCase())) ||
+        (!currentRelative && entry.isFile() && developmentManifests.has(entry.name.toLowerCase()))
+      )) {
+        throw appError("Publication source became a development workspace. Select a built static output folder.", 400);
+      }
+
+      if (entry.isSymbolicLink() || entry.name.startsWith(".")) {
         continue;
       }
 
@@ -854,7 +921,41 @@ async function copyPublicTree(sourceRoot, destinationRoot, { excludedRoots = [] 
       }
 
       await fs.mkdir(path.dirname(destinationPath), { recursive: true });
-      await fs.copyFile(sourcePath, destinationPath);
+      if (!publicationSource) {
+        await fs.copyFile(sourcePath, destinationPath);
+        continue;
+      }
+      copiedFiles += 1;
+      if (copiedFiles > maxFiles) throw sourceLimitError();
+      await requireSourceDirectory(currentSource);
+      const input = await fs.open(sourcePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
+      try {
+        const stat = await input.stat({ bigint: true });
+        const validated = validatedFiles.get(relativePath);
+        if (!stat.isFile() || !validated || stat.dev !== validated.dev || stat.ino !== validated.ino) {
+          throw appError("Publication source changed after validation. Retry from a finished static output folder.", 400);
+        }
+        if (copiedBytes + Number(stat.size) > maxBytes) throw sourceLimitError();
+        const output = await fs.open(destinationPath, "w", Number(stat.mode));
+        try {
+          while (true) {
+            const { bytesRead } = await input.read(copyBuffer, 0, copyBuffer.length, null);
+            if (!bytesRead) break;
+            copiedBytes += bytesRead;
+            if (copiedBytes > maxBytes) throw sourceLimitError();
+            let offset = 0;
+            while (offset < bytesRead) {
+              const { bytesWritten } = await output.write(copyBuffer, offset, bytesRead - offset);
+              if (!bytesWritten) throw appError("Publication source copy made no progress.", 500);
+              offset += bytesWritten;
+            }
+          }
+        } finally {
+          await output.close();
+        }
+      } finally {
+        await input.close();
+      }
     }
   }
 
@@ -3879,11 +3980,10 @@ export function createReportStore({
     const sourceRoot = reportSourceRoot(report);
     await fs.rm(workingDir, { recursive: true, force: true });
     try {
-      await copyPublicTree(sourceRoot, workingDir);
-      await fs.copyFile(
-        path.join(sourceRoot, report.entryFile),
-        path.join(workingDir, workingEntry)
-      );
+      await copyPublicTree(sourceRoot, workingDir, { publicationSource: true });
+      if (report.entryFile !== workingEntry) {
+        await fs.rename(path.join(workingDir, report.entryFile), path.join(workingDir, workingEntry));
+      }
       report.workingDir = workingDir;
       report.entryFile = workingEntry;
       report.sourceMode = "edited-in-pagecast";
@@ -7098,6 +7198,7 @@ export async function startServers({
   cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
   pagesDeploySpawnImpl = spawn,
   pagesDeployTimeoutMs = 180000,
+  pagesStagingRemoveImpl,
   serverFactory = createServer,
   serverCloseImpl = closeServer
 } = {}) {
@@ -7140,6 +7241,7 @@ export async function startServers({
   const pagesPublisher = createCloudflarePagesPublisher({
     dataDir,
     spawnImpl: pagesDeploySpawnImpl,
+    removeStagingImpl: pagesStagingRemoveImpl,
     fetchImpl,
     timeoutMs: pagesDeployTimeoutMs,
     getRedirects: (pagesConfig) => store.listRedirects(pagesConfig),
@@ -7153,10 +7255,16 @@ export async function startServers({
     isTargetManaged: (projectRef) => configStore.isTargetManaged(projectRef),
     claimTargetManaged: (projectRef) => configStore.claimManagedTarget(projectRef)
   });
-  await pagesPublisher.migrateLegacyStaging({
-    publications: store.listPublications(),
-    redirects: store.listRedirects()
-  });
+  try {
+    await pagesPublisher.recoverAbandonedStaging();
+    await pagesPublisher.migrateLegacyStaging({
+      publications: store.listPublications(),
+      redirects: store.listRedirects()
+    });
+  } catch (error) {
+    // Publication preparation retries recovery before creating any staging.
+    console.warn(`Pagecast staging recovery failed at startup: ${error?.message || error}`);
+  }
   const deployQueue = createDeployQueue();
   const mutationQueue = createDeployQueue();
   activeDeployQueue = deployQueue;

@@ -11,6 +11,7 @@ node_modules/
 web/node_modules/
 web/dist/
 *.tsbuildinfo
+native/bin/
 npm-debug.log*
 coverage/
 .DS_Store

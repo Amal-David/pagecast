@@ -92,6 +92,11 @@ Things to know:
 
 - `publish` copies every non-hidden, non-symlink file under the source folder,
   referenced or not — publish from a clean folder and keep secrets elsewhere.
+  New source copies are limited to **512 MiB and 10,000 files**, including files
+  that grow while copying. Development roots (such as folders containing a
+  package/build manifest, dependencies, Git repositories, or worktrees) are
+  rejected before copying. Publish the finished `dist`/`build`/`out` folder or
+  put a standalone report and its assets in a dedicated folder.
 - New links are **unlisted**: a memorable label plus a 128-bit suffix. Anyone
   with the URL can view it — unlisted is not private. The admin UI's **Short
   public link** toggle (or renaming to a vanity slug) makes a guessable public
@@ -145,6 +150,23 @@ npx pagecast pages deployments prune --keep 5 --yes --json
 Removing a snapshot never affects your live site or pages. But expiry, password
 changes, and revoke apply only to the replacement deployment — prune history
 when old snapshot URLs must stop working.
+
+Local temporary deployment directories are separate from this cloud history.
+While holding its workspace lease, Pagecast recovers abandoned staging at
+startup and before preparing another publication. It retains active owners and
+fresh interrupted operations for a 24-hour grace period. The staging tree
+stays in place while any operation is active, fresh, or unrecognized.
+Once the tree can be retired, recovery claims it before deleting
+old operations. The bundled cleanup helper removes entries relative to an
+opened staging directory and verifies its identity, so a replaced directory
+cannot redirect removal into saved publications or deployed copies. An
+interrupted claim is recovered on the next run. Cleanup
+failures are reported, recorded for retry, and block additional staging until removal
+succeeds. If recovery fails at startup, Pagecast warns and keeps the admin UI
+and read-only views available; legacy staging migration waits for successful
+recovery on a later startup. Saved publication snapshots and last-deployed
+copies are retained; failed source copies or direct-site deployments keep the
+last committed copy.
 
 ## Use From Coding Agents
 
@@ -294,10 +316,16 @@ npx pagecast telemetry status|disable|enable
 ## Development
 
 ```sh
+npm run build:native       # build bundled staging cleanup helpers from source
 npm start                  # run the packaged app from source
 npm run check && npm test  # verification suite
-npm run build              # rebuild the React admin UI (web/) into public/
+npm run build              # build cleanup helpers and the React admin UI
 ```
+
+Building or testing from source requires Go 1.25 or later; the build selects
+the pinned Go 1.27.2 toolchain. Published npm packages include cleanup binaries
+for macOS, Linux, and Windows on x64 and arm64. The Docker image includes its
+Linux binary. Neither installation needs Go at runtime.
 
 UI work requires pnpm 10: `pnpm -C web install --frozen-lockfile --ignore-scripts`,
 then `pnpm -C web run dev` (proxied to the server on 4173). The root CLI/server
