@@ -5,6 +5,33 @@ All notable changes to Pagecast are documented here. This project follows
 
 ## Unreleased
 
+## 0.7.1 — 2026-10-13
+
+### Fixed
+
+- Publishing rejects development workspaces and enforces source-copy limits,
+  including files that grow during copying. HTML and Markdown preparation use
+  the validated copy instead of rereading the source.
+- Staging cleanup verifies an opened directory's identity and removes entries
+  relative to that handle. Directory replacements cannot redirect operation
+  cleanup into saved publications or deployed copies.
+- Abandoned staging is recovered under the workspace lease. Active and recent
+  operations are retained, interrupted cleanup is retried, and cleanup failures
+  block additional staging while keeping read-only access available.
+- Failed source copies and direct deployments preserve the last committed copy.
+
+### Changed
+
+- npm packages bundle staging cleanup helpers for macOS, Linux, and Windows on
+  x64 and arm64. Docker includes its Linux helper; neither needs Go at runtime.
+- Package, extension, plugin, and publishing-skill versions are aligned to 0.7.1.
+
+### Upgrade notes
+
+- Restart running Pagecast processes after updating. Source checkouts must run
+  `npm run build:native` before starting; building and testing require Go.
+- Saved publications, deployed copies, and existing public URLs are retained.
+
 ## 0.7.0 — 2026-08-02
 
 ### Added
