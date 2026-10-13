@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { createCloudflarePagesPublisher } from "../src/server.js";
 import { WorkspaceLease } from "../src/state-coordinator.js";
+import { removeStagingEntry } from "../src/staging-remove.js";
 
 async function exists(filePath) {
   try {
@@ -295,13 +296,13 @@ test("a source swap at file open cannot copy an unvalidated file", async (t) => 
   assert.equal(await fs.readFile(path.join(outside, "payload.txt"), "utf8"), "outside private bytes");
 });
 
-test("a live staging ancestor swap at removal preserves deployed bytes and can recover", async (t) => {
+for (const namespace of ["live", "claimed"]) {
+test(`a ${namespace} staging ancestor swap at removal preserves deployed bytes and can recover`, async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-staging-remove-swap-"));
   const dataDir = path.join(root, "data");
   const lease = new WorkspaceLease(dataDir);
   await lease.acquire({ capability: "test-remove-swap" });
   t.after(async () => { await lease.release(); await fs.rm(root, { recursive: true, force: true }); });
-  const publisher = createCloudflarePagesPublisher({ dataDir });
   const operations = path.join(dataDir, "targets", ".operations");
   const group = path.join(operations, "target");
   const abandoned = path.join(group, "deploy-abandoned");
@@ -314,23 +315,31 @@ test("a live staging ancestor swap at removal preserves deployed bytes and can r
   const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
   await fs.utimes(abandoned, old, old);
   await fs.utimes(protectedDir, old, old);
-  const rm = fs.rm.bind(fs);
-  const removal = t.mock.method(fs, "rm", async (file, options) => {
-    if (path.basename(String(file)) === "deploy-abandoned") {
-      if (await exists(group)) await fs.rename(group, path.join(root, "original-staging"));
-      else await fs.mkdir(path.dirname(group), { recursive: true });
-      await fs.symlink(protectedRoot, group, "junction");
+  let swapped = false;
+  const publisher = createCloudflarePagesPublisher({ dataDir, removeStagingImpl: async (scope, relative, identity) => {
+    if (!swapped && path.basename(relative) === "deploy-abandoned") {
+      swapped = true;
+      const swappedGroup = namespace === "claimed" ? path.join(scope, path.dirname(relative)) : group;
+      if (await exists(swappedGroup)) await fs.rename(swappedGroup, path.join(root, "original-staging"));
+      else await fs.mkdir(path.dirname(swappedGroup), { recursive: true });
+      await fs.symlink(protectedRoot, swappedGroup, "junction");
     }
-    return rm(file, options);
-  });
-  await assert.rejects(publisher.recoverAbandonedStaging(), /staging cleanup could not restore/i);
+    return removeStagingEntry(scope, relative, identity);
+  } });
+  await assert.rejects(publisher.recoverAbandonedStaging(), namespace === "live" ? /staging cleanup could not restore/i : /safe staging removal failed/i);
+  assert.equal(swapped, true);
   assert.equal(await fs.readFile(protectedFile, "utf8"), "saved deployment");
-  removal.mock.restore();
-  await fs.rm(operations, { recursive: true, force: true });
+  if (namespace === "claimed") {
+    await fs.rm(group);
+    await fs.rename(path.join(root, "original-staging"), group);
+  } else {
+    await fs.rm(operations, { recursive: true, force: true });
+  }
   await publisher.recoverAbandonedStaging();
   assert.equal(await exists(`${operations}.cleanup`), false);
   assert.equal(await fs.readFile(protectedFile, "utf8"), "saved deployment");
 });
+}
 
 test("interrupted staging claims are restored and cleaned on the next recovery", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-staging-claim-recovery-"));
@@ -362,18 +371,16 @@ test("a partially removed retired operation remains eligible after recovery rest
   await fs.mkdir(abandoned, { recursive: true });
   await fs.writeFile(path.join(abandoned, "payload"), "retired bytes");
   await fs.writeFile(path.join(abandoned, ".operation-owner.json"), JSON.stringify({ pid: process.pid, leaseId: lease.leaseId, cleanupPending: true }));
-  const rm = fs.rm.bind(fs);
-  const removal = t.mock.method(fs, "rm", async (file, options) => {
-    if (path.basename(String(file)) === "deploy-abandoned") {
-      await rm(path.join(file, ".operation-owner.json"), { force: true });
+  const publisher = createCloudflarePagesPublisher({ dataDir, removeStagingImpl: async (scope, relative, identity) => {
+    if (path.basename(relative) === "deploy-abandoned") {
+      const file = path.join(scope, relative);
+      await fs.rm(path.join(file, ".operation-owner.json"), { force: true });
       await fs.utimes(file, new Date(), new Date());
       throw new Error("interrupted removal");
     }
-    return rm(file, options);
-  });
-  const publisher = createCloudflarePagesPublisher({ dataDir });
+    return removeStagingEntry(scope, relative, identity);
+  } });
   await assert.rejects(publisher.recoverAbandonedStaging(), /interrupted removal/);
-  removal.mock.restore();
   const restarted = createCloudflarePagesPublisher({ dataDir });
   await restarted.recoverAbandonedStaging();
   assert.equal(await exists(path.join(abandoned, "payload")), false);
@@ -508,17 +515,15 @@ test("cleanup failures remain visible and block new staging until removal succee
     await fs.rm(root, { recursive: true, force: true });
   });
   const fake = captureDeploys();
-  const publisher = createCloudflarePagesPublisher({ dataDir, spawnImpl: fake.spawnImpl });
+  let blocked = true;
+  const remove = async (scope, relative, identity) => {
+    if (blocked && /^deploy-/.test(path.basename(relative))) throw new Error("injected staging cleanup failure");
+    return removeStagingEntry(scope, relative, identity);
+  };
+  const publisher = createCloudflarePagesPublisher({ dataDir, spawnImpl: fake.spawnImpl, removeStagingImpl: remove });
   const pagesConfig = { accountId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", projectName: "cleanup-backpressure", baseUrl: "https://cleanup-backpressure.pages.dev", adoptExisting: true };
   const report = await makeReport(root, "report", "<h1>committed-before-cleanup</h1>");
   const operations = path.join(dataDir, "targets", ".operations");
-  const rm = fs.rm.bind(fs);
-  const removal = t.mock.method(fs, "rm", async (file, options) => {
-    if (String(file).startsWith(operations) && /^deploy-/.test(path.basename(String(file)))) {
-      throw new Error("injected staging cleanup failure");
-    }
-    return rm(file, options);
-  });
   const warnings = t.mock.method(console, "warn", () => {});
   await publisher.publish({ report, publication: { token: "alpha", slug: "alpha" }, pagesConfig });
   const committed = publisher.publicationDir("alpha", pagesConfig);
@@ -528,10 +533,10 @@ test("cleanup failures remain visible and block new staging until removal succee
   const pending = (await fs.readdir(group)).sort();
   await assert.rejects(publisher.publish({ report, publication: { token: "bravo", slug: "bravo" }, pagesConfig }), /previous staging.*cleaned/i);
   assert.deepEqual((await fs.readdir(group)).sort(), pending, "a cleanup failure must not create another staging tree");
-  const restarted = createCloudflarePagesPublisher({ dataDir, spawnImpl: fake.spawnImpl });
+  const restarted = createCloudflarePagesPublisher({ dataDir, spawnImpl: fake.spawnImpl, removeStagingImpl: remove });
   await assert.rejects(restarted.recoverAbandonedStaging(), /injected staging cleanup failure/);
   assert.deepEqual(await fs.readFile(path.join(committed, "index.html")), saved);
-  removal.mock.restore();
+  blocked = false;
   await restarted.recoverAbandonedStaging();
   assert.deepEqual(await fs.readdir(group), []);
   assert.deepEqual(await fs.readFile(path.join(committed, "index.html")), saved);

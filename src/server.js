@@ -7198,6 +7198,7 @@ export async function startServers({
   cloudflareListTimeoutMs = DEFAULT_CLOUDFLARE_LIST_TIMEOUT_MS,
   pagesDeploySpawnImpl = spawn,
   pagesDeployTimeoutMs = 180000,
+  pagesStagingRemoveImpl,
   serverFactory = createServer,
   serverCloseImpl = closeServer
 } = {}) {
@@ -7240,6 +7241,7 @@ export async function startServers({
   const pagesPublisher = createCloudflarePagesPublisher({
     dataDir,
     spawnImpl: pagesDeploySpawnImpl,
+    removeStagingImpl: pagesStagingRemoveImpl,
     fetchImpl,
     timeoutMs: pagesDeployTimeoutMs,
     getRedirects: (pagesConfig) => store.listRedirects(pagesConfig),

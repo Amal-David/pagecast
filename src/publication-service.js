@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { isProcessAlive, WORKSPACE_LEASE_FILENAME } from "./state-coordinator.js";
+import { removeStagingEntry } from "./staging-remove.js";
 
 // Internal managed-publication service. The compatibility factory in server.js
 // supplies platform and policy dependencies so this module stays acyclic and
@@ -82,6 +83,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
     spawnImpl = spawn,
     fetchImpl = fetch,
     timeoutMs = 180000,
+    removeStagingImpl = removeStagingEntry,
     getRedirects = () => [],
     getFeedback = () => null,
     getBadge = () => true,
@@ -105,6 +107,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
   let fallbackOwnerPromise = null;
   let markerSecretPromise = null;
   const pendingOperationCleanup = new Set();
+  const operationRemovalRoots = new Map();
   const operationRemovalOptions = { recursive: true, force: true, maxRetries: 3, retryDelay: 100 };
 
   async function readWorkspaceLease() {
@@ -118,8 +121,11 @@ export function createPublicationService(options = {}, dependencies = {}) {
 
   async function cleanupOperation(operationRoot) {
     try {
-      await fs.rm(operationRoot, operationRemovalOptions);
+      const owned = operationRemovalRoots.get(operationRoot);
+      if (!owned) throw appError("Missing staging removal identity.", 409);
+      await removeStagingImpl(owned.root, path.relative(owned.root, operationRoot), owned.identity);
       pendingOperationCleanup.delete(operationRoot);
+      operationRemovalRoots.delete(operationRoot);
     } catch (error) {
       pendingOperationCleanup.add(operationRoot);
       try {
@@ -225,7 +231,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
       return;
     }
     if (!eligible.length && !cleanupTemps.size) {
-      if (retired) await fs.rm(path.join(operationsRoot, cleanupRecordName), { force: true });
+      if (retired) await removeStagingImpl(operationsRoot, cleanupRecordName, rootStat);
       return;
     }
     await requireOperationDirectory(operationsRoot);
@@ -249,10 +255,10 @@ export function createPublicationService(options = {}, dependencies = {}) {
         if (stat.dev !== operation.dev || stat.ino !== operation.ino) {
           throw appError("Staging directory changed before cleanup removed it.", 409);
         }
-        await fs.rm(operationRoot, operationRemovalOptions);
+        await removeStagingImpl(cleanupRoot, path.join(operation.target, operation.name), rootStat);
       }
-      for (const temporary of cleanupTemps) await fs.rm(path.join(cleanupRoot, temporary), { force: true });
-      await fs.rm(path.join(cleanupRoot, cleanupRecordName), { force: true });
+      for (const temporary of cleanupTemps) await removeStagingImpl(cleanupRoot, temporary, rootStat);
+      await removeStagingImpl(cleanupRoot, cleanupRecordName, rootStat);
     } catch (error) {
       cleanupError = error;
     }
@@ -931,11 +937,14 @@ export function createPublicationService(options = {}, dependencies = {}) {
   async function createOperationRoot(pagesConfig) {
     for (const operationRoot of pendingOperationCleanup) {
       try {
-        await fs.rm(operationRoot, operationRemovalOptions);
+        const owned = operationRemovalRoots.get(operationRoot);
+        if (!owned) throw appError("Missing staging removal identity.", 409);
+        await removeStagingImpl(owned.root, path.relative(owned.root, operationRoot), owned.identity);
       } catch (error) {
         throw appError(`Cannot prepare another publication until previous staging is cleaned up: ${error.message}`, 500);
       }
       pendingOperationCleanup.delete(operationRoot);
+      operationRemovalRoots.delete(operationRoot);
     }
     const lease = await readWorkspaceLease();
     if (lease?.pid === process.pid) await recoverAbandonedStaging();
@@ -950,6 +959,8 @@ export function createPublicationService(options = {}, dependencies = {}) {
     }
     const operationRoot = await fs.mkdtemp(path.join(operationsRoot, "deploy-"));
     try {
+      const root = path.dirname(operationsRoot);
+      operationRemovalRoots.set(operationRoot, { root, identity: await fs.lstat(root, { bigint: true }) });
       await atomicWriteJson(path.join(operationRoot, ".operation-owner.json"), {
         pid: process.pid,
         leaseId: lease?.pid === process.pid ? lease.leaseId : null,

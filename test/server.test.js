@@ -52,6 +52,7 @@ import {
 
 import { markdownToHtml, renderMarkdownBody } from "../src/markdown.js";
 import { PAGECAST_EXTENSION_ID } from "../src/admin-security.js";
+import { removeStagingEntry } from "../src/staging-remove.js";
 
 // Integration requests use the same private workspace capability as real
 // no-Origin CLI/MCP clients. Security-boundary tests exercise missing/stale
@@ -4406,9 +4407,17 @@ for (const failure of ["locked staging", "invalid owner record"]) {
     const reportPath = path.join(reportDir, "index.html");
     await fs.writeFile(reportPath, "<h1>Saved publication</h1>");
     const { fakeDeploy, state } = makeInstrumentedDeploy();
-    const options = { dataDir, adminPort: 0, publicPort: 0, pagesDeploySpawnImpl: fakeDeploy };
+    let locked = false;
+    const options = {
+      dataDir, adminPort: 0, publicPort: 0, pagesDeploySpawnImpl: fakeDeploy,
+      pagesStagingRemoveImpl: async (root, relative, identity) => {
+        if (locked && path.basename(relative) === "deploy-abandoned") {
+          throw Object.assign(new Error("staging file is locked"), { code: "EBUSY" });
+        }
+        return removeStagingEntry(root, relative, identity);
+      }
+    };
     let runtime;
-    let removal;
     try {
       runtime = await startServers(options);
       await configurePages(runtime.adminUrl);
@@ -4439,15 +4448,7 @@ for (const failure of ["locked staging", "invalid owner record"]) {
       await fs.writeFile(ownerFile, failure === "invalid owner record" ? "null" : JSON.stringify({
         pid: process.pid, leaseId: null, cleanupPending: true
       }));
-      if (failure === "locked staging") {
-        const rm = fs.rm.bind(fs);
-        removal = t.mock.method(fs, "rm", async (file, options) => {
-          if (path.basename(String(file)) === path.basename(abandoned) && String(file).startsWith(path.dirname(group))) {
-            throw Object.assign(new Error("staging file is locked"), { code: "EBUSY" });
-          }
-          return rm(file, options);
-        });
-      }
+      locked = failure === "locked staging";
       const warnings = t.mock.method(console, "warn", () => {});
       runtime = await startServers(options);
       assert.ok(warnings.mock.calls.some(({ arguments: args }) => /staging recovery failed at startup/i.test(args[0])));
@@ -4466,7 +4467,7 @@ for (const failure of ["locked staging", "invalid owner record"]) {
       assert.deepEqual(await fs.readFile(deployedFile), savedDeployment);
       assert.equal(await fs.readFile(legacyFile, "utf8"), "<h1>Legacy publication</h1>");
 
-      removal?.mock.restore();
+      locked = false;
       await fs.rm(abandoned, { recursive: true, force: true });
       await runtime.close();
       runtime = null;
@@ -4477,7 +4478,6 @@ for (const failure of ["locked staging", "invalid owner record"]) {
       assert.deepEqual(await fs.readdir(group), []);
       assert.deepEqual(await fs.readFile(snapshotFile), savedSnapshot);
     } finally {
-      removal?.mock.restore();
       if (runtime) await runtime.close();
       await fs.rm(tempDir, { recursive: true, force: true });
     }

@@ -33,6 +33,11 @@ jobs:
       - name: Verify pinned Wrangler runtime
         run: >-
           node --input-type=module -e "import { spawnSync } from 'node:child_process'; import { createWranglerInvocation } from './src/platform.js'; const invocation = createWranglerInvocation(['--version'], { env: process.env }); const result = spawnSync(invocation.command, invocation.args, { stdio: 'inherit', shell: process.platform === 'win32' && invocation.command === 'npx' }); process.exit(result.status ?? 1);"
+      - name: Set up native cleanup build toolchain
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.27.2
+          cache: false
       - name: Install dependencies
         run: npm ci --ignore-scripts
       - name: Install web dependencies
@@ -61,7 +66,12 @@ jobs:
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: 22
-      - name: Build committed dashboard
+      - name: Set up native cleanup build toolchain
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.27.2
+          cache: false
+      - name: Build committed dashboard and packaged native helpers
         run: npm run build
       - name: Reject generated bundle drift
         run: git diff --exit-code -- public
@@ -75,6 +85,7 @@ jobs:
           npm install --prefix "$smoke_dir" --ignore-scripts --no-audit --no-fund "./$package_file"
           (cd "$smoke_dir" && node --input-type=module -e 'import("pagecast").then((api) => { if (typeof api.startServers !== "function") process.exit(1) })')
           "$smoke_dir/node_modules/.bin/pagecast" --help | grep -q "pagecast publish"
+          node scripts/smoke-staging-helper.mjs "$smoke_dir/node_modules/pagecast"
           rm -rf "$smoke_dir" "$package_file"
       - name: Build container
         run: docker build --check . && docker build -t pagecast:ci .
@@ -82,3 +93,6 @@ jobs:
         shell: bash
         run: |
           docker run --rm --network none --entrypoint node pagecast:ci --input-type=module -e 'import { spawnSync } from "node:child_process"; import { createWranglerInvocation } from "file:///app/src/platform.js"; const invocation = createWranglerInvocation(["--version"], { env: process.env }); if (invocation.command !== "wrangler") throw new Error(`Expected baked Wrangler, got ${invocation.command}`); const result = spawnSync(invocation.command, invocation.args, { stdio: "inherit" }); process.exit(result.status ?? 1);'
+      - name: Verify container uses bundled staging cleanup offline
+        shell: bash
+        run: docker run --rm -i --network none --entrypoint node pagecast:ci --input-type=module - /app < scripts/smoke-staging-helper.mjs

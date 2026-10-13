@@ -48,6 +48,11 @@ jobs:
         env:
           EXPECTED_VERSION: ${{ github.event_name == 'release' && github.ref_name || inputs.version }}
         run: test "${EXPECTED_VERSION#v}" = "$(node -p 'require("./package.json").version')"
+      - name: Set up native cleanup build toolchain
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.27.2
+          cache: false
       - name: Validate component version alignment
         shell: bash
         run: |
@@ -89,6 +94,7 @@ jobs:
           npm install --prefix "$smoke_dir" --ignore-scripts --no-audit --no-fund "./$package_file"
           (cd "$smoke_dir" && node --input-type=module -e 'import("pagecast").then((api) => { if (typeof api.startServers !== "function") process.exit(1) })')
           "$smoke_dir/node_modules/.bin/pagecast" --help | grep -q "pagecast publish"
+          node scripts/smoke-staging-helper.mjs "$smoke_dir/node_modules/pagecast"
           rm -rf "$smoke_dir" "$package_file"
       - name: Prove the release container and offline Wrangler runtime
         shell: bash
@@ -96,6 +102,7 @@ jobs:
           docker build --check .
           docker build -t pagecast:release-verify .
           docker run --rm --network none --entrypoint node pagecast:release-verify --input-type=module -e 'import { spawnSync } from "node:child_process"; import { createWranglerInvocation } from "file:///app/src/platform.js"; const invocation = createWranglerInvocation(["--version"], { env: process.env }); if (invocation.command !== "wrangler") throw new Error(`Expected baked Wrangler, got ${invocation.command}`); const result = spawnSync(invocation.command, invocation.args, { stdio: "inherit" }); process.exit(result.status ?? 1);'
+          docker run --rm -i --network none --entrypoint node pagecast:release-verify --input-type=module - /app < scripts/smoke-staging-helper.mjs
 
   npm:
     name: Publish npm package
@@ -123,6 +130,11 @@ jobs:
 
       # The test suite exercised by the publish hooks needs the package's
       # runtime dependencies installed (frozen lockfile, no lifecycle scripts).
+      - name: Set up native cleanup build toolchain
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.27.2
+          cache: false
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
