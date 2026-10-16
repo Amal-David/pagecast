@@ -110,12 +110,13 @@ export const api = {
     name?: string;
   }) => request<ReportResponse>("/api/reports/folder", { json: payload }),
 
-  uploadFile: (file: File) => {
+  uploadFile: (file: File, signal?: AbortSignal) => {
     const formData = new FormData();
     formData.append("report", file, file.name);
     return request<ReportResponse>("/api/reports/upload", {
       method: "POST",
-      body: formData
+      body: formData,
+      signal
     });
   },
 
@@ -145,10 +146,10 @@ export const api = {
       { method: "DELETE" }
     ),
 
-  publishSnapshot: (id: string, options?: { label?: string; drop?: boolean }) =>
+  publishSnapshot: (id: string, options?: { label?: string; drop?: boolean }, signal?: AbortSignal) =>
     request<PublishResponse>(
       `/api/reports/${encodeURIComponent(id)}/publish-snapshot`,
-      { json: { label: options?.label, drop: options?.drop } }
+      { json: { label: options?.label, drop: options?.drop }, signal }
     ),
 
   revokeAll: (id: string) =>

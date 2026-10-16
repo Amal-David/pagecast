@@ -350,3 +350,11 @@ privately via [SECURITY.md](SECURITY.md).
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+### Browser-native WebMCP publishing
+
+The local dashboard offers an opt-in WebMCP preview on supported Chrome builds.
+Agents can check publication capabilities and submit new HTML or Markdown; each
+publication requires source review and explicit confirmation before upload.
+The workflow reuses Pagecast's existing publisher and does not expose local
+files or paths. See [WebMCP setup, permissions and validation](WEBMCP.md).
