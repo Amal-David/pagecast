@@ -785,7 +785,7 @@ export function createPublicationService(options = {}, dependencies = {}) {
     await fs.writeFile(path.join(rootDir, "404.html"), "<!doctype html><title>Not found</title>", "utf8");
     await fs.writeFile(
       path.join(rootDir, "_headers"),
-      "/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n",
+      "/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n  X-Robots-Tag: noindex, nofollow\n",
       "utf8"
     );
 

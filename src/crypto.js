@@ -282,6 +282,14 @@ function gone() {
 }
 
 export async function onRequest(context) {
+  // Pages _headers rules do not apply to responses served by Functions.
+  const original = await handleRequest(context);
+  const response = new Response(original.body, original);
+  response.headers.set("X-Robots-Tag", "noindex, nofollow");
+  return response;
+}
+
+async function handleRequest(context) {
   const request = context.request;
   const next = context.next;
   const url = new URL(request.url);
