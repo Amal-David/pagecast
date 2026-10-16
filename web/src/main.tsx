@@ -1,3 +1,4 @@
+import { mountWebMcpControl } from "@/lib/webmcp-dashboard";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { MotionConfig } from "framer-motion";
@@ -27,3 +28,5 @@ createRoot(document.getElementById("root")!).render(
     </MotionConfig>
   </StrictMode>
 );
+
+mountWebMcpControl(() => queryClient.invalidateQueries());
