@@ -1,0 +1,7 @@
+[mcp_servers.pagecast]
+command = "node"
+args = ["/ABSOLUTE/PATH/pagecast/src/ai/stdio.js", "--data-dir", "/ABSOLUTE/PATH/pagecast-home"]
+
+[mcp_servers.pagecast.env]
+DO_NOT_TRACK = "1"
+PAGECAST_TELEMETRY = "0"

@@ -798,12 +798,18 @@ test("headless setup routes through the live config owner instead of opening a s
     }
     return { code: 0, output: "" };
   });
+  const migrationRequests = [];
   const runtime = await startServers({
     adminPort: 0,
     publicPort: 0,
     dataDir,
     staticDir: path.resolve("public"),
-    cloudflareAuthSpawnImpl: runtimeAuthSpawn
+    cloudflareAuthSpawnImpl: runtimeAuthSpawn,
+    // No request is sent to the synthetic URL returned by fake Wrangler.
+    fetchImpl: async (input, init = {}) => {
+      migrationRequests.push({ url: String(input), method: init.method, body: init.body });
+      return new Response(JSON.stringify({ migrated: 0 }), { headers: { "Content-Type": "application/json" } });
+    }
   });
 
   try {
@@ -896,6 +902,13 @@ test("headless setup routes through the live config owner instead of opening a s
       }
     });
     assert.equal(oneShotFeedbackSpawns, 0);
+    assert.equal(migrationRequests.length, 1);
+    assert.equal(migrationRequests[0].url, "https://pagecast-feedback.live-owner.workers.dev/api/v1/analytics/migrate");
+    assert.equal(migrationRequests[0].method, "POST");
+    assert.deepEqual(JSON.parse(migrationRequests[0].body), {
+      token: runtime.configStore.get().feedback.statsToken,
+      publications: []
+    });
     assert.equal(
       feedback.feedback.url,
       "https://pagecast-feedback.live-owner.workers.dev"

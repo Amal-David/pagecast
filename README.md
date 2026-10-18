@@ -194,6 +194,15 @@ cp plugin/skills/publish-report/SKILL.md /path/to/your-agent/skills/publish-repo
 
 More detail in [plugin/README.md](plugin/README.md).
 
+## AI SDKs and cross-platform integrations
+
+New source integrations provide OpenAI Responses and Anthropic Messages tool
+adapters, Vercel AI SDK tools, a portable read-only library plugin, and MCP client
+configurations for Codex, Claude, Cursor, VS Code and Gemini CLI. The shared
+core is read-only by default; application-hosted publishing and revocation need
+explicit host approval. See the [integration guide](integrations/README.md) for
+installation, verified tests, hosted-service limits, and release gates.
+
 ## Use Through MCP
 
 Pagecast can run as a Model Context Protocol server, so MCP-capable agents can
@@ -224,8 +233,9 @@ intentionally isolated MCP profile.
 | `revoke_publication` | Take a published token offline and redeploy. | Requires `confirm: true` because it changes a live URL. |
 
 The MCP server is separate from the admin API, which stays loopback-only — do
-not expose the admin port to a VPN or shared network. This release supports
-local stdio MCP only; an org-hosted HTTP endpoint would need its own auth,
+not expose the admin port to a VPN or shared network. The publishing command supports
+local stdio MCP only; the new AI integration provides a separate read-only
+loopback HTTP bridge. An org-hosted endpoint needs its own auth,
 audit, and threat model, and a VPN would gate who can invoke Pagecast, not who
 can reach the published URL. Use password protection or your organization's
 access layer for restricted recipients.

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "pagecast": {
+      "type": "stdio",
+      "command": "pagecast-ai-mcp",
+      "args": ["--data-dir", "/ABSOLUTE/PATH/pagecast-home"],
+      "env": { "DO_NOT_TRACK": "1", "PAGECAST_TELEMETRY": "0" }
+    }
+  }
+}

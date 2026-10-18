@@ -1,0 +1,7 @@
+{
+  "name": "pagecast-library",
+  "version": "0.7.1",
+  "description": "Inspect your local Pagecast reports and share links through read-only MCP tools.",
+  "author": { "name": "Pagecast" },
+  "license": "MIT"
+}

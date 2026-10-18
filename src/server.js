@@ -8245,7 +8245,10 @@ export async function publishReportSnapshot(options = {}) {
     callerEnv.CODEX_THREAD_ID ||
     callerEnv.CLAUDE_SESSION_ID ||
     "";
-  if (options.routeToDaemon !== false) {
+  // Restricted AI publishing must retain the checks below under this writer's
+  // lease. The older daemon route can provision on retry, so fail closed on an
+  // occupied Home instead of silently falling back to that broader contract.
+  if (options.routeToDaemon !== false && options.configuredTargetOnly !== true) {
     const routed = await tryInvokeLiveCommand(
       dataDir,
       "publish_report",
@@ -8290,6 +8293,7 @@ async function publishReportSnapshotOneShot({
   newLink = false,
   update = "",
   nonInteractive = false,
+  configuredTargetOnly = false,
   env = process.env,
   dataDir = path.join(PROJECT_ROOT, ".pagecast"),
   cloudflareAuthSpawnImpl = spawn,
@@ -8299,6 +8303,16 @@ async function publishReportSnapshotOneShot({
 } = {}) {
   if (!reportPath) {
     throw appError("Provide a path to an HTML report to publish.", 400);
+  }
+
+  // This gate runs inside the writer lease and before store/config mutations,
+  // credential checks, browser login, or project discovery/provisioning.
+  if (configuredTargetOnly) {
+    const existingConfig = createConfigStore({ dataDir });
+    await existingConfig.init({ persist: false });
+    if (!targetManagementState(existingConfig).managed) {
+      throw appError("AI publishing requires an already configured and adopted Pages target. Configure it interactively first.", 409);
+    }
   }
 
   const store = createReportStore({ dataDir });
@@ -8316,7 +8330,7 @@ async function publishReportSnapshotOneShot({
   if (!credential.tokenConfigured) {
     let session = await cloudflareAuth.refreshSession();
     if (!session.loggedIn) {
-      if (nonInteractive || String(env.CI || "").trim()) {
+      if (configuredTargetOnly || nonInteractive || String(env.CI || "").trim()) {
         throw appError(
           "Not signed in to Cloudflare. Run `npx pagecast` interactively to connect, then retry.",
           401
@@ -8330,12 +8344,14 @@ async function publishReportSnapshotOneShot({
     }
   }
 
-  const target = await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
-  if (target.cloudflare.needsAccountChoice) {
-    throw appError(
-      "Multiple Cloudflare accounts found. Run `npx pagecast` to choose one, then retry.",
-      409
-    );
+  if (!configuredTargetOnly) {
+    const target = await ensureCloudflarePagesTarget({ cloudflareAuth, configStore });
+    if (target.cloudflare.needsAccountChoice) {
+      throw appError(
+        "Multiple Cloudflare accounts found. Run `npx pagecast` to choose one, then retry.",
+        409
+      );
+    }
   }
 
   const publishMode = normalizePublishMode({ mode, newLink, update });
@@ -8350,6 +8366,10 @@ async function publishReportSnapshotOneShot({
     ...publishMode,
     contextKey: publicationContext.contextKey
   });
+  if (configuredTargetOnly && existing &&
+      !projectRefEquals(pagesConfigForPublication(existing.publication, configStore.get().pages), configStore.get().pages)) {
+    throw appError("AI publishing cannot update a link belonging to a different Pages target.", 409);
+  }
   const report = existing
     ? await store.replaceSourceWithPath(existing.report.id, reportPath)
     : await store.addPath(reportPath);

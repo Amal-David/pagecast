@@ -291,6 +291,14 @@ test("a failed deploy on a protected publish revokes the dangling snapshot", asy
   await fs.mkdir(reportDir, { recursive: true });
   await fs.writeFile(path.join(reportDir, "report.html"), "<h1>Secret</h1>");
 
+  // Adopt the synthetic target before testing deployment rollback. Otherwise
+  // ownership probing contacts the fake Pages host and can fail before deploy.
+  const configStore = createConfigStore({ dataDir });
+  await configStore.init();
+  await configStore.updatePages({
+    accountId: "abcdef0123456789abcdef0123456789",
+    adoptExisting: true
+  });
   const { authSpawn } = headlessFakes();
   function failingDeploy() {
     const child = new EventEmitter();
@@ -313,7 +321,8 @@ test("a failed deploy on a protected publish revokes the dangling snapshot", asy
       pagesDeploySpawnImpl: failingDeploy,
       cloudflareListTimeoutMs: 1000,
       pagesDeployTimeoutMs: 1000
-    })
+    }),
+    /simulated edge error/
   );
 
   const store = createReportStore({ dataDir });

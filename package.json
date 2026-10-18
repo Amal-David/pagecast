@@ -27,12 +27,16 @@
     "agent-skill"
   ],
   "bin": {
-    "pagecast": "src/cli.js"
+    "pagecast": "src/cli.js",
+    "pagecast-ai-mcp": "src/ai/stdio.js"
   },
   "exports": {
     ".": "./src/index.js",
     "./server": "./src/server.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./ai": "./src/ai/index.js",
+    "./ai/mcp": "./src/ai/mcp.js",
+    "./ai/http": "./src/ai/http.js"
   },
   "files": [
     "ARCHITECTURE.md",
@@ -47,23 +51,32 @@
     "plugin/",
     "feedback/",
     ".codex/skills/publish-report/",
-    "llms.txt"
+    "llms.txt",
+    "integrations/"
   ],
   "scripts": {
     "start": "node src/cli.js",
     "build": "npm run build:native && pnpm -C web install --frozen-lockfile --ignore-scripts && pnpm -C web run build",
     "build:native": "node scripts/build-staging-helper.mjs",
     "pretest": "node scripts/build-staging-helper.mjs --host",
-    "check": "node --check src/index.js && node --check src/server.js && node --check src/publication-service.js && node --check src/staging-remove.js && node --check scripts/build-staging-helper.mjs && node --check scripts/smoke-staging-helper.mjs && node --check src/og-card.js && node --check src/cli.js && node --check src/mcp.js && node --check src/pagecast-home.js && node --check src/publication-context.js && node --check src/local-system.js && node --check src/markdown.js && node --check src/nameGenerator.js && node --check src/admin-security.js && node --check src/app-error.js && node --check src/wrangler-gateway.js && node --check src/path-token.js && node --check src/project-ref.js && node --check src/state-coordinator.js && node --check src/platform.js && node --check src/link-policy.js && node --check src/tunnel.js && node --check plugin/hooks/lib-path-token.mjs && node --check plugin/hooks/detect-report.mjs && node --check plugin/hooks/detect-artifacts-on-stop.mjs",
+    "check": "node --check src/index.js && node --check src/server.js && node --check src/publication-service.js && node --check src/staging-remove.js && node --check scripts/build-staging-helper.mjs && node --check scripts/smoke-staging-helper.mjs && node --check src/og-card.js && node --check src/cli.js && node --check src/mcp.js && node --check src/pagecast-home.js && node --check src/publication-context.js && node --check src/local-system.js && node --check src/markdown.js && node --check src/nameGenerator.js && node --check src/admin-security.js && node --check src/app-error.js && node --check src/wrangler-gateway.js && node --check src/path-token.js && node --check src/project-ref.js && node --check src/state-coordinator.js && node --check src/platform.js && node --check src/link-policy.js && node --check src/tunnel.js && node --check plugin/hooks/lib-path-token.mjs && node --check plugin/hooks/detect-report.mjs && node --check plugin/hooks/detect-artifacts-on-stop.mjs && npm run check:ai",
     "test": "node --test",
     "prepack": "npm run build && npm run check && npm test",
-    "prepublishOnly": "npm run check && npm test"
+    "prepublishOnly": "npm run check && npm test",
+    "check:ai": "node --check src/ai/core.js && node --check src/ai/index.js && node --check src/ai/mcp.js && node --check src/ai/http.js && node --check src/ai/stdio.js && node --check integrations/examples/openai.mjs && node --check integrations/examples/anthropic.mjs && node --check integrations/examples/vercel.mjs && node --check integrations/examples/vercel-remote.mjs && node --check integrations/examples/local-http.mjs && node --check scripts/offline-fetch-guard.mjs && node --check src/ai/workflow.js",
+    "test:ai": "node --test test/ai-*.test.js"
   },
   "engines": {
     "node": ">=20.19.0"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@resvg/resvg-wasm": "2.6.2",
     "satori": "0.26.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "0.135.0",
+    "ai": "7.0.142",
+    "openai": "7.34.0"
   }
 }

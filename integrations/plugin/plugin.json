@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "pagecast-library",
+  "version": "0.7.1",
+  "description": "Inspect your local Pagecast connection and published report library through a bounded read-only MCP connector.",
+  "author": { "name": "Pagecast" },
+  "repository": "https://github.com/Amal-David/pagecast",
+  "license": "MIT",
+  "keywords": ["pagecast", "reports", "mcp"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Pagecast Library",
+        "shortDescription": "Find your Pagecast reports and links",
+        "capabilities": ["Read"],
+        "defaultPrompt": ["Show my Pagecast reports and share links."]
+      }
+    }
+  }
+}

@@ -75,14 +75,23 @@ function fakeWranglerSpawn(command, args) {
 }
 
 async function startTestRuntime(dataDir) {
-  return startServers({
+  const fixtureUpstreamCalls = [];
+  const runtime = await startServers({
     adminPort: 0,
     publicPort: 0,
     dataDir,
     staticDir: path.resolve("public"),
     cloudflareAuthSpawnImpl: fakeWranglerSpawn,
-    cloudflareListTimeoutMs: 1000
+    cloudflareListTimeoutMs: 1000,
+    // Wrangler is a fixture; its reported Worker URL must never receive a real
+    // analytics migration. Keep this dependency local and inspect the payload.
+    fetchImpl: async (input, init = {}) => {
+      fixtureUpstreamCalls.push({ url: String(input), method: init.method, body: init.body });
+      return new Response(JSON.stringify({ migrated: 0 }), { headers: { "Content-Type": "application/json" } });
+    }
   });
+  runtime.fixtureUpstreamCalls = fixtureUpstreamCalls;
+  return runtime;
 }
 
 async function addPathReport(runtime, reportPath) {
@@ -535,6 +544,11 @@ test("feedback API and headless DTOs never serialize internal secrets", async ()
       });
       assert.equal(apiResponse.status, 200);
       assertSecretFreeDto(await apiResponse.json(), secretValues);
+      assert.deepEqual(runtime.fixtureUpstreamCalls, [{
+        url: "https://pagecast-feedback.example.workers.dev/api/v1/analytics/migrate",
+        method: "POST",
+        body: JSON.stringify({ token: "seed-feedback-stats-token", publications: [] })
+      }]);
     } finally {
       await runtime.close();
     }
