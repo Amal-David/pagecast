@@ -213,10 +213,18 @@ test("one recovery leader cannot delete a replacement created by a poised conten
   await contenderReady.promise;
 
   let staleUnlinks = 0;
-  const recoveryOptions = (pid) => ({
+  const firstSettled = deferred();
+  const secondSettled = deferred();
+  const recoveryOptions = (pid, rivalSettled) => ({
     pid,
     isPidAlive: async (candidatePid) => candidatePid !== stalePid,
     async onTransition(stage) {
+      if (stage === "before-stale-lease-cleanup") {
+        // A rival that first reads the lease after the unlink finds it free
+        // and may legitimately take it before the contender. Hold the leader
+        // until the rival has run into the leader's live claim.
+        await rivalSettled.promise;
+      }
       if (stage === "stale-lease-unlinked") {
         staleUnlinks += 1;
         staleLeaseUnlinked.resolve();
@@ -224,11 +232,11 @@ test("one recovery leader cannot delete a replacement created by a poised conten
       }
     }
   });
-  const first = new WorkspaceLease(dataDir, recoveryOptions(42102));
-  const second = new WorkspaceLease(dataDir, recoveryOptions(42103));
+  const first = new WorkspaceLease(dataDir, recoveryOptions(42102, secondSettled));
+  const second = new WorkspaceLease(dataDir, recoveryOptions(42103, firstSettled));
   const recoveryOutcomes = Promise.allSettled([
-    first.acquire({ capability: "first-recoverer" }),
-    second.acquire({ capability: "second-recoverer" })
+    first.acquire({ capability: "first-recoverer" }).finally(firstSettled.resolve),
+    second.acquire({ capability: "second-recoverer" }).finally(secondSettled.resolve)
   ]);
 
   const descriptor = await contenderAttempt;
@@ -253,6 +261,48 @@ test("one recovery leader cannot delete a replacement created by a poised conten
   );
 
   await contender.release();
+});
+
+test("a recoverer that reads a lease after its replacement leaves no recovery claims", { timeout: 5000 }, async () => {
+  const dataDir = await makeTempDir();
+  const stalePid = 42151;
+  const crashed = new WorkspaceLease(dataDir, {
+    pid: stalePid,
+    isPidAlive: async () => true
+  });
+  await crashed.acquire({ capability: "crashed-capability" });
+
+  const lateReadStaleLease = deferred();
+  const leaseReplaced = deferred();
+  let latePaused = false;
+  const late = new WorkspaceLease(dataDir, {
+    pid: 42152,
+    async isPidAlive(pid) {
+      if (pid === stalePid && !latePaused) {
+        latePaused = true;
+        lateReadStaleLease.resolve();
+        await leaseReplaced.promise;
+      }
+      return pid !== stalePid;
+    }
+  });
+  const lateAttempt = late.acquire({ capability: "late-recoverer" });
+  await lateReadStaleLease.promise;
+
+  const recovered = new WorkspaceLease(dataDir, {
+    pid: 42153,
+    isPidAlive: async (pid) => pid !== stalePid
+  });
+  const descriptor = await recovered.acquire({ capability: "recovered-capability" });
+  leaseReplaced.resolve();
+
+  await assert.rejects(lateAttempt, { code: "PAGECAST_WORKSPACE_BUSY" });
+  assert.deepEqual(await readRuntimeDescriptor(dataDir), descriptor);
+  assert.deepEqual(
+    (await fs.readdir(dataDir)).filter((name) => name.includes(".recovery.")),
+    []
+  );
+  await recovered.release();
 });
 
 test("a dead recovery leader has exactly one append-only takeover", async () => {
