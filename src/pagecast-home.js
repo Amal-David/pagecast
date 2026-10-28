@@ -184,12 +184,16 @@ async function ensureWorkspaceMetadata(workspaceDataDir, cwd) {
 async function workspaceMarkerGone(entry) {
   try {
     const metadataPath = path.join(entry.legacyDataDir, WORKSPACE_METADATA_FILE);
-    return JSON.parse(await fs.readFile(metadataPath, "utf8"))?.id !== entry.id;
+    const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return false;
+    return metadata.id !== entry.id;
   } catch (error) {
     return error?.code === "ENOENT" || error?.code === "ENOTDIR";
   }
 }
 
+// Returns a warning instead of throwing: leftover staging must never block the
+// command that triggered Home initialization.
 async function removeLegacyStaging(workspaceDataDir, entry) {
   if (entry.mode !== "home") return;
   const targets = LEGACY_STAGING_DIRECTORIES.map((name) => path.join(workspaceDataDir, name));
@@ -204,7 +208,7 @@ async function removeLegacyStaging(workspaceDataDir, entry) {
     if (error?.code === "PAGECAST_WORKSPACE_BUSY" || error?.code === "PAGECAST_LEASE_CONTENDED") {
       return;
     }
-    throw error;
+    return `Pagecast could not lock legacy staging in ${workspaceDataDir}: ${error.message}`;
   }
   try {
     // Journal counts in the registry date from import; a legacy process may
@@ -217,6 +221,8 @@ async function removeLegacyStaging(workspaceDataDir, entry) {
     for (const target of present) {
       await fs.rm(target, { recursive: true, force: true });
     }
+  } catch (error) {
+    return `Pagecast could not remove legacy staging in ${workspaceDataDir}: ${error.message}`;
   } finally {
     await lease.release();
   }
@@ -269,13 +275,14 @@ async function initializeUnderLease({ dataDir, workspaceDataDir, cwd }) {
       registered.legacyDataDir = workspaceDataDir;
       await atomicWriteJson(registryPath, registry);
     }
-    await removeLegacyStaging(workspaceDataDir, registered);
+    const legacyStagingError = await removeLegacyStaging(workspaceDataDir, registered);
     return {
       dataDir,
       workspaceDataDir,
       workspaceId: workspace.id,
       imported: false,
-      mode: registered.mode || "home"
+      mode: registered.mode || "home",
+      ...(legacyStagingError && { legacyStagingError })
     };
   }
 
@@ -314,13 +321,14 @@ async function initializeUnderLease({ dataDir, workspaceDataDir, cwd }) {
   registry.workspaces = registry.workspaces.filter((_, index) => !gone[index]);
   registry.workspaces.push(entry);
   await atomicWriteJson(registryPath, registry);
-  await removeLegacyStaging(workspaceDataDir, entry);
+  const legacyStagingError = await removeLegacyStaging(workspaceDataDir, entry);
   return {
     dataDir,
     workspaceDataDir,
     workspaceId: workspace.id,
     imported: true,
-    mode
+    mode,
+    ...(legacyStagingError && { legacyStagingError })
   };
 }
 

@@ -297,6 +297,28 @@ test("legacy staging stays while the legacy workspace has unfinished journals", 
   await fs.rm(root, { recursive: true, force: true });
 });
 
+test(
+  "a legacy staging tree that cannot be removed warns instead of failing Home initialization",
+  { skip: process.platform === "win32" || process.getuid?.() === 0 },
+  async () => {
+    const root = await tempRoot();
+    const homeDir = path.join(root, "user");
+    const cwd = path.join(root, "workspace");
+    const legacy = await writeLegacyWorkspace(cwd);
+    const locked = path.join(legacy, "pages-site", "p");
+    await fs.chmod(locked, 0o500);
+    try {
+      const result = await initializePagecastHome({ homeDir, cwd });
+      assert.equal(result.imported, true);
+      assert.match(result.legacyStagingError, /could not remove legacy staging/);
+      assert.equal(await pathExists(path.join(locked, "legacy-slug")), true);
+    } finally {
+      await fs.chmod(locked, 0o700);
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
+);
+
 test("the workspace registry follows a moved workspace and drops deleted ones on the next registration", async () => {
   const root = await tempRoot();
   const homeDir = path.join(root, "user");
@@ -304,9 +326,15 @@ test("the workspace registry follows a moved workspace and drops deleted ones on
   const deleted = path.join(root, "deleted");
   const moved = path.join(root, "moved");
   const fresh = path.join(root, "fresh");
-  for (const cwd of [kept, deleted, moved, fresh]) await fs.mkdir(cwd, { recursive: true });
+  const oddMarker = path.join(root, "odd-marker");
+  for (const cwd of [kept, deleted, moved, fresh, oddMarker]) {
+    await fs.mkdir(cwd, { recursive: true });
+  }
 
   const keptResult = await initializePagecastHome({ homeDir, cwd: kept });
+  const oddResult = await initializePagecastHome({ homeDir, cwd: oddMarker });
+  // Valid JSON with no object root is unreadable, not proof the workspace is gone.
+  await fs.writeFile(path.join(oddMarker, ".pagecast", "workspace.json"), "null");
   await initializePagecastHome({ homeDir, cwd: deleted });
   const movedResult = await initializePagecastHome({ homeDir, cwd: moved });
   await fs.rm(deleted, { recursive: true, force: true });
@@ -323,6 +351,7 @@ test("the workspace registry follows a moved workspace and drops deleted ones on
     registry.workspaces.map((entry) => [entry.id, entry.root, entry.legacyDataDir]).sort(),
     [
       [keptResult.workspaceId, kept, path.join(kept, ".pagecast")],
+      [oddResult.workspaceId, oddMarker, path.join(oddMarker, ".pagecast")],
       [movedResult.workspaceId, movedTo, path.join(movedTo, ".pagecast")],
       [freshResult.workspaceId, fresh, path.join(fresh, ".pagecast")]
     ].sort()
