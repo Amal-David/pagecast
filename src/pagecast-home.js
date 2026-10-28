@@ -12,6 +12,10 @@ const WORKSPACE_REGISTRY_FILE = "workspaces.json";
 const REPORT_STATE_FILE = "reports.json";
 const CONFIG_FILE = "config.json";
 const PUBLISHER_OWNER_FILE = "publisher-owner.json";
+// Home stages every publish under its own data directory, so these per-workspace
+// trees are never read after import. Folders that can hold an imported report's
+// content (working, imports, uploads, mcp-content, goal-src) are not listed.
+const LEGACY_STAGING_DIRECTORIES = ["pages-site", "pages-deploy", "feedback-deploy"];
 
 function nonEmpty(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
@@ -175,6 +179,55 @@ async function ensureWorkspaceMetadata(workspaceDataDir, cwd) {
   return metadata;
 }
 
+// An entry is dead once its workspace marker is gone or now names another
+// workspace. Unreadable markers are kept rather than guessed about.
+async function workspaceMarkerGone(entry) {
+  try {
+    const metadataPath = path.join(entry.legacyDataDir, WORKSPACE_METADATA_FILE);
+    const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return false;
+    return metadata.id !== entry.id;
+  } catch (error) {
+    return error?.code === "ENOENT" || error?.code === "ENOTDIR";
+  }
+}
+
+// Returns a warning instead of throwing: leftover staging must never block the
+// command that triggered Home initialization.
+async function removeLegacyStaging(workspaceDataDir, entry) {
+  if (entry.mode !== "home") return;
+  const targets = LEGACY_STAGING_DIRECTORIES.map((name) => path.join(workspaceDataDir, name));
+  const found = await Promise.all(targets.map(exists));
+  const present = targets.filter((_, index) => found[index]);
+  if (present.length === 0) return;
+  // A pre-Home daemon may still own this folder; retry on a later run.
+  const lease = new WorkspaceLease(workspaceDataDir);
+  try {
+    await lease.acquire({ capability: randomUUID() });
+  } catch (error) {
+    if (error?.code === "PAGECAST_WORKSPACE_BUSY" || error?.code === "PAGECAST_LEASE_CONTENDED") {
+      return;
+    }
+    return `Pagecast could not lock legacy staging in ${workspaceDataDir}: ${error.message}`;
+  }
+  try {
+    // Journal counts in the registry date from import; a legacy process may
+    // have started an operation since, so check the journals it owns now.
+    const journals = await readJson(
+      path.join(workspaceDataDir, REPORT_STATE_FILE),
+      emptyReportState()
+    ).catch(() => null);
+    if (!journals || journals.operations?.length || journals.pendingDeletions?.length) return;
+    for (const target of present) {
+      await fs.rm(target, { recursive: true, force: true });
+    }
+  } catch (error) {
+    return `Pagecast could not remove legacy staging in ${workspaceDataDir}: ${error.message}`;
+  } finally {
+    await lease.release();
+  }
+}
+
 async function initializeUnderLease({ dataDir, workspaceDataDir, cwd }) {
   await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
   const workspace = await ensureWorkspaceMetadata(workspaceDataDir, cwd);
@@ -216,12 +269,20 @@ async function initializeUnderLease({ dataDir, workspaceDataDir, cwd }) {
 
   const registered = registry.workspaces.find((entry) => entry.id === workspace.id);
   if (registered) {
+    // A moved workspace keeps its marker id; follow it so pruning keeps it.
+    if (registered.root !== cwd || registered.legacyDataDir !== workspaceDataDir) {
+      registered.root = cwd;
+      registered.legacyDataDir = workspaceDataDir;
+      await atomicWriteJson(registryPath, registry);
+    }
+    const legacyStagingError = await removeLegacyStaging(workspaceDataDir, registered);
     return {
       dataDir,
       workspaceDataDir,
       workspaceId: workspace.id,
       imported: false,
-      mode: registered.mode || "home"
+      mode: registered.mode || "home",
+      ...(legacyStagingError && { legacyStagingError })
     };
   }
 
@@ -240,9 +301,9 @@ async function initializeUnderLease({ dataDir, workspaceDataDir, cwd }) {
   await atomicWriteJson(homeReportsPath, merged);
 
   const now = new Date().toISOString();
-  registry.workspaces.push({
+  const entry = {
     id: workspace.id,
-    root: workspace.root,
+    root: cwd,
     legacyDataDir: workspaceDataDir,
     mode,
     importedAt: now,
@@ -253,14 +314,21 @@ async function initializeUnderLease({ dataDir, workspaceDataDir, cwd }) {
     quarantinedDeletions: Array.isArray(legacyState.pendingDeletions)
       ? legacyState.pendingDeletions.length
       : 0
-  });
+  };
+  // Prune only when the registry is rewritten anyway, so already-registered
+  // runs never read other workspaces' markers while holding the Home lease.
+  const gone = await Promise.all(registry.workspaces.map(workspaceMarkerGone));
+  registry.workspaces = registry.workspaces.filter((_, index) => !gone[index]);
+  registry.workspaces.push(entry);
   await atomicWriteJson(registryPath, registry);
+  const legacyStagingError = await removeLegacyStaging(workspaceDataDir, entry);
   return {
     dataDir,
     workspaceDataDir,
     workspaceId: workspace.id,
     imported: true,
-    mode
+    mode,
+    ...(legacyStagingError && { legacyStagingError })
   };
 }
 

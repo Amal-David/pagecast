@@ -12,11 +12,21 @@ async function makeTempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "pagecast-plugin-hooks-"));
 }
 
+// The CLI registers every cwd it runs in with the per-user Home, so children
+// get a throwaway HOME instead of the developer's real ~/.pagecast.
+const isolatedHome = await fs.mkdtemp(path.join(os.tmpdir(), "pagecast-plugin-hooks-home-"));
+test.after(() => fs.rm(isolatedHome, { recursive: true, force: true }));
+
 function runNode(script, { args = [], cwd, input }) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(repoRoot, script), ...args], {
       cwd,
-      env: { ...process.env, PAGECAST_TELEMETRY: "0" },
+      env: {
+        ...process.env,
+        HOME: isolatedHome,
+        USERPROFILE: isolatedHome,
+        PAGECAST_TELEMETRY: "0"
+      },
       stdio: ["pipe", "pipe", "pipe"]
     });
     let stdout = "";

@@ -1380,6 +1380,9 @@ async function run() {
   }
 
   homeInitialization = await initializeCliHome();
+  if (homeInitialization?.legacyStagingError) {
+    process.stderr.write(`Warning: ${homeInitialization.legacyStagingError}\n`);
+  }
 
   // The telemetry command manages its own state; don't emit an event for it
   // (avoids phoning home on the very command used to opt out).
