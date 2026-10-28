@@ -142,6 +142,13 @@ being reachable. Crypto and security model:
 
 ## Deploy History
 
+Published reports send `X-Robots-Tag: noindex, nofollow` on static files and
+Function responses. This asks supporting search engines to exclude reports;
+it does not make links private. Use password protection for confidential content.
+Re-publish existing sites to apply these headers. Older deployment snapshots
+retain their original headers and must be pruned separately when needed.
+Do not block crawling with `robots.txt` if crawlers need to see `noindex`.
+
 Every publish or re-sync creates an immutable whole-site Cloudflare deployment
 with its own `<hash>.pages.dev` URL. Manage them from the admin UI
 (**Settings → Deploy history**) or the terminal:
