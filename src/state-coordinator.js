@@ -548,16 +548,19 @@ export class WorkspaceLease {
 
     const recovery = await this.#claimStaleRecovery(lease);
     let removed = false;
+    let generationGone = false;
     let operationError = null;
     try {
       if (recovery.publicationError) {
         throw recovery.publicationError;
       }
       const current = await this.#readLease();
+      // Lease IDs are never reused: once this one leaves the lease file, no
+      // contender can recover the generation, so its claims are unreachable.
+      generationGone = current.lease?.leaseId !== lease.leaseId;
       if (
-        !current.lease ||
+        generationGone ||
         current.raw !== originalRaw ||
-        current.lease.leaseId !== lease.leaseId ||
         current.lease.pid !== lease.pid
       ) {
         return false;
@@ -598,7 +601,7 @@ export class WorkspaceLease {
       throw error;
     } finally {
       try {
-        if (removed) {
+        if (removed || generationGone) {
           await Promise.all(
             recovery.traversedPaths.map((claimPath) => fs.rm(claimPath, { force: true }))
           );
