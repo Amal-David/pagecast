@@ -36,6 +36,7 @@
   },
   "files": [
     "ARCHITECTURE.md",
+    "WEBMCP.md",
     "CHANGELOG.md",
     "PASSWORD-PROTECTION.md",
     "PRIVACY.md",

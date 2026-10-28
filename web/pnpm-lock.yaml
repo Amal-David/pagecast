@@ -110,6 +110,9 @@ importers:
       vite:
         specifier: 7.3.5
         version: 7.3.5(jiti@1.21.7)
+      webmcp-types:
+        specifier: 0.1.10
+        version: 0.1.10
 
 packages:
 
@@ -1612,6 +1615,9 @@ packages:
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
 
+  webmcp-types@0.1.10:
+    resolution: {integrity: sha512-U4GQ1RpJ0tqCUt2ALMV9Pnhi+hsy8L31f/Q1v4mLVhW64r5sYhh+2+SjP/Lq4/9jP33vZgNkuRZARJl65A/ZIg==}
+
 snapshots:
 
   '@alloc/quick-lru@5.2.0': {}
@@ -3029,3 +3035,5 @@ snapshots:
   w3c-keyname@2.2.8: {}
 
   yallist@3.1.1: {}
+
+  webmcp-types@0.1.10: {}
