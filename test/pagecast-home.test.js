@@ -208,7 +208,7 @@ async function pathExists(target) {
   return fs.access(target).then(() => true, () => false);
 }
 
-async function writeLegacyWorkspace(cwd, { operations = [] } = {}) {
+async function writeLegacyWorkspace(cwd) {
   const legacy = path.join(cwd, ".pagecast");
   for (const dir of [
     "pages-site/p/legacy-slug",
@@ -234,7 +234,7 @@ async function writeLegacyWorkspace(cwd, { operations = [] } = {}) {
         }
       ],
       redirects: [],
-      operations,
+      operations: [],
       pendingDeletions: []
     })
   );
@@ -268,18 +268,31 @@ test("legacy staging caches are removed once imported, but never under a live le
   await fs.rm(root, { recursive: true, force: true });
 });
 
-test("legacy staging stays when the legacy workspace has journals Home could not adopt", async () => {
+test("legacy staging stays while the legacy workspace has unfinished journals", async () => {
   const root = await tempRoot();
   const homeDir = path.join(root, "user");
   const cwd = path.join(root, "workspace");
-  const legacy = await writeLegacyWorkspace(cwd, {
-    operations: [{ id: "deploy-in-flight", phase: "staged" }]
-  });
+  const legacy = await writeLegacyWorkspace(cwd);
+  const reportsPath = path.join(legacy, "reports.json");
+  const deployDir = path.join(legacy, "pages-deploy", "direct");
 
-  const result = await initializePagecastHome({ homeDir, cwd });
-  assert.equal(result.mode, "home");
-  assert.equal(await pathExists(path.join(legacy, "pages-deploy", "direct")), true);
-  assert.equal(await pathExists(path.join(legacy, "pages-site", "p")), true);
+  // The old daemon defers cleanup at import, then leaves an operation behind.
+  const oldDaemon = new WorkspaceLease(legacy);
+  await oldDaemon.acquire({ capability: "old-daemon-capability", role: "daemon" });
+  const first = await initializePagecastHome({ homeDir, cwd });
+  assert.equal(first.mode, "home");
+  const state = JSON.parse(await fs.readFile(reportsPath, "utf8"));
+  state.operations = [{ id: "deploy-in-flight", phase: "staged" }];
+  await fs.writeFile(reportsPath, JSON.stringify(state));
+  await oldDaemon.release();
+
+  await initializePagecastHome({ homeDir, cwd });
+  assert.equal(await pathExists(deployDir), true, "staging kept while an operation is unfinished");
+
+  state.operations = [];
+  await fs.writeFile(reportsPath, JSON.stringify(state));
+  await initializePagecastHome({ homeDir, cwd });
+  assert.equal(await pathExists(deployDir), false, "staging removed once journals drain");
 
   await fs.rm(root, { recursive: true, force: true });
 });

@@ -191,9 +191,7 @@ async function workspaceMarkerGone(entry) {
 }
 
 async function removeLegacyStaging(workspaceDataDir, entry) {
-  if (entry.mode !== "home" || entry.quarantinedOperations || entry.quarantinedDeletions) {
-    return;
-  }
+  if (entry.mode !== "home") return;
   const targets = LEGACY_STAGING_DIRECTORIES.map((name) => path.join(workspaceDataDir, name));
   const found = await Promise.all(targets.map(exists));
   const present = targets.filter((_, index) => found[index]);
@@ -209,6 +207,13 @@ async function removeLegacyStaging(workspaceDataDir, entry) {
     throw error;
   }
   try {
+    // Journal counts in the registry date from import; a legacy process may
+    // have started an operation since, so check the journals it owns now.
+    const journals = await readJson(
+      path.join(workspaceDataDir, REPORT_STATE_FILE),
+      emptyReportState()
+    ).catch(() => null);
+    if (!journals || journals.operations?.length || journals.pendingDeletions?.length) return;
     for (const target of present) {
       await fs.rm(target, { recursive: true, force: true });
     }
