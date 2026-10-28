@@ -8,6 +8,7 @@ import {
   initializePagecastHome,
   resolvePagecastHomePaths
 } from "../src/pagecast-home.js";
+import { WorkspaceLease } from "../src/state-coordinator.js";
 
 async function tempRoot() {
   return fs.mkdtemp(path.join(os.tmpdir(), "pagecast-home-"));
@@ -199,6 +200,120 @@ test("legacy feedback credentials never cross Cloudflare account boundaries", as
   await initializePagecastHome({ homeDir, cwd: foreignCwd });
   const config = JSON.parse(await fs.readFile(path.join(primary.dataDir, "config.json"), "utf8"));
   assert.equal(config.feedback, null);
+
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+async function pathExists(target) {
+  return fs.access(target).then(() => true, () => false);
+}
+
+async function writeLegacyWorkspace(cwd, { operations = [] } = {}) {
+  const legacy = path.join(cwd, ".pagecast");
+  for (const dir of [
+    "pages-site/p/legacy-slug",
+    "pages-deploy/direct/target/main",
+    "feedback-deploy",
+    "working/report-1",
+    "imports/upload-1"
+  ]) {
+    await fs.mkdir(path.join(legacy, dir), { recursive: true });
+    await fs.writeFile(path.join(legacy, dir, "index.html"), "<h1>legacy</h1>");
+  }
+  await fs.writeFile(
+    path.join(legacy, "reports.json"),
+    JSON.stringify({
+      version: 4,
+      reports: [
+        {
+          id: "report-1",
+          kind: "folder",
+          rootDir: path.join(legacy, "imports", "upload-1"),
+          workingDir: path.join(legacy, "working", "report-1"),
+          publications: []
+        }
+      ],
+      redirects: [],
+      operations,
+      pendingDeletions: []
+    })
+  );
+  return legacy;
+}
+
+test("legacy staging caches are removed once imported, but never under a live legacy owner", async () => {
+  const root = await tempRoot();
+  const homeDir = path.join(root, "user");
+  const cwd = path.join(root, "workspace");
+  const legacy = await writeLegacyWorkspace(cwd);
+  const staging = ["pages-site", "pages-deploy", "feedback-deploy"].map((name) =>
+    path.join(legacy, name)
+  );
+
+  const oldDaemon = new WorkspaceLease(legacy);
+  await oldDaemon.acquire({ capability: "old-daemon-capability", role: "daemon" });
+  const first = await initializePagecastHome({ homeDir, cwd });
+  assert.equal(first.imported, true);
+  for (const dir of staging) assert.equal(await pathExists(dir), true, `${dir} kept while owned`);
+  await oldDaemon.release();
+
+  const rerun = await initializePagecastHome({ homeDir, cwd });
+  assert.equal(rerun.imported, false);
+  for (const dir of staging) assert.equal(await pathExists(dir), false, `${dir} removed`);
+  // Imported reports still serve from their legacy source and working copies.
+  assert.equal(await pathExists(path.join(legacy, "imports", "upload-1", "index.html")), true);
+  assert.equal(await pathExists(path.join(legacy, "working", "report-1", "index.html")), true);
+  assert.equal(await pathExists(path.join(legacy, "workspace.lock")), false);
+
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("legacy staging stays when the legacy workspace has journals Home could not adopt", async () => {
+  const root = await tempRoot();
+  const homeDir = path.join(root, "user");
+  const cwd = path.join(root, "workspace");
+  const legacy = await writeLegacyWorkspace(cwd, {
+    operations: [{ id: "deploy-in-flight", phase: "staged" }]
+  });
+
+  const result = await initializePagecastHome({ homeDir, cwd });
+  assert.equal(result.mode, "home");
+  assert.equal(await pathExists(path.join(legacy, "pages-deploy", "direct")), true);
+  assert.equal(await pathExists(path.join(legacy, "pages-site", "p")), true);
+
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("the workspace registry follows a moved workspace and drops deleted ones on the next registration", async () => {
+  const root = await tempRoot();
+  const homeDir = path.join(root, "user");
+  const kept = path.join(root, "kept");
+  const deleted = path.join(root, "deleted");
+  const moved = path.join(root, "moved");
+  const fresh = path.join(root, "fresh");
+  for (const cwd of [kept, deleted, moved, fresh]) await fs.mkdir(cwd, { recursive: true });
+
+  const keptResult = await initializePagecastHome({ homeDir, cwd: kept });
+  await initializePagecastHome({ homeDir, cwd: deleted });
+  const movedResult = await initializePagecastHome({ homeDir, cwd: moved });
+  await fs.rm(deleted, { recursive: true, force: true });
+  const movedTo = path.join(root, "moved-elsewhere");
+  await fs.rename(moved, movedTo);
+
+  const rerun = await initializePagecastHome({ homeDir, cwd: movedTo });
+  assert.equal(rerun.imported, false);
+  assert.equal(rerun.workspaceId, movedResult.workspaceId);
+  const freshResult = await initializePagecastHome({ homeDir, cwd: fresh });
+
+  const registry = JSON.parse(await fs.readFile(path.join(rerun.dataDir, "workspaces.json"), "utf8"));
+  assert.deepEqual(
+    registry.workspaces.map((entry) => [entry.id, entry.root, entry.legacyDataDir]).sort(),
+    [
+      [keptResult.workspaceId, kept, path.join(kept, ".pagecast")],
+      [movedResult.workspaceId, movedTo, path.join(movedTo, ".pagecast")],
+      [freshResult.workspaceId, fresh, path.join(fresh, ".pagecast")]
+    ].sort()
+  );
 
   await fs.rm(root, { recursive: true, force: true });
 });
